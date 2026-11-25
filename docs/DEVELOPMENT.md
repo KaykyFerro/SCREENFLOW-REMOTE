@@ -6,12 +6,18 @@
 - .NET 10 SDK
 - Visual Studio 2022 or VS Code with C# tooling
 
-## Build and run
+## Build and run from source
 
     dotnet restore ScreenFlowRemote.sln
     dotnet build ScreenFlowRemote.sln --configuration Release
     dotnet test ScreenFlowRemote.sln --configuration Release
     dotnet run --project src/ScreenFlow.Remote/ScreenFlow.Remote.csproj
+
+## Publish locally
+
+    dotnet publish src/ScreenFlow.Remote/ScreenFlow.Remote.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/publish
+
+The repository workflow also runs Inno Setup to produce a per-user Windows installer. A user installing the self-contained distribution does not need to separately install the .NET runtime.
 
 ## LAN MVP usage
 
@@ -36,4 +42,4 @@ The first usable LAN path is implemented with Windows GDI capture, JPEG frames a
 4. Replace LAN TCP frame transport with WebRTC media and signaling.
 5. Add STUN/TURN and external-network tests.
 6. Add real telemetry and adaptive quality logic.
-7. Add audio, diagnostics, installer and security review.
+7. Add audio, diagnostics, security review and remote input authorization.
