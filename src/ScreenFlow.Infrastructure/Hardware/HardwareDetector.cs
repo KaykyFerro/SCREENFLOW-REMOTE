@@ -25,7 +25,8 @@ public static unsafe class HardwareDetector
         ("av1_qsv", VideoCodec.Av1, EncoderVendor.Intel),
         ("hevc_qsv", VideoCodec.Hevc, EncoderVendor.Intel),
         ("h264_qsv", VideoCodec.H264, EncoderVendor.Intel),
-        ("libx264", VideoCodec.H264, EncoderVendor.Software),
+        ("libx264", VideoCodec.H264, EncoderVendor.Software),      // só existe em builds GPL do FFmpeg
+        ("libopenh264", VideoCodec.H264, EncoderVendor.Software),  // reserva por software na build LGPL
     ];
 
     // GUIDs de perfis D3D11 de decodificação (d3d11.h / dxva.h)
@@ -85,6 +86,7 @@ public static unsafe class HardwareDetector
         if (!FFmpegLoader.EnsureLoaded()) return list;
         foreach (var (name, codec, vendor) in Candidates)
         {
+            if (vendor == EncoderVendor.Software && list.Any(e => !e.Hardware)) continue; // um software basta
             if (TryOpenEncoder(name))
             {
                 var max = codec == VideoCodec.H264 ? 4096 : 8192;
@@ -106,7 +108,7 @@ public static unsafe class HardwareDetector
             context->height = 720;
             context->time_base = new AVRational { num = 1, den = 60 };
             context->framerate = new AVRational { num = 60, den = 1 };
-            context->pix_fmt = AVPixelFormat.AV_PIX_FMT_NV12;
+            context->pix_fmt = Media.VideoEncoder.CpuPixelFormat(name);
             context->bit_rate = 5_000_000;
             context->max_b_frames = 0;
             return ffmpeg.avcodec_open2(context, codec, null) >= 0;

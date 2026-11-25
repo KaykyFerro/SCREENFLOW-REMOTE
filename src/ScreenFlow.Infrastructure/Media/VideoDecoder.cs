@@ -172,13 +172,17 @@ public sealed unsafe class VideoDecoder : IDisposable
         if (buffer is null || buffer.Width != width || buffer.Height != height)
             buffer = _buffers[_bufferIndex] = new DecodedFrame { Width = width, Height = height, Stride = stride, Pixels = GC.AllocateUninitializedArray<byte>(stride * height, pinned: true) };
 
-        fixed (byte* destination = buffer.Pixels)
+        // O lock evita que a tela copie um buffer enquanto ele é reescrito (triple buffering).
+        lock (buffer)
         {
-            var planes = new byte_ptrArray4 { [0] = destination };
-            var strides = new int_array4 { [0] = stride };
-            ffmpeg.sws_scale(_scaler, source->data, source->linesize, 0, height, planes, strides);
+            fixed (byte* destination = buffer.Pixels)
+            {
+                var planes = new byte_ptrArray4 { [0] = destination };
+                var strides = new int_array4 { [0] = stride };
+                ffmpeg.sws_scale(_scaler, source->data, source->linesize, 0, height, planes, strides);
+            }
+            buffer.TimestampUs = timestampUs;
         }
-        buffer.TimestampUs = timestampUs;
         return buffer;
     }
 

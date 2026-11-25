@@ -5,11 +5,11 @@ using ScreenFlow.Core.Media;
 
 namespace ScreenFlow.Core.Settings;
 
-public enum ThemeMode { Dark, Light }
+public enum AppTheme { Dark, Light }
 
 public sealed class AppSettings
 {
-    public ThemeMode Theme { get; set; } = ThemeMode.Dark;
+    public AppTheme Theme { get; set; } = AppTheme.Dark;
     public string DeviceName { get; set; } = Environment.MachineName;
 
     // Rede

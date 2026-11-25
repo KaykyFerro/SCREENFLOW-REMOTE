@@ -48,7 +48,7 @@ public static class AutoConfigurator
         if (encoder is null)
         {
             encoder = new EncoderInfo("libx264", VideoCodec.H264, EncoderVendor.Software, false, 1920, 1080);
-            notes.Add("Nenhum encoder de vídeo encontrado. Usando x264 por software como último recurso.");
+            notes.Add("Nenhum encoder de vídeo encontrado. Confira se a pasta \"ffmpeg\" está junto do ScreenFlow.exe.");
         }
         if (!encoder.Hardware)
             notes.Add("Sem encoder por hardware: 4K a 165 FPS não vai rodar. O perfil foi limitado a 1080p 60 FPS.");

@@ -52,6 +52,10 @@ public sealed unsafe class VideoEncoder : IDisposable
         Log.Info($"Encoder {settings.EncoderName} aberto: {settings.Width}x{settings.Height} {settings.Fps} FPS {settings.BitrateKbps} kbps, zero-copy={ZeroCopy}");
     }
 
+    /// <summary>Formato de entrada pela CPU: NV12 para quase todos; I420 para os que não aceitam NV12.</summary>
+    public static AVPixelFormat CpuPixelFormat(string encoderName)
+        => encoderName is "libopenh264" or "libsvtav1" ? AVPixelFormat.AV_PIX_FMT_YUV420P : AVPixelFormat.AV_PIX_FMT_NV12;
+
     public EncoderSettings Settings { get; private set; }
     public bool ZeroCopy { get; private set; }
     public bool IsHardware => !Settings.EncoderName.StartsWith("lib", StringComparison.Ordinal);
@@ -99,8 +103,9 @@ public sealed unsafe class VideoEncoder : IDisposable
         else
         {
             _context->thread_count = s.EncoderName.StartsWith("lib") ? Math.Min(8, Environment.ProcessorCount) : 1;
+            _context->pix_fmt = CpuPixelFormat(s.EncoderName);
             _cpuFrame = ffmpeg.av_frame_alloc();
-            _cpuFrame->format = (int)AVPixelFormat.AV_PIX_FMT_NV12;
+            _cpuFrame->format = (int)_context->pix_fmt;
             _cpuFrame->width = s.Width;
             _cpuFrame->height = s.Height;
             FFmpegLoader.Check(ffmpeg.av_frame_get_buffer(_cpuFrame, 32), "av_frame_get_buffer");
@@ -144,6 +149,11 @@ public sealed unsafe class VideoEncoder : IDisposable
             Set("int_ref_type", "vertical");
             Set("int_ref_cycle_size", Math.Max(2, s.Fps / 4).ToString());
             Set("forced_idr", "1");
+        }
+        else if (name == "libopenh264")
+        {
+            Set("allow_skip_frames", "0");
+            Set("rc_mode", "bitrate");
         }
         else if (name == "libx264")
         {
@@ -200,8 +210,26 @@ public sealed unsafe class VideoEncoder : IDisposable
                 for (var y = 0; y < Settings.Height; y++)
                     Buffer.MemoryCopy(src + y * pitch, frame->data[0] + y * frame->linesize[0], frame->linesize[0], Settings.Width);
                 var uv = src + pitch * Settings.Height;
-                for (var y = 0; y < Settings.Height / 2; y++)
-                    Buffer.MemoryCopy(uv + y * pitch, frame->data[1] + y * frame->linesize[1], frame->linesize[1], Settings.Width);
+                if (frame->format == (int)AVPixelFormat.AV_PIX_FMT_NV12)
+                {
+                    for (var y = 0; y < Settings.Height / 2; y++)
+                        Buffer.MemoryCopy(uv + y * pitch, frame->data[1] + y * frame->linesize[1], frame->linesize[1], Settings.Width);
+                }
+                else
+                {
+                    // NV12 → I420: separa U e V intercalados.
+                    for (var y = 0; y < Settings.Height / 2; y++)
+                    {
+                        var row = uv + y * pitch;
+                        var u = frame->data[1] + y * frame->linesize[1];
+                        var v = frame->data[2] + y * frame->linesize[2];
+                        for (var x = 0; x < Settings.Width / 2; x++)
+                        {
+                            u[x] = row[x * 2];
+                            v[x] = row[x * 2 + 1];
+                        }
+                    }
+                }
             }
             finally { _gpu.Context.Unmap(_staging!, 0); }
         }

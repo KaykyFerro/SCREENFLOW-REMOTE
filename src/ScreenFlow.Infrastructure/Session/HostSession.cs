@@ -568,7 +568,7 @@ public sealed class HostSession : IAsyncDisposable
                     var encoder = new VideoEncoder(gpu, settings with { EncoderName = fallback.FfmpegName, Codec = fallback.Codec });
                     _encoderName = fallback.FfmpegName;
                     _codec = fallback.Codec;
-                    if (!fallback.Hardware) StatusChanged?.Invoke("Usando encoder por software (x264). 4K a 165 FPS não vai rodar assim.");
+                    if (!fallback.Hardware) StatusChanged?.Invoke($"Usando encoder por software ({fallback.FfmpegName}). 4K a 165 FPS não vai rodar assim.");
                     return encoder;
                 }
                 catch (Exception inner) { Log.Warn($"Encoder {fallback.FfmpegName} também falhou: {inner.Message}"); }
