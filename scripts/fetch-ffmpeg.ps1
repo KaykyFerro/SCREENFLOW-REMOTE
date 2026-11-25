@@ -1,20 +1,40 @@
 # Baixa as DLLs do FFmpeg 7.1 (build LGPL compartilhada do BtbN) para third_party/ffmpeg/bin.
 # Usado pelo CI e por quem compila localmente. A versão precisa bater com o pacote FFmpeg.AutoGen 7.1.x.
+#
+# O release "latest" do BtbN só traz as versões mais novas do FFmpeg. As anteriores continuam nos
+# auto-builds guardados (os últimos dias e o último build de cada mês), então a busca vai do release
+# mais novo ao mais antigo até achar o pacote do padrão.
 param(
     [string]$Destination = (Join-Path $PSScriptRoot "..\third_party\ffmpeg"),
     [string]$Pattern = 'ffmpeg-n7\.1.*-win64-lgpl-shared-7\.1\.zip$'
 )
 $ErrorActionPreference = "Stop"
-$headers = @{ "User-Agent" = "ScreenFlow-build" }
+$headers = @{ "User-Agent" = "ScreenFlow-build"; "Accept" = "application/vnd.github+json" }
 if ($env:GITHUB_TOKEN) { $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN" }
 
-$release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases/latest"
-$asset = $release.assets | Where-Object { $_.name -match $Pattern } | Select-Object -First 1
-if (-not $asset) { throw "Nenhum pacote do FFmpeg encontrado com o padrão $Pattern no release $($release.tag_name)." }
+$releases = @()
+for ($page = 1; $page -le 5; $page++) {
+    $uri = "https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=100&page=$page"
+    $batch = @(Invoke-RestMethod -Headers $headers -Uri $uri -MaximumRetryCount 3 -RetryIntervalSec 5)
+    $releases += $batch
+    if ($batch.Count -lt 100) { break }
+}
+
+$release = $null
+$asset = $null
+foreach ($candidate in ($releases | Sort-Object { [datetime]$_.published_at } -Descending)) {
+    $found = $candidate.assets | Where-Object { $_.name -match $Pattern } | Select-Object -First 1
+    if ($found) { $release = $candidate; $asset = $found; break }
+}
+if (-not $asset) {
+    $newest = $releases | Sort-Object { [datetime]$_.published_at } -Descending | Select-Object -First 1
+    $available = @($newest.assets | Where-Object { $_.name -match 'win64-lgpl-shared' } | ForEach-Object { $_.name })
+    throw "Nenhum pacote do FFmpeg encontrado com o padrão $Pattern em $($releases.Count) releases do BtbN. Pacotes LGPL no mais novo ($($newest.tag_name)): $($available -join ', ')"
+}
 
 $zip = Join-Path ([IO.Path]::GetTempPath()) $asset.name
-Write-Host "Baixando $($asset.name)..."
-Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile $zip
+Write-Host "Baixando $($asset.name) do release $($release.tag_name)..."
+Invoke-WebRequest -Headers $headers -Uri $asset.browser_download_url -OutFile $zip -MaximumRetryCount 3 -RetryIntervalSec 5
 $extract = Join-Path ([IO.Path]::GetTempPath()) "ffmpeg-extract"
 if (Test-Path $extract) { Remove-Item $extract -Recurse -Force }
 Expand-Archive $zip -DestinationPath $extract
