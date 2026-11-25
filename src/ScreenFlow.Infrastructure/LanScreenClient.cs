@@ -1,6 +1,7 @@
 using System.Buffers.Binary;
 using System.Net.Sockets;
 using System.Security.Cryptography;
+using ScreenFlow.Core;
 
 namespace ScreenFlow.Infrastructure;
 
@@ -35,7 +36,6 @@ public sealed class LanScreenClient : IAsyncDisposable
             var proof = SessionSecurity.CreateAuthenticationProof(normalizedCode, challenge);
             await stream.WriteAsync(proof, cancellationToken);
             CryptographicOperations.ZeroMemory(proof);
-            CryptographicOperations.ZeroMemory(authMaterial);
 
             var response = new byte[1];
             await stream.ReadExactlyAsync(response, cancellationToken);
