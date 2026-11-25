@@ -1,45 +1,46 @@
-# Development
+# Desenvolvimento
 
-## Environment
+## Pré-requisitos
 
-- Windows 10/11 x64
-- .NET 10 SDK
-- Visual Studio 2022 or VS Code with C# tooling
+- Windows 10/11 x64 com o SDK do .NET 10.
+- PowerShell 7 para os scripts.
+- Para testar de verdade: dois PCs (ou um PC e uma VM com GPU) na mesma rede do Radmin VPN.
 
-## Build and run from source
+## Compilar e rodar
 
-    dotnet restore ScreenFlowRemote.sln
-    dotnet build ScreenFlowRemote.sln --configuration Release
-    dotnet test ScreenFlowRemote.sln --configuration Release
-    dotnet run --project src/ScreenFlow.Remote/ScreenFlow.Remote.csproj
+```powershell
+./scripts/fetch-ffmpeg.ps1                  # FFmpeg 7.1 LGPL → third_party/ffmpeg/bin
+dotnet build ScreenFlow.sln
+dotnet test ScreenFlow.sln
+dotnet run --project src/ScreenFlow.App
+```
 
-## Publish locally
+As DLLs do FFmpeg são copiadas para `ffmpeg\` ao lado do executável. A versão precisa bater com o pacote `FFmpeg.AutoGen` (7.1.x).
 
-    dotnet publish src/ScreenFlow.Remote/ScreenFlow.Remote.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/publish
+O projeto `ScreenFlow.Core` e os testes rodam em Linux/macOS; os outros compilam fora do Windows com `EnableWindowsTargeting` (já ligado em `Directory.Build.props`), mas só rodam no Windows.
 
-The repository workflow also runs Inno Setup to produce a per-user Windows installer. A user installing the self-contained distribution does not need to separately install the .NET runtime.
+## Publicar
 
-## LAN MVP usage
+```powershell
+dotnet publish src/ScreenFlow.App/ScreenFlow.App.csproj -c Release -r win-x64 --self-contained true -o artifacts/publish
+& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer\ScreenFlow.iss
+```
 
-1. Run the app on the PC that will share its screen.
-2. Select the monitor, maximum width and target FPS.
-3. Press INICIAR COMPARTILHAMENTO.
-4. Give the other PC one of the shown IPv4 addresses, TCP port 39217 and the 32-character code.
-5. On the viewer, enter the IPv4 address and code, then connect.
-6. Approve the incoming request on the transmitter.
+O instalador sai em `artifacts/ScreenFlow-Setup-win-x64.exe`.
 
-Both computers must currently be on the same local network. Allow inbound TCP port 39217 only on a trusted Windows Private network.
+## Lançar uma versão
 
-## Current milestone
+```powershell
+git tag v1.1.0
+git push origin v1.1.0
+```
 
-The first usable LAN path is implemented with Windows GDI capture, JPEG frames and an authenticated AES-GCM TCP stream. The capture path is a compatibility implementation and not suitable for claims of 4K/165 FPS.
+O workflow `release.yml` usa a tag como versão, gera o instalador e o `.sha256` e cria o release no GitHub. O app instalado encontra a versão nova sozinho.
 
-## Next engineering milestones
+## Testar com dois PCs
 
-1. Move monitor capture to Windows Graphics Capture and Direct3D 11.
-2. Add GPU surface lifetime management and encoder/decoder capability detection.
-3. Implement hardware H.264 encode/decode.
-4. Replace LAN TCP frame transport with WebRTC media and signaling.
-5. Add STUN/TURN and external-network tests.
-6. Add real telemetry and adaptive quality logic.
-7. Add audio, diagnostics, security review and remote input authorization.
+1. Os dois no Radmin VPN, na mesma rede.
+2. No host: Transmitir, copie o IP, Começar.
+3. No viewer: Assistir, cole o IP, Conectar.
+4. No viewer, F3 mostra FPS real, latência e perda. No host, **Testar banda** mede o upload até aquele viewer.
+5. Logs: `%LOCALAPPDATA%\ScreenFlow\logs`.

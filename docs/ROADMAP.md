@@ -1,35 +1,41 @@
-# Roadmap and implementation status
+# Status e próximos passos
 
-## Delivered in the current repository
+## Implementado
 
-- [x] Solution and project separation
-- [x] WPF desktop dashboard
-- [x] Windows monitor enumeration (resolution, primary display and position)
-- [x] Refresh-rate query where exposed by the display driver
-- [x] LAN host and one-viewer client
-- [x] Random 128-bit session code
-- [x] Challenge-response authentication
-- [x] AES-GCM authenticated encryption for video frames
-- [x] Explicit approval before any frame is sent
-- [x] Per-IP failed-authentication throttling
-- [x] GDI screen capture and JPEG frame transport for LAN MVP
-- [x] Width choices up to 1920 px and target 15/20/30 FPS
-- [x] Automated core tests and Windows CI build/publish workflow
-- [x] Build, architecture and LAN usage documentation
+- [x] App renomeado para ScreenFlow, tema escuro/claro com tokens, telas Início, Transmitir, Assistir, Player e Configurações
+- [x] Detecção do Radmin VPN, bind no IP 26.x, aviso com link de instalação
+- [x] Portas configuráveis (47800 UDP mídia, 47801 TCP controle, 47802 UDP descoberta) e regras do firewall com UAC
+- [x] Descoberta de hosts por broadcast na rede do Radmin
+- [x] Conexão só pelo IP, handshake com versão, decoders e negociação de codec; reconexão com backoff
+- [x] PIN opcional, aprovação de cada viewer, limite de tentativas erradas, criptografia ECDH + AES-GCM
+- [x] Várias pessoas assistindo (padrão 20), uma codificação para todas, upload dividido entre elas
+- [x] Captura WGC (monitor/janela, com cursor) e DXGI de reserva, na GPU
+- [x] Encoder FFmpeg por hardware (NVENC/AMF/QSV), AV1 > HEVC > H.264, baixa latência, sem B-frames, intra-refresh
+- [x] Transporte UDP com pacotes numerados, FEC XOR, NACK, pedido de keyframe
+- [x] Qualidade adaptativa (bitrate → FPS → resolução) mostrada no overlay
+- [x] Decoder D3D11VA, player com tela cheia, volume e overlay de estatísticas
+- [x] Áudio do sistema WASAPI loopback em Opus 48 kHz, sincronizado por timestamp
+- [x] Configuração automática por hardware e rede; diagnóstico na tela e por `--diagnostico`
+- [x] Atualização pelo app via GitHub Releases com SHA-256; workflow de release por tag
+- [x] Logs em arquivo e encerramento limpo de captura, encoder, sockets e áudio
 
-## Remaining product roadmap
+## Testado
 
-- [ ] Phase 2: Windows Graphics Capture, Direct3D 11 surfaces, monitor/window capture, preview pipeline
-- [ ] Phase 3: H.264 hardware encode/decode, NVENC, AMF and Quick Sync detection
-- [ ] Phase 4: Replace JPEG/TCP with real-time media transport
-- [ ] Phase 5: WebRTC signaling, ICE, STUN/TURN and cross-network connectivity
-- [ ] Phase 6: Real telemetry-driven adaptive bitrate, resolution and FPS control
-- [ ] Phase 7: HEVC/AV1 capability negotiation and fallback
-- [ ] Phase 8: system audio capture and synchronization
-- [ ] Phase 9: security review, session expiry, additional abuse protection and audit
-- [ ] Phase 10: diagnostics, settings, installer, updater and release packaging
-- [ ] Phase 11: separately authorized remote mouse and keyboard input
+- 47 testes automatizados do Core: cabeçalho, FEC, NACK, descarte, mensagens, descoberta, troca de chaves, PIN, AES-GCM, Radmin, backoff, bitrates por perfil, negociação de codec, qualidade adaptativa, configuração automática, divisão de upload, configurações, releases, sincronia de relógio.
+- Compilação de toda a solução e testes no CI do Windows; app publicado roda o `--diagnostico` e carrega o FFmpeg no CI.
 
-## Performance target
+## Ainda não testado (precisa de PCs reais)
 
-4K UHD and 165 FPS remain architectural goals only. No such throughput has been measured or validated. The current CPU-based GDI/JPEG LAN MVP is intentionally capped at 1920 pixels wide and a requested maximum of 30 FPS.
+- Captura, encoder e decoder em GPUs NVIDIA, AMD e Intel.
+- Conexão real pelo Radmin VPN, descoberta por broadcast e firewall.
+- FPS, latência e banda reais; 4K a 165 FPS.
+- 10 ou mais viewers ao mesmo tempo.
+- Atualização ponta a ponta (precisa do primeiro release publicado).
+
+## Próximos passos
+
+- Renderizador D3D11 no player (swapchain com tearing, frame decodificado direto da GPU). Hoje o frame passa por NV12→BGRA na CPU e `WriteableBitmap`, o que deve limitar a tela a cerca de 60–100 FPS em 4K.
+- Cursor desenhado na captura DXGI (a WGC já inclui o cursor).
+- Ritmo de envio (pacing) dos pacotes UDP para evitar rajadas em links lentos.
+- Modo relay: um viewer repassa o vídeo para outros, para passar do limite de upload do host.
+- Controle remoto de mouse e teclado, com autorização separada.
