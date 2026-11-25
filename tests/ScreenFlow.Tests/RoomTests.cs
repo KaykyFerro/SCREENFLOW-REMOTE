@@ -13,7 +13,7 @@ public class RoomProtocolTests
     [Fact]
     public void Presence_RoundTrips()
     {
-        var presence = new RoomPresence("PC da Mari", "1.0.2", PresenceFlags.InVoice | PresenceFlags.Live | PresenceFlags.LiveAudio | PresenceFlags.LiveCamera,
+        var presence = new RoomPresence("PC da Mari", "1.1.0", PresenceFlags.InVoice | PresenceFlags.Live | PresenceFlags.LiveAudio | PresenceFlags.LiveCamera,
             StreamMode.Screen, 3, 47801, IPAddress.Parse("26.48.121.7"), 42);
         var packet = RoomPacket.Presence(Me, presence);
         Assert.True(RoomPacket.TryReadHeader(packet, out var type, out var sender));
@@ -27,7 +27,7 @@ public class RoomProtocolTests
     [Fact]
     public void Presence_WithoutLiveAddress_ReadsNull()
     {
-        var packet = RoomPacket.Presence(Me, new RoomPresence("Kayky", "1.0.2", PresenceFlags.None));
+        var packet = RoomPacket.Presence(Me, new RoomPresence("Kayky", "1.1.0", PresenceFlags.None));
         Assert.True(RoomPacket.TryReadPresence(RoomPacket.Body(packet), out var read));
         Assert.Null(read.LiveAddress);
         Assert.False(read.Live);
@@ -126,9 +126,9 @@ public class RoomStateTests
         var table = new RoomPeerTable(TimeSpan.FromSeconds(7));
         var id = Guid.NewGuid();
         var t0 = DateTimeOffset.UtcNow;
-        var first = table.Update(id, new RoomPresence("Ana", "1.0.2", PresenceFlags.None), Radmin, t0);
+        var first = table.Update(id, new RoomPresence("Ana", "1.1.0", PresenceFlags.None), Radmin, t0);
         Assert.True(first.IsNew);
-        var second = table.Update(id, new RoomPresence("Ana", "1.0.2", PresenceFlags.InVoice), Radmin, t0.AddSeconds(2));
+        var second = table.Update(id, new RoomPresence("Ana", "1.1.0", PresenceFlags.InVoice), Radmin, t0.AddSeconds(2));
         Assert.False(second.IsNew);
         Assert.False(second.Previous!.InVoice);
         Assert.True(table.Find(id)!.Presence.InVoice);
@@ -143,7 +143,7 @@ public class RoomStateTests
         var table = new RoomPeerTable();
         var id = Guid.NewGuid();
         var t0 = DateTimeOffset.UtcNow;
-        var presence = new RoomPresence("Ana", "1.0.2", PresenceFlags.None);
+        var presence = new RoomPresence("Ana", "1.1.0", PresenceFlags.None);
         table.Update(id, presence, Radmin, t0);
         table.Update(id, presence, Lan, t0.AddSeconds(1));
         Assert.Equal(Radmin, table.Find(id)!.EndPoint);
@@ -156,7 +156,7 @@ public class RoomStateTests
     {
         var table = new RoomPeerTable();
         for (var i = 0; i < RoomPeerTable.MaxPeers + 10; i++)
-            table.Update(Guid.NewGuid(), new RoomPresence($"PC {i}", "1.0.2", PresenceFlags.None), Radmin, DateTimeOffset.UtcNow);
+            table.Update(Guid.NewGuid(), new RoomPresence($"PC {i}", "1.1.0", PresenceFlags.None), Radmin, DateTimeOffset.UtcNow);
         Assert.Equal(RoomPeerTable.MaxPeers, table.Count);
     }
 
@@ -247,12 +247,12 @@ public class RoomStateTests
         var table = new RoomPeerTable();
         var id = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
-        var peer = table.Update(id, new RoomPresence("Ana", "1.0.2", PresenceFlags.InVoice), Radmin, now).Peer!;
+        var peer = table.Update(id, new RoomPresence("Ana", "1.1.0", PresenceFlags.InVoice), Radmin, now).Peer!;
         Assert.False(peer.IsSpeaking(now));
         peer.RecordVoice(180, now);
         Assert.True(peer.IsSpeaking(now.AddMilliseconds(100)));
         Assert.False(peer.IsSpeaking(now.AddSeconds(1)));
-        table.Update(id, new RoomPresence("Ana", "1.0.2", PresenceFlags.InVoice | PresenceFlags.Muted), Radmin, now);
+        table.Update(id, new RoomPresence("Ana", "1.1.0", PresenceFlags.InVoice | PresenceFlags.Muted), Radmin, now);
         Assert.False(peer.IsSpeaking(now.AddMilliseconds(100)));
     }
 }
