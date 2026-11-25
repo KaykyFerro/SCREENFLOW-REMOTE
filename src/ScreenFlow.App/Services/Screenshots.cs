@@ -193,12 +193,14 @@ public static class Screenshots
 
     /// <summary>
     /// Salva exatamente a área do elemento (sem a margem dele e sem a moldura da janela), em escala 2x, sobre um fundo
-    /// opaco. O VisualBrush ignora o deslocamento do elemento dentro do pai, que o RenderTargetBitmap aplicaria.
+    /// opaco. O conteúdo do VisualBrush vem com o deslocamento do elemento dentro do pai (a margem, ou a posição de um
+    /// cartão na coluna), então a área lida começa nesse deslocamento.
     /// </summary>
     private static void Save(FrameworkElement element, string path, Brush? background)
     {
         element.UpdateLayout();
         var area = new Rect(0, 0, element.ActualWidth, element.ActualHeight);
+        var offset = VisualTreeHelper.GetOffset(element);
         var width = Math.Max(1, (int)Math.Ceiling(area.Width * Scale));
         var height = Math.Max(1, (int)Math.Ceiling(area.Height * Scale));
         var visual = new DrawingVisual();
@@ -207,7 +209,7 @@ public static class Screenshots
             if (background is not null) context.DrawRectangle(background, null, area);
             context.DrawRectangle(new VisualBrush(element)
             {
-                Viewbox = area,
+                Viewbox = new Rect(offset.X, offset.Y, area.Width, area.Height),
                 ViewboxUnits = BrushMappingMode.Absolute,
                 Stretch = Stretch.Fill,
             }, null, area);
