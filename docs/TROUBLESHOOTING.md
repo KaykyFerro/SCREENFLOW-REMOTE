@@ -1,27 +1,40 @@
-# Troubleshooting
+# Solução de problemas
 
-## Build problems
+Comece sempre por **Configurações › Diagnóstico** (ou `ScreenFlow.exe --diagnostico`) e pelos logs em `%LOCALAPPDATA%\ScreenFlow\logs`.
 
-- Install the .NET 10 SDK.
-- Build on Windows because WPF and Windows Forms targets require Windows desktop targeting.
-- Run dotnet restore ScreenFlowRemote.sln before building.
+## Rede
 
-## Connection problems
+| Sintoma | Causa provável | Solução |
+|---|---|---|
+| "Radmin VPN não encontrado" | Radmin não instalado | Instale em <https://www.radmin-vpn.com/> |
+| "Radmin VPN sem rede ativa" | Instalado, mas fora de uma rede | Entre na mesma rede que os outros |
+| Viewer fica em "Conectando" | Firewall do host bloqueando | Configurações › Rede › Criar regras do firewall |
+| "O ScreenFlow não está transmitindo em …" | Host não clicou em Começar, ou portas diferentes | Confira as portas nos dois lados |
+| Host não aparece na lista | Broadcast bloqueado | Digite o IP direto |
+| Conecta mas não chega vídeo | UDP 47800 bloqueado no host ou no viewer | Crie as regras do firewall nos dois PCs |
 
-- The current MVP works only between PCs on the same LAN.
-- Use the transmitter's IPv4 address and port 39217.
-- Allow inbound TCP 39217 on the transmitter only for a trusted Private network.
-- Ensure the transmitter started a session and has not closed the app.
-- Use the current session code; a new host instance generates a new code.
-- The transmitter must approve the incoming connection.
+Teste a rede com `ping 26.x.x.x`. No Radmin, uma conexão indireta (relay) tem banda bem menor que uma direta.
 
-## Black or stale image
+## Qualidade e FPS
 
-- Confirm the selected monitor is still connected.
-- Stop and recreate the session after changing display topology.
-- Lower the target FPS or maximum width on older CPUs.
-- The current GDI/JPEG path is CPU-based; it is not the future GPU capture implementation.
+- Abra as estatísticas no player (F3). Perda acima de 2% significa que a rede não aguenta: o app já reduz bitrate, FPS e resolução sozinho; a linha "Qualidade" mostra o motivo.
+- Use **Testar banda** no host para medir o upload até cada pessoa. O valor é usado para dividir a qualidade entre quem assiste.
+- FPS real abaixo do escolhido: veja o encoder em Diagnóstico. Notebooks precisam estar na tomada e usar a GPU dedicada.
+- O monitor de origem a 60 Hz limita a captura a 60 FPS.
+- 4K a 165 FPS exige NVIDIA RTX 40/50, AMD RX 7000/9000 ou Intel Arc no host, e uns 120 Mbps de upload por pessoa.
 
-## Known missing capabilities
+## Áudio
 
-Internet/NAT traversal, WebRTC, STUN/TURN, audio, hardware video codecs, adaptive bitrate, remote input, installer and validated 4K/165 FPS operation are not yet implemented.
+- Ligue **Áudio do sistema** antes de começar a transmitir.
+- O áudio capturado é o do dispositivo de saída padrão do Windows.
+- No player, M liga/desliga o som e as setas mudam o volume.
+
+## Atualização
+
+- "Não foi possível verificar atualizações": sem internet ou sem release publicado ainda.
+- Se o instalador falhar, baixe manualmente em Releases.
+
+## Build
+
+- Rode `./scripts/fetch-ffmpeg.ps1` antes de compilar; sem as DLLs o app abre, mas não acha encoders.
+- A versão do FFmpeg precisa ser 7.1.x (mesma do pacote FFmpeg.AutoGen).

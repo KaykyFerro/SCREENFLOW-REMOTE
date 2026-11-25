@@ -21,29 +21,41 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.x
+      - name: Download FFmpeg (LGPL)
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/fetch-ffmpeg.ps1
       - name: Restore
-        run: dotnet restore ScreenFlowRemote.sln
+        run: dotnet restore ScreenFlow.sln
       - name: Build Release
-        run: dotnet build ScreenFlowRemote.sln --configuration Release --no-restore
+        run: dotnet build ScreenFlow.sln --configuration Release --no-restore
       - name: Run automated tests
-        run: dotnet test ScreenFlowRemote.sln --configuration Release --no-build --logger "trx;LogFileName=screenflow-tests.trx"
+        run: dotnet test ScreenFlow.sln --configuration Release --no-build --logger "trx;LogFileName=screenflow-tests.trx"
       - name: Publish self-contained Windows x64 app
-        run: dotnet publish src/ScreenFlow.Remote/ScreenFlow.Remote.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/publish
+        run: dotnet publish src/ScreenFlow.App/ScreenFlow.App.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/publish
+      - name: Smoke test (diagnostic command)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath artifacts/publish/ScreenFlow.exe -ArgumentList "--diagnostico" -PassThru -Wait -NoNewWindow
+          $report = Get-ChildItem "$env:LOCALAPPDATA/ScreenFlow/logs/diagnostico-*.txt" | Sort-Object LastWriteTime | Select-Object -Last 1
+          if (-not $report) { throw "O comando de diagnóstico não gerou relatório." }
+          Get-Content $report
+          if (-not (Select-String -Path $report -Pattern "FFmpeg n?7\.")) { throw "FFmpeg não carregou no app publicado." }
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
       - name: Build Windows installer
         shell: pwsh
         run: |
           $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $compiler)) { throw "Inno Setup compiler not found at $compiler" }
-          & $compiler installer\ScreenFlowRemote.iss
+          & $compiler installer\ScreenFlow.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
       - name: Upload Windows x64 distribution
         uses: actions/upload-artifact@v4
         with:
-          name: ScreenFlow-Remote-win-x64
+          name: ScreenFlow-win-x64
           path: |
-            artifacts/ScreenFlowRemote-Setup-win-x64.exe
+            artifacts/ScreenFlow-Setup-win-x64.exe
             artifacts/publish/
           if-no-files-found: error
           retention-days: 14

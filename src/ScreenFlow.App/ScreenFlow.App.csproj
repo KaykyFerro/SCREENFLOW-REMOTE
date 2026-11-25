@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.26100.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <UseWPF>true</UseWPF>
+    <AssemblyName>ScreenFlow</AssemblyName>
+    <RootNamespace>ScreenFlow.App</RootNamespace>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\screenflow.ico</ApplicationIcon>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\screenflow.ico" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\ScreenFlow.Core\ScreenFlow.Core.csproj" />
+    <ProjectReference Include="..\ScreenFlow.Infrastructure\ScreenFlow.Infrastructure.csproj" />
+  </ItemGroup>
+  <!-- DLLs do FFmpeg (build LGPL) baixadas pelo CI em third_party/ffmpeg/bin -->
+  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)..\..\third_party\ffmpeg\bin')">
+    <None Include="$(MSBuildThisFileDirectory)..\..\third_party\ffmpeg\bin\*.dll" Link="ffmpeg\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
