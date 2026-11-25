@@ -60,7 +60,7 @@
                 </RadioButton>
             </UniformGrid>
 
-            <Grid>
+            <Grid x:Name="Columns">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="410"/>
                     <ColumnDefinition Width="22"/>
@@ -161,7 +161,7 @@
                 <StackPanel Grid.Column="2">
                     <Border Style="{StaticResource Card}">
                         <StackPanel>
-                            <UniformGrid Columns="4" Margin="0,0,-12,0">
+                            <UniformGrid x:Name="StatsGrid" Columns="4" Margin="0,0,-12,0" SizeChanged="StatsGrid_SizeChanged">
                                 <Border Style="{StaticResource InsetCard}" Margin="0,0,12,0">
                                     <StackPanel>
                                         <TextBlock Style="{StaticResource Caption}" Text="Assistindo"/>

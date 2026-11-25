@@ -35,6 +35,18 @@ public partial class UpdatesPage : UserControl, IShellPage
             if (!Dispatcher.CheckAccess()) Dispatcher.BeginInvoke(Refresh);
             else Refresh();
         };
+        SizeChanged += (_, _) => ResponsiveGrid.Apply(Columns, ActualWidth < 900);
+    }
+
+    /// <summary>Em janela estreita os botões descem para baixo do título, sem cobrir o texto.</summary>
+    private void HeroLayout_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var stacked = HeroLayout.ActualWidth < 880;
+        Grid.SetRow(Actions, stacked ? 1 : 0);
+        Grid.SetColumn(Actions, stacked ? 0 : 1);
+        Grid.SetColumnSpan(Actions, stacked ? 2 : 1);
+        Actions.HorizontalAlignment = stacked ? HorizontalAlignment.Left : HorizontalAlignment.Stretch;
+        Actions.Margin = stacked ? new Thickness(84, 20, 0, 0) : new Thickness(16, 0, 0, 0);
     }
 
     private static UpdateService Updates => AppServices.Updates;

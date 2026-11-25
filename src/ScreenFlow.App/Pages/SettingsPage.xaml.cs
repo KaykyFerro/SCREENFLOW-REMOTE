@@ -21,9 +21,10 @@ public partial class SettingsPage : UserControl, IShellPage
     {
         _shell = shell;
         InitializeComponent();
+        SizeChanged += (_, _) => ResponsiveGrid.Apply(Columns, ActualWidth < 1000);
         QualityCombo.Fill(Resolution.All.Select(r => new Choice<Resolution>(r, $"{r.Label} · {r.Width} × {r.Height}")));
         FpsCombo.Fill(Quality.FrameRates.Select(f => new Choice<int>(f, $"{f} FPS")));
-        FecCombo.Fill(new[] { 0, 4, 6, 8, 10, 16 }.Select(n => new Choice<int>(n, n == 0 ? "Desligada" : $"1 extra a cada {n} pacotes")));
+        FecCombo.Fill(new[] { 0, 4, 6, 8, 10, 16 }.Select(n => new Choice<int>(n, n == 0 ? "Desligada" : $"1 extra a cada {n}")));
         AudioBitrateCombo.Fill(new[] { 96, 128, 160, 192, 256 }.Select(k => new Choice<int>(k, $"{k} kbps")));
         MusicCombo.Fill(AudioProfile.MusicBitrates.Select(k => new Choice<int>(k, OverviewPage.MusicLabel(k))));
         CameraQualityCombo.Fill(OverviewPage.CameraQualities);

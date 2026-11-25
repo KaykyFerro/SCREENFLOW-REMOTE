@@ -30,7 +30,7 @@
                                     <TextBlock Style="{StaticResource Icon}" Text="&#xE72A;" FontSize="13" Margin="10,1,0,0"/>
                                 </StackPanel>
                             </Button>
-                            <TextBox x:Name="HostBox" Tag="26.000.000.000" FontFamily="{DynamicResource FontMono}" FontSize="16" MinHeight="48" KeyDown="HostBox_KeyDown"/>
+                            <TextBox x:Name="HostBox" Tag="26.x.x.x" FontFamily="{DynamicResource FontMono}" FontSize="16" MinHeight="48" KeyDown="HostBox_KeyDown"/>
                         </DockPanel>
 
                         <Border x:Name="StatePanel" Style="{StaticResource InsetCard}" Margin="0,14,0,0" Padding="14,12" Visibility="Collapsed">

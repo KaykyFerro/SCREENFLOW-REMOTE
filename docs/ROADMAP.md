@@ -27,7 +27,7 @@
 
 ## Testado
 
-- 68 testes automatizados: cabeçalho, FEC, NACK, descarte, mensagens, descoberta, troca de chaves, PIN, AES-GCM, Radmin, backoff, bitrates por perfil, negociação de codec, qualidade adaptativa, configuração automática, divisão de upload, configurações, releases, sincronia de relógio, modos (tela, câmera, festa), perfis de áudio, medidor de espectro, redundância do áudio.
+- 71 testes automatizados: cabeçalho, FEC, NACK, descarte, mensagens, descoberta, troca de chaves, PIN, AES-GCM, Radmin, backoff, bitrates por perfil, negociação de codec, qualidade adaptativa, configuração automática, divisão de upload, configurações, releases, sincronia de relógio, modos (tela, câmera, festa), perfis de áudio, medidor de espectro, redundância do áudio, recursos do tema (cada cor e estilo existe, com um tipo só, nos temas escuro e claro).
 - Compilação de toda a solução e testes no CI do Windows; o app publicado roda o `--diagnostico` (carrega o FFmpeg), o `--autoteste` (festa de música de verdade no 127.0.0.1, do encoder Opus do host até o decoder do viewer) e o `--capturas` (PNG de cada tela).
 
 ## Ainda não testado (precisa de PCs reais)

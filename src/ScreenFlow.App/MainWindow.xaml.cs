@@ -37,6 +37,7 @@ public partial class MainWindow : Window
     private bool _radminInstalled = true;
     private bool _navigating;
     private bool _compact;
+    private bool? _narrow;
     private bool _cleanedUp;
 
     public MainWindow()
@@ -64,6 +65,14 @@ public partial class MainWindow : Window
         }
 
         SourceInitialized += (_, _) => ThemeManager.ApplyFrame(this);
+        SizeChanged += (_, _) =>
+        {
+            // Janela estreita: o menu vira só ícones para sobrar espaço para a página (o botão de menu continua mandando).
+            var narrow = ActualWidth < 1180;
+            if (narrow == _narrow) return;
+            _narrow = narrow;
+            SetCompact(narrow);
+        };
         Loaded += async (_, _) => await OnLoadedAsync();
         Navigate(OverviewPage);
     }
@@ -401,9 +410,11 @@ public partial class MainWindow : Window
 
     // ───────────────────────── Janela ─────────────────────────
 
-    private void ToggleSidebar_Click(object sender, RoutedEventArgs e)
+    private void ToggleSidebar_Click(object sender, RoutedEventArgs e) => SetCompact(!_compact);
+
+    private void SetCompact(bool compact)
     {
-        _compact = !_compact;
+        _compact = compact;
         SidebarColumn.Width = new GridLength(_compact ? 86 : 260);
         BrandText.Visibility = MachinePanel.Visibility = _compact ? Visibility.Collapsed : Visibility.Visible;
         foreach (var (item, label) in _navLabels)

@@ -769,7 +769,15 @@
                                 BorderBrush="{DynamicResource BorderStrong}" BorderThickness="1" Margin="16,0,0,0" VerticalAlignment="Center">
                             <Ellipse x:Name="Thumb" Width="16" Height="16" Fill="{DynamicResource TextMuted}" HorizontalAlignment="Left" Margin="3,0,0,0"/>
                         </Border>
-                        <ContentPresenter VerticalAlignment="Center"/>
+                        <ContentPresenter VerticalAlignment="Center">
+                            <ContentPresenter.Resources>
+                                <!-- Texto longo quebra linha em vez de sumir embaixo da chave -->
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="TextWrapping" Value="Wrap"/>
+                                    <Setter Property="LineHeight" Value="20"/>
+                                </Style>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                     </DockPanel>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsChecked" Value="True">

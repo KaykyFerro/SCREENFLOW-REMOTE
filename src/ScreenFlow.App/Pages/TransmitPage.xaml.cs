@@ -45,7 +45,11 @@ public partial class TransmitPage : UserControl, IShellPage
         AudioToggle.Checked += (_, _) => UpdateAudioCard();
         AudioToggle.Unchecked += (_, _) => UpdateAudioCard();
         Spectrum.Source = () => _session?.AudioMeter;
-        SizeChanged += (_, _) => ModeGrid.Columns = ActualWidth >= 820 ? 3 : 1;
+        SizeChanged += (_, _) =>
+        {
+            ModeGrid.Columns = ActualWidth >= 700 ? 3 : 1;
+            ResponsiveGrid.Apply(Columns, ActualWidth < 1000);
+        };
         shell.NetworkStatusChanged += () =>
         {
             if (_session is null && _loaded) RefreshNetwork();
@@ -188,6 +192,16 @@ public partial class TransmitPage : UserControl, IShellPage
     }
 
     private void RefreshSources_Click(object sender, RoutedEventArgs e) => RefreshSources();
+
+    /// <summary>Quatro números lado a lado quando cabem; senão dois por linha (o texto nunca fica em pé).</summary>
+    private void StatsGrid_SizeChanged(object sender, SizeChangedEventArgs e)
+    {
+        var columns = StatsGrid.ActualWidth >= 470 ? 4 : 2;
+        if (StatsGrid.Columns == columns) return;
+        StatsGrid.Columns = columns;
+        foreach (FrameworkElement tile in StatsGrid.Children)
+            tile.Margin = new Thickness(0, 0, 12, columns == 4 ? 0 : 12);
+    }
 
     private async Task LoadCamerasAsync(bool force = false)
     {

@@ -191,7 +191,6 @@ public partial class PlayerWindow : Window
             Title = $"{Session.HostName} · ScreenFlow";
             BarTitle.Text = PartyHost.Text = Session.HostName;
         }
-        PartyDetail.Text = $"Tudo o que toca no PC de {(Session.HostName.Length > 0 ? Session.HostName : _host)}, em qualidade de música. Ajuste o volume aqui embaixo.";
         UpdateLayers();
     }
 
@@ -465,7 +464,6 @@ public partial class PlayerWindow : Window
             var meter = DemoData.LiveMeter(64);
             PartySpectrum.Source = () => meter;
             PartyHost.Text = BarTitle.Text = "Festa da Mari";
-            PartyDetail.Text = "Tudo o que toca no PC de Festa da Mari, em qualidade de música. Ajuste o volume aqui embaixo.";
             ShowStatistics(DemoData.ViewerStats(StreamMode.AudioOnly));
         }
         if (state == ConnectionState.Connected)

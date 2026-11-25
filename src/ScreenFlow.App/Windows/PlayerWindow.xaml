@@ -56,7 +56,7 @@
                     <TextBlock x:Name="PartyHost" FontFamily="{DynamicResource FontDisplay}" FontSize="46" FontWeight="Bold" Margin="0,18,0,6"
                                TextTrimming="CharacterEllipsis" Text="Festa de música"/>
                     <TextBlock x:Name="PartyDetail" FontSize="15" Foreground="{DynamicResource TextMuted}" TextWrapping="Wrap"
-                               Text="Tudo o que toca no PC de quem está transmitindo, em qualidade de música."/>
+                               Text="O som que toca no PC de quem transmite chega aqui em qualidade de música. Ajuste o volume na barra de baixo."/>
                 </StackPanel>
                 <controls:SpectrumVisualizer x:Name="PartySpectrum" Grid.Row="1" MaxHeight="380" Margin="0,36,0,0" BarGap="6" Mirror="True"/>
                 <UniformGrid Grid.Row="2" Columns="4" Margin="0,28,-14,0" HorizontalAlignment="Left" MaxWidth="760">

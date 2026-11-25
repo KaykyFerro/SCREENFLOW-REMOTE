@@ -17,8 +17,16 @@
                 <Border x:Name="HeroTint" CornerRadius="{DynamicResource RadiusXl}" Background="{DynamicResource PartyGradient}" Opacity="0"/>
                 <Border CornerRadius="{DynamicResource RadiusXl}" Background="{DynamicResource HeroScrim}" BorderBrush="#26FFFFFF" BorderThickness="1"/>
                 <StackPanel Margin="32,30" TextElement.Foreground="#FFFFFF">
-                    <DockPanel>
-                        <StackPanel x:Name="Actions" DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Grid x:Name="HeroLayout" SizeChanged="HeroLayout_SizeChanged">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+                        <StackPanel x:Name="Actions" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Margin="16,0,0,0">
                             <Button x:Name="CheckButton" MinHeight="46" Padding="20,0" Background="#330B1430" BorderBrush="#40FFFFFF" Foreground="#FFFFFF" Click="Check_Click">
                                 <StackPanel Orientation="Horizontal">
                                     <TextBlock Style="{StaticResource Icon}" Text="&#xE72C;" Margin="0,0,10,0"/>
@@ -32,22 +40,24 @@
                                 </StackPanel>
                             </Button>
                         </StackPanel>
-                        <Border Width="64" Height="64" CornerRadius="18" Background="#0E1733" BorderBrush="#2C3E78" BorderThickness="1" VerticalAlignment="Center">
-                            <Viewbox Width="36" Height="36">
-                                <Canvas Width="24" Height="24">
-                                    <Path Data="M7.2,19.2 L11.2,4.8 M13.4,19.2 L17.4,4.8" StrokeThickness="4.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
-                                          Stroke="{DynamicResource BrandGradient}"/>
-                                </Canvas>
-                            </Viewbox>
-                        </Border>
-                        <StackPanel Margin="20,0,0,0" VerticalAlignment="Center">
-                            <TextBlock x:Name="VersionTitle" FontFamily="{DynamicResource FontDisplay}" FontSize="28" FontWeight="Bold" Text="ScreenFlow"/>
-                            <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                                <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="#3DF0B0" VerticalAlignment="Center" Margin="0,0,9,0"/>
-                                <TextBlock x:Name="StatusText" FontSize="14.5" Foreground="#C8D3EC" Text="Você está na versão mais recente."/>
+                        <DockPanel>
+                            <Border Width="64" Height="64" CornerRadius="18" Background="#0E1733" BorderBrush="#2C3E78" BorderThickness="1" VerticalAlignment="Center">
+                                <Viewbox Width="36" Height="36">
+                                    <Canvas Width="24" Height="24">
+                                        <Path Data="M7.2,19.2 L11.2,4.8 M13.4,19.2 L17.4,4.8" StrokeThickness="4.4" StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                              Stroke="{DynamicResource BrandGradient}"/>
+                                    </Canvas>
+                                </Viewbox>
+                            </Border>
+                            <StackPanel Margin="20,0,0,0" VerticalAlignment="Center">
+                                <TextBlock x:Name="VersionTitle" FontFamily="{DynamicResource FontDisplay}" FontSize="28" FontWeight="Bold" Text="ScreenFlow"/>
+                                <DockPanel Margin="0,6,0,0">
+                                    <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="#3DF0B0" VerticalAlignment="Top" Margin="0,7,9,0"/>
+                                    <TextBlock x:Name="StatusText" FontSize="14.5" Foreground="#C8D3EC" TextWrapping="Wrap" Text="Você está na versão mais recente."/>
+                                </DockPanel>
                             </StackPanel>
-                        </StackPanel>
-                    </DockPanel>
+                        </DockPanel>
+                    </Grid>
 
                     <StackPanel x:Name="ProgressPanel" Margin="0,24,0,0" Visibility="Collapsed">
                         <DockPanel Margin="0,0,0,8">
@@ -59,7 +69,7 @@
                 </StackPanel>
             </Grid>
 
-            <Grid>
+            <Grid x:Name="Columns">
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="1.5*"/>
                     <ColumnDefinition Width="22"/>
