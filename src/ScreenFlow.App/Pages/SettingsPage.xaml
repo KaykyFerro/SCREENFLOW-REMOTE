@@ -130,6 +130,10 @@
                             </Grid>
                             <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
                                        Text="O som é Opus estéreo 48 kHz. Na festa de música cada pacote vai duas vezes (cópia de segurança), então nada falha mesmo com perda na rede."/>
+                            <CheckBox x:Name="SeparateAudioToggle" Style="{StaticResource Switch}" Margin="0,18,0,6"
+                                      Content="Separar o som por app: a voz da rede e os apps escolhidos ficam fora da transmissão"/>
+                            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                       Text="Os apps são escolhidos no cartão Som do PC, na tela Transmissão. Desligue só se quem assiste não estiver ouvindo o som do PC: aí vai todo o som, como antes."/>
                         </StackPanel>
                     </Border>
 

@@ -56,6 +56,7 @@ public partial class SettingsPage : UserControl, IShellPage
         CameraQualityCombo.SelectValue((Resolution.FromLabel(s.CameraResolution), s.CameraFps));
         AudioBitrateCombo.SelectValue(s.AudioBitrateKbps, k => k);
         MusicCombo.SelectValue(s.MusicBitrateKbps, k => k);
+        SeparateAudioToggle.IsChecked = s.SeparateAppAudio;
         GpuToggle.IsChecked = s.GpuVideoRenderer;
         StatsToggle.IsChecked = s.ShowStatsOverlay;
         MediaPortBox.Text = s.MediaPort.ToString();
@@ -120,6 +121,8 @@ public partial class SettingsPage : UserControl, IShellPage
         }
         if (AudioBitrateCombo.SelectedItem is Choice<int> audio) s.AudioBitrateKbps = audio.Value;
         if (MusicCombo.SelectedItem is Choice<int> music) s.MusicBitrateKbps = music.Value;
+        var separateChanged = s.SeparateAppAudio != (SeparateAudioToggle.IsChecked == true);
+        s.SeparateAppAudio = SeparateAudioToggle.IsChecked == true;
         s.GpuVideoRenderer = GpuToggle.IsChecked == true;
         s.ShowStatsOverlay = StatsToggle.IsChecked == true;
         s.MediaPort = int.TryParse(MediaPortBox.Text, out var mp) ? mp : s.MediaPort;
@@ -144,6 +147,7 @@ public partial class SettingsPage : UserControl, IShellPage
         s.PreferredCodec = encoder?.Codec;
 
         AppServices.Settings.Save();
+        if (separateChanged) _shell.TransmitPage.OnAudioSettingsChanged();
         if (theme != ThemeManager.Current) ThemeManager.Apply(theme);
         SavedText.Text = $"Salvo às {DateTime.Now:HH:mm}";
         _shell.Toast(_shell.IsTransmitting ? "Configurações salvas. As mudanças de qualidade valem na próxima transmissão." : "Configurações salvas.", ToastKind.Success);

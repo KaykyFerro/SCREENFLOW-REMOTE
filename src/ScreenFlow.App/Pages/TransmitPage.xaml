@@ -216,6 +216,75 @@
                                 </StackPanel>
                             </DockPanel>
                             <controls:SpectrumVisualizer x:Name="Spectrum" Height="150" Margin="0,20,0,0" BarGap="5" Mirror="True"/>
+
+                            <!-- O que fica fora do som transmitido: a voz da rede, os sons do ScreenFlow e os apps escolhidos -->
+                            <Border Style="{StaticResource InsetCard}" Margin="0,18,0,0">
+                                <DockPanel>
+                                    <Button x:Name="ChooseAppsButton" DockPanel.Dock="Right" Content="Escolher apps" MinHeight="34" Padding="14,0" Margin="12,0,0,0"
+                                            VerticalAlignment="Center" Click="ChooseApps_Click"/>
+                                    <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE74F;" Foreground="{DynamicResource Pink}"
+                                               VerticalAlignment="Top" Margin="0,3,12,0"/>
+                                    <StackPanel VerticalAlignment="Center">
+                                        <TextBlock Text="Fica fora da transmissão" FontWeight="SemiBold"/>
+                                        <TextBlock x:Name="MutedAppsText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,2,0,0"/>
+                                    </StackPanel>
+                                </DockPanel>
+                            </Border>
+
+                            <Popup x:Name="AppsPopup" PlacementTarget="{Binding ElementName=ChooseAppsButton}" Placement="Bottom" VerticalOffset="2"
+                                   StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade" Closed="AppsPopup_Closed">
+                                <Border Width="380" Margin="14,4,14,20" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource BorderStrong}"
+                                        BorderThickness="1" CornerRadius="18" Padding="0,0,0,14">
+                                    <Border.Effect>
+                                        <DropShadowEffect BlurRadius="32" ShadowDepth="8" Direction="270" Opacity="0.45" Color="#000000"/>
+                                    </Border.Effect>
+                                    <StackPanel>
+                                        <DockPanel Margin="18,12,10,2">
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar os apps de novo"
+                                                    Click="RefreshApps_Click"/>
+                                            <TextBlock Text="Tirar o som de apps" FontSize="15.5" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                                        </DockPanel>
+                                        <TextBlock Margin="18,0,18,12" Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                                   Text="Marque os apps que quem assiste não deve ouvir. A voz da rede e os sons do ScreenFlow já ficam de fora."/>
+                                        <Border Style="{StaticResource DividerLine}"/>
+                                        <TextBlock x:Name="AppsStatus" Margin="18,14,18,4" Style="{StaticResource Caption}" TextWrapping="Wrap" Text="Procurando os apps abertos…"/>
+                                        <ScrollViewer MaxHeight="340" VerticalScrollBarVisibility="Auto">
+                                            <ItemsControl x:Name="AppsList" Margin="10,6,10,0">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <CheckBox IsChecked="{Binding Muted, Mode=TwoWay}" Margin="8,5" ToolTip="{Binding Exe}">
+                                                            <DockPanel>
+                                                                <Grid Width="28" Height="28" Margin="0,0,10,0" VerticalAlignment="Center">
+                                                                    <Border x:Name="Fallback" CornerRadius="8" Background="{DynamicResource BrandGradient}" Visibility="Collapsed">
+                                                                        <TextBlock Text="{Binding Initial}" FontWeight="Bold" FontSize="13" Foreground="{DynamicResource OnAccent}"
+                                                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                                    </Border>
+                                                                    <Image Source="{Binding Icon}" Width="28" Height="28" RenderOptions.BitmapScalingMode="HighQuality"/>
+                                                                </Grid>
+                                                                <StackPanel VerticalAlignment="Center">
+                                                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxWidth="270"/>
+                                                                    <TextBlock Text="{Binding Detail}" Style="{StaticResource Caption}" FontWeight="Normal"/>
+                                                                </StackPanel>
+                                                            </DockPanel>
+                                                        </CheckBox>
+                                                        <DataTemplate.Triggers>
+                                                            <DataTrigger Binding="{Binding Icon}" Value="{x:Null}">
+                                                                <Setter TargetName="Fallback" Property="Visibility" Value="Visible"/>
+                                                            </DataTrigger>
+                                                        </DataTemplate.Triggers>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </ScrollViewer>
+                                        <DockPanel Margin="18,12,18,0">
+                                            <Button DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Content="Pronto" MinHeight="34" Padding="18,0" Margin="12,0,0,0"
+                                                    Click="AppsDone_Click"/>
+                                            <TextBlock x:Name="AppsHint" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"
+                                                       Text="Vale na hora, até no meio da transmissão."/>
+                                        </DockPanel>
+                                    </StackPanel>
+                                </Border>
+                            </Popup>
                         </StackPanel>
                     </Border>
 

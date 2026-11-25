@@ -41,7 +41,8 @@ public sealed record HostOptions(
     StreamMode Mode = StreamMode.Screen,
     int MusicBitrateKbps = 256,
     Func<AudioProfile, IAudioSource>? AudioSourceFactory = null,
-    CameraOverlay? OverlayCamera = null);
+    CameraOverlay? OverlayCamera = null,
+    SystemAudioOptions? AudioSeparation = null);
 
 /// <summary>Câmera junto com a tela: vai numa segunda faixa de vídeo e aparece num quadrinho por cima da tela.</summary>
 public sealed record CameraOverlay(string DeviceId, string Name, int Width, int Height, int Fps);
@@ -134,6 +135,15 @@ public sealed class HostSession : IAsyncDisposable
     /// <summary>Nível e espectro do áudio capturado (null sem áudio).</summary>
     public AudioMeter? AudioMeter => _audio?.Meter;
     public string? AudioDescription => _audio?.Description;
+
+    /// <summary>O que vai no som: "todo o som do PC", "sem a voz da rede" ou "sem Spotify e a voz da rede". Null sem som.</summary>
+    public string? AudioSeparation => (_audio as SystemAudioCapture)?.Separation;
+
+    /// <summary>O som do PC está separado por app (a voz da rede fica fora). Null sem som do PC.</summary>
+    public bool? AudioSeparated => (_audio as SystemAudioCapture)?.Separated;
+
+    /// <summary>Troca os apps que ficam fora do som (vale na hora, durante a transmissão).</summary>
+    public void ConfigureAudio(SystemAudioOptions options) => (_audio as SystemAudioCapture)?.Configure(options);
 
     public event Action<string>? StatusChanged;
     public event Action? ViewersChanged;
@@ -843,7 +853,12 @@ public sealed class HostSession : IAsyncDisposable
         if (!AudioEnabled || _audio is not null) return;
         try
         {
-            _audio = _options.AudioSourceFactory?.Invoke(_audioProfile) ?? new SystemAudioCapture(_audioProfile);
+            _audio = _options.AudioSourceFactory?.Invoke(_audioProfile) ?? new SystemAudioCapture(_audioProfile, _options.AudioSeparation);
+            if (_audio is SystemAudioCapture system)
+            {
+                system.Notice += message => StatusChanged?.Invoke(message);
+                if (system.LastNotice is { } notice) StatusChanged?.Invoke(notice);
+            }
             _audio.Paused = true;
             _audio.PacketReady += OnAudioPacket;
             _audio.Start();

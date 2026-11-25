@@ -41,6 +41,15 @@ public sealed class AppSettings
     /// <summary>No modo tela, manda a câmera junto (quem assiste vê num quadrinho por cima da tela).</summary>
     public bool CameraWithScreen { get; set; }
 
+    // Som do PC
+    /// <summary>
+    /// Separa o som do PC por app (Windows 10 2004 ou mais novo): a voz da rede, os sons do ScreenFlow e os apps de
+    /// <see cref="MutedApps"/> ficam fora da transmissão. Desligado, vai todo o som do PC, como nas versões antigas.
+    /// </summary>
+    public bool SeparateAppAudio { get; set; } = true;
+    /// <summary>Apps cujo som não vai na transmissão (Spotify, Discord...).</summary>
+    public List<MutedApp> MutedApps { get; set; } = [];
+
     // Segurança
     public string? Pin { get; set; }
     public bool ApproveEachViewer { get; set; } = true;
@@ -119,6 +128,7 @@ public sealed class AppSettings
         VoiceVolume = Math.Clamp(VoiceVolume, 0, 1.5);
         VoiceSensitivity = Math.Clamp(VoiceSensitivity, 0, 1);
         RoomPeers = (RoomPeers ?? []).Select(p => p.Trim()).Where(p => p.Length is > 0 and <= 64).Distinct(StringComparer.OrdinalIgnoreCase).Take(16).ToList();
+        MutedApps = MutedApp.Normalize(MutedApps);
     }
 
     private static int ValidPort(int port, int fallback) => port is >= 1024 and <= 65535 ? port : fallback;

@@ -75,6 +75,12 @@ public static class Screenshots
             window.TransmitPage.ShowDemo();
             return Task.Delay(600);
         });
+        await Shot("19-tirar-som-de-apps.png", () =>
+        {
+            window.TransmitPage.ShowAppsDemo();
+            return Task.Delay(300);
+        }, () => (FrameworkElement)window.TransmitPage.AppsPopup.Child);
+        window.TransmitPage.AppsPopup.IsOpen = false;
         await Shot("03-assistir.png", () => Go(window, window.WatchPage));
         await Shot("04-monitoramento.png", () =>
         {

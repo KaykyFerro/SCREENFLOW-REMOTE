@@ -4,6 +4,8 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using ScreenFlow.App.Services;
 using ScreenFlow.Core;
@@ -11,6 +13,7 @@ using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Capture;
+using ScreenFlow.Infrastructure.Media;
 using ScreenFlow.Infrastructure.Network;
 using ScreenFlow.Infrastructure.Session;
 
@@ -22,6 +25,8 @@ public partial class TransmitPage : UserControl, IShellPage
     private readonly MainWindow _shell;
     private readonly ObservableCollection<PendingApproval> _approvals = [];
     private readonly ObservableCollection<ViewerRow> _viewerRows = [];
+    private readonly ObservableCollection<AppChoice> _apps = [];
+    private int _appsVersion;
     private HostSession? _session;
     private System.Net.IPAddress? _liveAddress;
     private IReadOnlyList<DisplayMonitor> _monitors = [];
@@ -36,6 +41,7 @@ public partial class TransmitPage : UserControl, IShellPage
         InitializeComponent();
         ApprovalList.ItemsSource = _approvals;
         ViewerList.ItemsSource = _viewerRows;
+        AppsList.ItemsSource = _apps;
         QualityCombo.Fill(Resolution.All.Select(r => new Choice<Resolution>(r, $"{r.Label} · {r.Width} × {r.Height}")));
         FpsCombo.Fill(Quality.FrameRates.Select(f => new Choice<int>(f, $"{f} FPS")));
         CameraQualityCombo.Fill(OverviewPage.CameraQualities);
@@ -108,6 +114,7 @@ public partial class TransmitPage : UserControl, IShellPage
             _ => ModeScreen,
         }).IsChecked = true;
         ApplyMode(Settings.Mode);
+        UpdateMutedApps();
         RefreshNetwork();
         RefreshSources();
     }
@@ -383,7 +390,8 @@ public partial class TransmitPage : UserControl, IShellPage
                 target, monitor, resolution, fps, mode == StreamMode.Screen ? Settings.BitrateKbps : 0,
                 Settings.PreferredCodec, Settings.PreferredEncoder, hardware.Encoders,
                 mode == StreamMode.AudioOnly || Settings.AudioEnabled, Settings.AudioBitrateKbps, Settings.AdaptiveQuality, Settings.FecGroupSize, Settings.UploadMbps,
-                mode, Settings.MusicBitrateKbps, OverlayCamera: overlay);
+                mode, Settings.MusicBitrateKbps, OverlayCamera: overlay,
+                AudioSeparation: new SystemAudioOptions(Settings.SeparateAppAudio, Settings.MutedApps));
 
             var session = new HostSession(options) { ApprovalHandler = RequestApprovalAsync };
             session.StatusChanged += message => Dispatcher.BeginInvoke(() => StateText.Text = message);
@@ -405,6 +413,7 @@ public partial class TransmitPage : UserControl, IShellPage
             StatBitrateLabel.Text = mode == StreamMode.AudioOnly ? "Áudio enviado" : "Vídeo";
             AudioDescription.Text = session.AudioDescription ?? (session.AudioEnabled ? "Som do PC" : "Som desligado");
             UpdateAudioCard();
+            UpdateMutedApps();
             _shell.NotifyLiveStateChanged();
             _shell.Toast(mode == StreamMode.AudioOnly ? "A festa começou. Toque uma música no PC!" : "Transmissão no ar.", ToastKind.Success);
         }
@@ -445,6 +454,7 @@ public partial class TransmitPage : UserControl, IShellPage
         StatFps.Text = StatBitrate.Text = StatUpload.Text = "—";
         StatDetails.Text = "Os números aparecem quando alguém entra.";
         AudioState.Text = "Sem som";
+        UpdateMutedApps();
         SetBadge("Parado", "TextSubtle", "SurfaceRaised");
         if (session is not null) StateText.Text = "Transmissão encerrada.";
         Telemetry.EndHost();
@@ -540,6 +550,8 @@ public partial class TransmitPage : UserControl, IShellPage
         if (stats.Camera.Length > 0) StatDetails.Text += "\n" + stats.Camera;
         var level = _session.AudioMeter?.Level ?? 0;
         AudioState.Text = !_session.AudioEnabled ? "Desligado" : level > 0.05 ? "Tocando" : "Silêncio";
+        if (_session.AudioDescription is { } description) AudioDescription.Text = description;
+        UpdateMutedApps();
         Telemetry.Record(stats, _session.Viewers.Where(v => v.State == ViewerState.Streaming).ToList());
     }
 
@@ -566,6 +578,134 @@ public partial class TransmitPage : UserControl, IShellPage
         UpdateProfileHint();
     }
 
+    // ───────────────────────── Apps cujo som fica fora ─────────────────────────
+
+    private void ChooseApps_Click(object sender, RoutedEventArgs e)
+    {
+        // Alinha a borda direita da janelinha (380 + margens de 14) com a do botão.
+        AppsPopup.HorizontalOffset = ChooseAppsButton.ActualWidth - 408 + 14;
+        AppsPopup.IsOpen = true;
+        _ = LoadAppsAsync();
+    }
+
+    private void RefreshApps_Click(object sender, RoutedEventArgs e) => _ = LoadAppsAsync();
+
+    private void AppsDone_Click(object sender, RoutedEventArgs e) => AppsPopup.IsOpen = false;
+
+    private void AppsPopup_Closed(object? sender, EventArgs e) => ApplyMutedApps();
+
+    /// <summary>Lista os apps abertos (os que estão tocando som primeiro) com os já tirados marcados.</summary>
+    private async Task LoadAppsAsync()
+    {
+        var version = ++_appsVersion;
+        var muted = (_apps.Count > 0 ? _apps.Where(a => a.Muted).Select(a => new MutedApp(a.Exe, a.Name)) : Settings.MutedApps).ToList();
+        AppsStatus.Text = "Procurando os apps abertos…";
+        AppsStatus.Visibility = Visibility.Visible;
+        IReadOnlyList<RunningApp> running;
+        try { running = await Task.Run(AppAudioCatalog.List); }
+        catch (Exception exception)
+        {
+            Log.Warn($"Não deu para listar os apps abertos: {exception.Message}");
+            running = [];
+        }
+        if (version != _appsVersion) return;
+
+        var mutedExes = muted.Select(a => a.Exe).ToHashSet();
+        var rows = running.Select(app => new AppChoice(app.Exe, app.Name, app.PlayingSound ? "Tocando som agora" : "Aberto", ToImage(app.IconPng), mutedExes.Contains(app.Exe)))
+            .Concat(muted.Where(m => running.All(r => r.Exe != m.Exe)).Select(m => new AppChoice(m.Exe, m.Name, "Fechado agora", null, true)))
+            .OrderByDescending(a => a.Muted)
+            .ToList();
+        _apps.Clear();
+        foreach (var row in rows) _apps.Add(row);
+        AppsStatus.Text = "Nenhum app com janela ou som aberto agora. Abra o app e clique em atualizar.";
+        AppsStatus.Visibility = _apps.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        AppsHint.Text = ProcessLoopbackSupported ? "Vale na hora, até no meio da transmissão." : "Precisa do Windows 10 versão 2004 ou mais novo.";
+    }
+
+    private static bool ProcessLoopbackSupported => ProcessLoopbackCapture.Supported;
+
+    /// <summary>Salva os apps marcados e, se estiver ao vivo, troca o som na hora.</summary>
+    private void ApplyMutedApps()
+    {
+        if (_apps.Count == 0 || AppServices.DemoMode) return;
+        var muted = MutedApp.Normalize(_apps.Where(a => a.Muted).Select(a => new MutedApp(a.Exe, a.Name)));
+        if (muted.Select(a => a.Exe).SequenceEqual(Settings.MutedApps.Select(a => a.Exe))) return;
+        Settings.MutedApps = muted;
+        AppServices.Settings.Save();
+        OnAudioSettingsChanged();
+        var names = muted.Select(a => a.Name).ToList();
+        _shell.Toast(names.Count == 0
+            ? "Os outros apps voltam a ir no som da transmissão."
+            : $"O som de {MutedApp.JoinNames(names)} fica fora da transmissão.", ToastKind.Success);
+    }
+
+    /// <summary>As opções do som do PC mudaram (aqui ou nas Configurações): vale na hora para a transmissão no ar.</summary>
+    public void OnAudioSettingsChanged()
+    {
+        _session?.ConfigureAudio(new SystemAudioOptions(Settings.SeparateAppAudio, Settings.MutedApps));
+        UpdateMutedApps();
+    }
+
+    /// <summary>"Fica fora da transmissão": o que foi pedido ou, ao vivo, o que está acontecendo de fato.</summary>
+    private void UpdateMutedApps()
+    {
+        var names = Settings.MutedApps.Select(a => a.Name).ToList();
+        var live = _session?.AudioSeparated;
+        if (live == true)
+            MutedAppsText.Text = $"Agora vai o som do PC {_session!.AudioSeparation}.";
+        else if (live == false)
+            MutedAppsText.Text = Settings.SeparateAppAudio
+                ? "Agora vai todo o som do PC, com a voz da rede junto: o Windows não deixou separar o som por app."
+                : "Agora vai todo o som do PC, com a voz da rede junto (separar o som por app está desligado nas Configurações).";
+        else if (!Settings.SeparateAppAudio)
+            MutedAppsText.Text = "Nada: separar o som por app está desligado nas Configurações, então vai todo o som do PC, até a voz da rede.";
+        else
+            MutedAppsText.Text = names.Count == 0
+                ? "A voz da rede e os sons do ScreenFlow. Dá para tirar outros apps também."
+                : $"A voz da rede, os sons do ScreenFlow, {MutedApp.JoinNames(names)}.";
+    }
+
+    private static ImageSource? ToImage(byte[]? png)
+    {
+        if (png is null) return null;
+        try
+        {
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = new System.IO.MemoryStream(png);
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch (Exception exception) when (exception is NotSupportedException or InvalidOperationException or System.IO.IOException) { return null; }
+    }
+
+    /// <summary>Um app na lista de "Tirar o som de apps".</summary>
+    public sealed class AppChoice(string exe, string name, string detail, ImageSource? icon, bool muted) : INotifyPropertyChanged
+    {
+        private bool _muted = muted;
+
+        public string Exe { get; } = exe;
+        public string Name { get; } = name;
+        public string Detail { get; } = detail;
+        public ImageSource? Icon { get; } = icon;
+        public string Initial => Name.Length > 0 ? char.ToUpperInvariant(Name[0]).ToString() : "?";
+
+        public bool Muted
+        {
+            get => _muted;
+            set
+            {
+                if (_muted == value) return;
+                _muted = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Muted)));
+            }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+    }
+
     // ───────────────────────── Capturas de tela (CI) ─────────────────────────
 
     /// <summary>Mostra a tela "ao vivo" com dados de exemplo, sem abrir portas nem capturar nada.</summary>
@@ -587,8 +727,9 @@ public partial class TransmitPage : UserControl, IShellPage
         StatUpload.Text = "117";
         StatDetails.Text = "HEVC · hevc_nvenc · Windows.Graphics.Capture · alvo 1440p 165 FPS 40 Mbps · rede estável · vídeo e upload em Mbps"
                            + "\nCâmera junto: 1280×720 · 30 FPS · 2.1 Mbps";
-        AudioDescription.Text = "Alto-falantes (Realtek) · Opus 160 kbps";
+        AudioDescription.Text = "Alto-falantes (Realtek) · Opus 160 kbps · sem Spotify, Discord e a voz da rede";
         AudioState.Text = "Tocando";
+        MutedAppsText.Text = "Agora vai o som do PC sem Spotify, Discord e a voz da rede.";
         _viewerRows.Clear();
         foreach (var info in DemoData.Audience())
         {
@@ -599,6 +740,23 @@ public partial class TransmitPage : UserControl, IShellPage
         NoViewers.Visibility = Visibility.Collapsed;
         ViewerCount.Text = "3 pessoas";
         UpdateAudioCard();
+    }
+
+    /// <summary>Abre "Tirar o som de apps" com apps de exemplo (para a captura de tela).</summary>
+    internal void ShowAppsDemo()
+    {
+        _apps.Clear();
+        foreach (var app in new[]
+                 {
+                     new AppChoice("spotify.exe", "Spotify", "Tocando som agora", null, true),
+                     new AppChoice("discord.exe", "Discord", "Aberto", null, true),
+                     new AppChoice("forzahorizon5.exe", "Forza Horizon 5", "Tocando som agora", null, false),
+                     new AppChoice("chrome.exe", "Google Chrome", "Tocando som agora", null, false),
+                     new AppChoice("steamwebhelper.exe", "Steam", "Aberto", null, false),
+                 })
+            _apps.Add(app);
+        AppsStatus.Visibility = Visibility.Collapsed;
+        AppsPopup.IsOpen = true;
     }
 
     public sealed class PendingApproval(Guid id, string name, string address)
