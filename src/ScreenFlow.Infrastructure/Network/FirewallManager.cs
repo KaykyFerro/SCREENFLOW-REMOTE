@@ -8,11 +8,13 @@ namespace ScreenFlow.Infrastructure.Network;
 
 /// <summary>
 /// Cria as regras de entrada do Firewall do Windows para as portas do ScreenFlow.
+/// O instalador já cria as mesmas regras (mesmos nomes); aqui é só para quem recusou na instalação ou mudou as portas.
 /// Pede elevação (UAC) uma vez; o usuário pode recusar.
 /// </summary>
 public static class FirewallManager
 {
     private const string RulePrefix = "ScreenFlow";
+    public const string ApplicationRule = RulePrefix + " (aplicativo)";
 
     public static IReadOnlyList<(string Name, string Protocol, int Port)> Rules(int mediaPort, int controlPort, int discoveryPort) =>
     [
@@ -58,6 +60,9 @@ public static class FirewallManager
             script.Append($"netsh advfirewall firewall delete rule name=\"{name}\" >nul 2>&1 & ");
             script.Append($"netsh advfirewall firewall add rule name=\"{name}\" dir=in action=allow protocol={protocol} localport={port} program=\"{program}\" profile=any enable=yes & ");
         }
+        // Regra pelo programa (vale para qualquer porta que o app use), igual à do instalador.
+        script.Append($"netsh advfirewall firewall delete rule name=\"{ApplicationRule}\" >nul 2>&1 & ");
+        script.Append($"netsh advfirewall firewall add rule name=\"{ApplicationRule}\" dir=in action=allow program=\"{program}\" profile=any enable=yes & ");
         script.Append("exit /b 0");
 
         try

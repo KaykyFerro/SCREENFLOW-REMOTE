@@ -83,4 +83,9 @@ public sealed record ViewerStatistics(
     string Decoder,
     long FramesDropped,
     long FecRecovered,
-    string QualityReason);
+    string QualityReason,
+    StreamMode Mode = StreamMode.Screen,
+    double AudioBufferMs = 0,
+    long AudioRecovered = 0,
+    double AudioKbps = 0,
+    bool GpuRendering = false);

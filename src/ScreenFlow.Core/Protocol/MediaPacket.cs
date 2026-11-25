@@ -2,7 +2,11 @@ using System.Buffers.Binary;
 
 namespace ScreenFlow.Core.Protocol;
 
-public enum MediaPacketType : byte { Video = 1, Audio = 2, VideoFec = 3, Probe = 4 }
+/// <summary>
+/// Tipos de datagrama. <see cref="AudioPair"/> (1.0.1) leva o quadro de áudio atual e o anterior, para a festa de música;
+/// só é enviado quando todos os viewers anunciam suporte, então versões antigas nunca o recebem.
+/// </summary>
+public enum MediaPacketType : byte { Video = 1, Audio = 2, VideoFec = 3, Probe = 4, AudioPair = 5 }
 
 [Flags]
 public enum MediaPacketFlags : byte { None = 0, Keyframe = 1, Retransmit = 2 }
@@ -54,7 +58,35 @@ public struct MediaHeader
         header.Flags = (MediaPacketFlags)source[21];
         header.TimestampUs = BinaryPrimitives.ReadInt64BigEndian(source[22..]);
         header.PayloadLength = BinaryPrimitives.ReadUInt16BigEndian(source[30..]);
-        return header.Type is >= MediaPacketType.Video and <= MediaPacketType.Probe;
+        return header.Type is >= MediaPacketType.Video and <= MediaPacketType.AudioPair;
+    }
+}
+
+/// <summary>
+/// Áudio com redundância: [tamanho do quadro atual (2 bytes)][quadro atual][quadro anterior].
+/// Se um datagrama se perde, o seguinte traz o quadro perdido e o som não falha.
+/// </summary>
+public static class AudioPair
+{
+    public static byte[] Pack(ReadOnlySpan<byte> current, ReadOnlySpan<byte> previous)
+    {
+        if (current.Length > ushort.MaxValue) throw new ArgumentOutOfRangeException(nameof(current));
+        var payload = new byte[2 + current.Length + previous.Length];
+        BinaryPrimitives.WriteUInt16BigEndian(payload, (ushort)current.Length);
+        current.CopyTo(payload.AsSpan(2));
+        previous.CopyTo(payload.AsSpan(2 + current.Length));
+        return payload;
+    }
+
+    public static bool TryUnpack(ReadOnlySpan<byte> payload, out ReadOnlySpan<byte> current, out ReadOnlySpan<byte> previous)
+    {
+        current = previous = default;
+        if (payload.Length < 2) return false;
+        var length = BinaryPrimitives.ReadUInt16BigEndian(payload);
+        if (length == 0 || 2 + length > payload.Length) return false;
+        current = payload.Slice(2, length);
+        previous = payload[(2 + length)..];
+        return true;
     }
 }
 

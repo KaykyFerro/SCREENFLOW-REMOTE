@@ -42,6 +42,34 @@ jobs:
           if (-not $report) { throw "O comando de diagnóstico não gerou relatório." }
           Get-Content $report
           if (-not (Select-String -Path $report -Pattern "FFmpeg n?7\.")) { throw "FFmpeg não carregou no app publicado." }
+      - name: Self-test (music party over loopback)
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath artifacts/publish/ScreenFlow.exe -ArgumentList "--autoteste" -PassThru -Wait -NoNewWindow
+          $report = Get-ChildItem "$env:LOCALAPPDATA/ScreenFlow/logs/autoteste-*.txt" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+          if ($report) { Get-Content $report } else { Write-Host "Sem relatório do autoteste." }
+          if ($p.ExitCode -ne 0) {
+            Get-Content (Get-ChildItem "$env:LOCALAPPDATA/ScreenFlow/logs/screenflow-*.log" | Sort-Object LastWriteTime | Select-Object -Last 1) -Tail 80
+            throw "Autoteste falhou (código $($p.ExitCode))."
+          }
+      - name: Screenshots of every screen
+        shell: pwsh
+        run: |
+          $out = Join-Path $PWD "artifacts/capturas"
+          $p = Start-Process -FilePath artifacts/publish/ScreenFlow.exe -ArgumentList @("--capturas", "`"$out`"") -PassThru -Wait -NoNewWindow
+          if (Test-Path $out) { Get-ChildItem $out | Format-Table Name, Length -AutoSize }
+          if ($p.ExitCode -ne 0) {
+            Get-Content (Get-ChildItem "$env:LOCALAPPDATA/ScreenFlow/logs/screenflow-*.log" | Sort-Object LastWriteTime | Select-Object -Last 1) -Tail 120
+            throw "As capturas de tela falharam (código $($p.ExitCode))."
+          }
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenFlow-capturas
+          path: artifacts/capturas/
+          if-no-files-found: warn
+          retention-days: 14
       - name: Install Inno Setup
         run: choco install innosetup --yes --no-progress
       - name: Build Windows installer

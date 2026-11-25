@@ -8,10 +8,10 @@ Comece sempre por **Configurações › Diagnóstico** (ou `ScreenFlow.exe --dia
 |---|---|---|
 | "Radmin VPN não encontrado" | Radmin não instalado | Instale em <https://www.radmin-vpn.com/> |
 | "Radmin VPN sem rede ativa" | Instalado, mas fora de uma rede | Entre na mesma rede que os outros |
-| Viewer fica em "Conectando" | Firewall do host bloqueando | Configurações › Rede › Criar regras do firewall |
-| "O ScreenFlow não está transmitindo em …" | Host não clicou em Começar, ou portas diferentes | Confira as portas nos dois lados |
+| Viewer fica em "Conectando" | Firewall do host bloqueando | O instalador libera as portas; se mudou as portas, use Configurações › Rede e firewall › Liberar portas (ou o aviso no sininho) |
+| "O ScreenFlow não está transmitindo em …" | Host não clicou em Iniciar, ou portas diferentes | Confira as portas nos dois lados |
 | Host não aparece na lista | Broadcast bloqueado | Digite o IP direto |
-| Conecta mas não chega vídeo | UDP 47800 bloqueado no host ou no viewer | Crie as regras do firewall nos dois PCs |
+| Conecta mas não chega vídeo | UDP 47800 bloqueado no host ou no viewer | Libere as portas no firewall nos dois PCs |
 
 Teste a rede com `ping 26.x.x.x`. No Radmin, uma conexão indireta (relay) tem banda bem menor que uma direta.
 
@@ -25,13 +25,24 @@ Teste a rede com `ping 26.x.x.x`. No Radmin, uma conexão indireta (relay) tem b
 
 ## Áudio
 
-- Ligue **Áudio do sistema** antes de começar a transmitir.
-- O áudio capturado é o do dispositivo de saída padrão do Windows.
+- Ligue **Compartilhar o som do PC** antes de começar a transmitir (na festa de música ele sempre vai).
+- O áudio capturado é o do dispositivo de saída padrão do Windows. Se trocar o fone ou a caixa no meio, o app acompanha sozinho.
+- O visualizador da tela Transmissão mexe mesmo antes de alguém entrar: se ele fica parado com música tocando, o som está saindo por outro dispositivo.
 - No player, M liga/desliga o som e as setas mudam o volume.
+- `ScreenFlow.exe --autoteste` confere a festa de música no próprio PC (host e viewer no 127.0.0.1).
+
+## Câmera
+
+- A câmera só liga quando alguém entra. Se outro app (Discord, OBS, Teams) estiver usando a câmera, feche-o e clique em atualizar ao lado da lista.
+- A câmera usa o formato mais próximo da qualidade escolhida que ela suportar.
+
+## Player
+
+- Se a imagem ficar preta com o som funcionando, desligue **Desenhar o vídeo direto na GPU** em Configurações › Player: o vídeo passa a ir pela CPU.
 
 ## Atualização
 
-- "Não foi possível verificar atualizações": sem internet ou sem release publicado ainda.
+- "Não foi possível verificar": sem internet ou sem release publicado ainda. A tela Atualizações tem o botão **Procurar agora**.
 - Se o instalador falhar, baixe manualmente em Releases.
 
 ## Build

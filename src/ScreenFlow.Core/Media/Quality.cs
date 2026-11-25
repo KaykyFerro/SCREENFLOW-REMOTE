@@ -35,6 +35,22 @@ public static class Quality
 {
     public static IReadOnlyList<int> FrameRates { get; } = [30, 60, 120, 144, 165];
 
+    /// <summary>Taxas comuns de webcams.</summary>
+    public static IReadOnlyList<int> CameraFrameRates { get; } = [15, 30, 60];
+
+    /// <summary>Nome curto do perfil pela taxa de pixels (largura × altura × FPS): Leve, Alto, Ultra ou Máximo.</summary>
+    public static string TierLabel(Resolution resolution, int fps)
+    {
+        var rate = resolution.Pixels * (long)Math.Max(1, fps);
+        return rate switch
+        {
+            >= 480_000_000 => "Máximo",
+            >= 200_000_000 => "Ultra",
+            >= 100_000_000 => "Alto",
+            _ => "Leve",
+        };
+    }
+
     /// <summary>
     /// Bitrate alvo em kbps para HEVC/AV1. H.264 recebe +40% para qualidade equivalente.
     /// Valores baseados na tabela de perfis do projeto (1080p60 15–25, 1440p144 40–60, 4K60 40–60, 4K165 90–150 Mbps).

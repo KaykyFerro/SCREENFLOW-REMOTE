@@ -158,9 +158,11 @@ public sealed class WgcCapture : ICaptureSource
 
 public static class CaptureFactory
 {
-    /// <summary>WGC primeiro (inclui cursor e janelas); DXGI Duplication como reserva para monitores.</summary>
+    /// <summary>Câmera pelo Media Capture; tela por WGC primeiro (inclui cursor e janelas) e DXGI Duplication como reserva.</summary>
     public static ICaptureSource Create(GpuDevice gpu, ScreenFlow.Core.CaptureTarget target, ScreenFlow.Core.DisplayMonitor? monitor, int fps)
     {
+        if (target.Kind == ScreenFlow.Core.CaptureKind.Camera)
+            return new CameraCapture(gpu, target.Id, target.Width, target.Height, target.RefreshRateHz > 0 ? target.RefreshRateHz : fps);
         if (WgcCapture.IsSupported)
         {
             try

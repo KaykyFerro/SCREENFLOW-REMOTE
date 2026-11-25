@@ -1,154 +1,273 @@
 <UserControl x:Class="ScreenFlow.App.Pages.TransmitPage"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <ScrollViewer VerticalScrollBarVisibility="Auto">
-        <Grid MaxWidth="{DynamicResource ContentMaxWidth}" Margin="24">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="420"/>
-                <ColumnDefinition Width="24"/>
-                <ColumnDefinition Width="*"/>
-            </Grid.ColumnDefinitions>
-
-            <!-- Coluna esquerda: IP e opções -->
-            <StackPanel>
-                <Border Style="{StaticResource Card}">
-                    <StackPanel>
-                        <TextBlock Style="{StaticResource Label}" Text="SEU IP DO RADMIN"/>
-                        <DockPanel>
-                            <Button x:Name="CopyButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE8C8;" ToolTip="Copiar IP" Click="Copy_Click" VerticalAlignment="Center"/>
-                            <TextBlock x:Name="IpText" Style="{StaticResource Display}" Foreground="{DynamicResource Accent}" Text="—" TextTrimming="CharacterEllipsis"/>
-                        </DockPanel>
-                        <TextBlock x:Name="IpHint" Style="{StaticResource Muted}" Margin="0,6,0,0" Text="Passe este IP para quem vai assistir."/>
-
-                        <StackPanel x:Name="RadminMissing" Visibility="Collapsed" Margin="0,12,0,0">
-                            <TextBlock Style="{StaticResource Body}" Foreground="{DynamicResource Warning}" Text="O Radmin VPN não está conectado. Instale, entre na mesma rede que os outros e tente de novo."/>
-                            <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                <Button Content="Instalar o Radmin VPN" Click="InstallRadmin_Click"/>
-                                <Button Content="Tentar de novo" Margin="8,0,0,0" Click="RefreshNetwork_Click"/>
-                            </StackPanel>
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:controls="clr-namespace:ScreenFlow.App.Controls">
+    <ScrollViewer Style="{StaticResource PageScroll}">
+        <StackPanel Margin="{DynamicResource PagePadding}" MaxWidth="{DynamicResource ContentMaxWidth}">
+            <DockPanel Margin="0,22,0,6">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Border x:Name="LiveBadge" Style="{StaticResource Pill}" Margin="0,0,14,0">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse x:Name="LiveDot" Width="7" Height="7" Fill="{DynamicResource TextSubtle}" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="LiveText" Text="Parado"/>
                         </StackPanel>
+                    </Border>
+                    <Button x:Name="StartButton" Style="{StaticResource PrimaryButton}" MinHeight="46" Click="Start_Click">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock x:Name="StartGlyph" Style="{StaticResource Icon}" Text="&#xE7F4;" Margin="0,0,10,0"/>
+                            <TextBlock x:Name="StartText" Text="Iniciar transmissão" FontSize="15"/>
+                        </StackPanel>
+                    </Button>
+                    <Button x:Name="StopButton" Style="{StaticResource LiveButton}" MinHeight="46" Click="Stop_Click" Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE71A;" Margin="0,0,10,0"/>
+                            <TextBlock Text="Encerrar" FontSize="15"/>
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+                <TextBlock Style="{StaticResource PageTitle}" Text="Transmissão"/>
+            </DockPanel>
+            <TextBlock x:Name="StateText" Style="{StaticResource Subtitle}" Margin="0,0,0,24" Text="Escolha o que compartilhar e clique em Iniciar."/>
 
-                        <TextBlock Style="{StaticResource Label}" Text="REDE USADA" Margin="0,16,0,6"/>
-                        <ComboBox x:Name="AdapterCombo" SelectionChanged="Adapter_SelectionChanged"/>
-                    </StackPanel>
-                </Border>
-
-                <Border Style="{StaticResource Card}">
-                    <StackPanel x:Name="OptionsPanel">
-                        <TextBlock Style="{StaticResource Heading}" Text="O que transmitir"/>
-                        <TextBlock Style="{StaticResource Label}" Text="MONITOR OU JANELA" Margin="0,12,0,6"/>
-                        <DockPanel Margin="{DynamicResource FieldGap}">
-                            <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Atualizar lista" Click="RefreshSources_Click" Margin="6,0,0,0"/>
-                            <ComboBox x:Name="SourceCombo"/>
-                        </DockPanel>
-
-                        <Grid Margin="{DynamicResource FieldGap}">
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition/>
-                                <ColumnDefinition Width="12"/>
-                                <ColumnDefinition/>
-                            </Grid.ColumnDefinitions>
-                            <StackPanel>
-                                <TextBlock Style="{StaticResource Label}" Text="QUALIDADE"/>
-                                <ComboBox x:Name="QualityCombo"/>
-                            </StackPanel>
-                            <StackPanel Grid.Column="2">
-                                <TextBlock Style="{StaticResource Label}" Text="FPS"/>
-                                <ComboBox x:Name="FpsCombo"/>
-                            </StackPanel>
-                        </Grid>
-                        <TextBlock x:Name="ProfileHint" Style="{StaticResource Caption}" Margin="0,0,0,12"/>
-
-                        <CheckBox x:Name="AudioToggle" Style="{StaticResource Switch}" Content="Áudio do sistema"/>
-                        <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de mostrar a tela"/>
-                        <TextBlock Style="{StaticResource Label}" Text="PIN (OPCIONAL)"/>
-                        <TextBox x:Name="PinBox" MaxLength="32" ToolTip="Deixe vazio para não pedir PIN. Mínimo de 4 caracteres."/>
-                        <TextBlock Style="{StaticResource Caption}" Margin="0,6,0,0" Text="Qualquer pessoa na mesma rede Radmin alcança o seu IP. Use PIN ou aprovação para controlar quem assiste."/>
-                    </StackPanel>
-                </Border>
-
-                <Button x:Name="StartButton" Style="{StaticResource PrimaryButton}" Content="Começar a transmitir" MinHeight="52" FontSize="16" Click="Start_Click"/>
-                <Button x:Name="StopButton" Style="{StaticResource DangerButton}" Content="Encerrar transmissão" MinHeight="52" FontSize="16" Click="Stop_Click" Visibility="Collapsed"/>
-            </StackPanel>
-
-            <!-- Coluna direita: estado ao vivo -->
-            <StackPanel Grid.Column="2">
-                <Border Style="{StaticResource Card}">
+            <!-- O que compartilhar -->
+            <UniformGrid x:Name="ModeGrid" Columns="3" Margin="0,0,-16,20">
+                <RadioButton x:Name="ModeScreen" GroupName="mode" Style="{StaticResource ModeCard}" Margin="0,0,16,0" Checked="Mode_Checked">
                     <StackPanel>
-                        <DockPanel>
-                            <Border x:Name="LiveBadge" DockPanel.Dock="Right" Style="{StaticResource Badge}" VerticalAlignment="Center">
-                                <TextBlock x:Name="LiveText" Text="PARADO" FontSize="11" FontWeight="Bold" Foreground="{DynamicResource TextMuted}"/>
+                        <Border Style="{StaticResource IconTile}">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE7F4;"/>
+                        </Border>
+                        <TextBlock Style="{StaticResource Heading}" Text="Tela" Margin="0,14,0,4"/>
+                        <TextBlock Style="{StaticResource Muted}" FontSize="13.5" Text="Monitor ou janela, até 4K a 165 FPS, com o som do PC."/>
+                    </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="ModeCamera" GroupName="mode" Style="{StaticResource ModeCard}" Margin="0,0,16,0" Checked="Mode_Checked">
+                    <StackPanel>
+                        <Border Style="{StaticResource IconTileCyan}">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8B8;"/>
+                        </Border>
+                        <TextBlock Style="{StaticResource Heading}" Text="Câmera" Margin="0,14,0,4"/>
+                        <TextBlock Style="{StaticResource Muted}" FontSize="13.5" Text="Webcam ou placa de captura. Só liga quando alguém entra."/>
+                    </StackPanel>
+                </RadioButton>
+                <RadioButton x:Name="ModeParty" GroupName="mode" Style="{StaticResource ModeCard}" Margin="0,0,16,0" Checked="Mode_Checked">
+                    <StackPanel>
+                        <Border Style="{StaticResource IconTilePink}">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8D6;"/>
+                        </Border>
+                        <TextBlock Style="{StaticResource Heading}" Text="Festa de música" Margin="0,14,0,4"/>
+                        <TextBlock Style="{StaticResource Muted}" FontSize="13.5" Text="Só o som do PC, em qualidade de música, sem vídeo."/>
+                    </StackPanel>
+                </RadioButton>
+            </UniformGrid>
+
+            <Grid x:Name="Columns">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="410"/>
+                    <ColumnDefinition Width="22"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Coluna da esquerda: opções -->
+                <StackPanel>
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel x:Name="OptionsPanel">
+                            <TextBlock x:Name="OptionsTitle" Style="{StaticResource Heading}" Text="Tela" Margin="0,0,0,18"/>
+
+                            <StackPanel x:Name="ScreenOptions">
+                                <TextBlock Style="{StaticResource Label}" Text="Monitor ou janela"/>
+                                <DockPanel Margin="{DynamicResource FieldGap}">
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Atualizar a lista" Click="RefreshSources_Click" Margin="8,0,0,0"/>
+                                    <ComboBox x:Name="SourceCombo"/>
+                                </DockPanel>
+                                <Grid Margin="{DynamicResource FieldGap}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="1.5*"/>
+                                        <ColumnDefinition Width="12"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel>
+                                        <TextBlock Style="{StaticResource Label}" Text="Resolução"/>
+                                        <ComboBox x:Name="QualityCombo"/>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2">
+                                        <TextBlock Style="{StaticResource Label}" Text="FPS"/>
+                                        <ComboBox x:Name="FpsCombo"/>
+                                    </StackPanel>
+                                </Grid>
+                            </StackPanel>
+
+                            <StackPanel x:Name="CameraOptions" Visibility="Collapsed">
+                                <TextBlock Style="{StaticResource Label}" Text="Câmera"/>
+                                <DockPanel Margin="{DynamicResource FieldGap}">
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar câmeras de novo" Click="RefreshCameras_Click" Margin="8,0,0,0"/>
+                                    <ComboBox x:Name="CameraCombo"/>
+                                </DockPanel>
+                                <TextBlock Style="{StaticResource Label}" Text="Qualidade"/>
+                                <ComboBox x:Name="CameraQualityCombo" Margin="{DynamicResource FieldGap}"/>
+                            </StackPanel>
+
+                            <StackPanel x:Name="PartyOptions" Visibility="Collapsed">
+                                <TextBlock Style="{StaticResource Label}" Text="Qualidade do som"/>
+                                <ComboBox x:Name="MusicCombo" Margin="{DynamicResource FieldGap}"/>
+                                <Border Style="{StaticResource InsetCard}" Margin="0,0,0,14">
+                                    <DockPanel>
+                                        <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE946;" Foreground="{DynamicResource Violet}" VerticalAlignment="Top" Margin="0,2,12,0"/>
+                                        <TextBlock Style="{StaticResource Muted}" FontSize="13" LineHeight="19"
+                                                   Text="Toca tudo o que sai no som do PC (Spotify, YouTube, jogos). Opus estéreo 48 kHz, com cópia de cada pacote no seguinte: se um se perder na rede, ninguém percebe."/>
+                                    </DockPanel>
+                                </Border>
+                            </StackPanel>
+
+                            <CheckBox x:Name="AudioToggle" Style="{StaticResource Switch}" Content="Compartilhar o som do PC"/>
+                            <TextBlock x:Name="ProfileHint" Style="{StaticResource Caption}"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel x:Name="AccessPanel">
+                            <TextBlock Style="{StaticResource Heading}" Text="Quem pode entrar" Margin="0,0,0,16"/>
+                            <TextBlock Style="{StaticResource Caption}" Text="Seu IP do Radmin"/>
+                            <DockPanel Margin="0,2,0,0">
+                                <Button x:Name="CopyButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE8C8;" ToolTip="Copiar o IP" Click="Copy_Click" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="IpText" FontFamily="{DynamicResource FontDisplay}" FontSize="30" FontWeight="Bold" Foreground="{DynamicResource AccentText}" Text="—"
+                                           TextTrimming="CharacterEllipsis"/>
+                            </DockPanel>
+                            <TextBlock x:Name="IpHint" Style="{StaticResource Caption}" Margin="0,2,0,0" Text="Passe este IP para quem vai assistir."/>
+
+                            <Border x:Name="RadminMissing" Visibility="Collapsed" Margin="0,14,0,0" CornerRadius="{DynamicResource RadiusLg}" Padding="14,12"
+                                    Background="{DynamicResource AmberSoft}">
+                                <StackPanel>
+                                    <TextBlock Style="{StaticResource Body}" FontSize="13" Foreground="{DynamicResource Amber}"
+                                               Text="O Radmin VPN não está conectado. Instale, entre na mesma rede que os outros e tente de novo."/>
+                                    <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                        <Button Content="Baixar o Radmin VPN" MinHeight="34" Click="InstallRadmin_Click"/>
+                                        <Button Content="Tentar de novo" MinHeight="34" Margin="8,0,0,0" Click="RefreshNetwork_Click"/>
+                                    </StackPanel>
+                                </StackPanel>
                             </Border>
-                            <TextBlock Style="{StaticResource Heading}" Text="Transmissão"/>
-                        </DockPanel>
-                        <TextBlock x:Name="StateText" Style="{StaticResource Muted}" Margin="0,4,0,16" Text="Escolha o que transmitir e clique em Começar."/>
-                        <UniformGrid Columns="4">
-                            <StackPanel Margin="0,0,12,0">
-                                <TextBlock Style="{StaticResource Label}" Text="ASSISTINDO"/>
-                                <TextBlock x:Name="StatViewers" FontSize="22" FontWeight="SemiBold" Text="0"/>
-                            </StackPanel>
-                            <StackPanel Margin="0,0,12,0">
-                                <TextBlock Style="{StaticResource Label}" Text="FPS"/>
-                                <TextBlock x:Name="StatFps" FontSize="22" FontWeight="SemiBold" Text="—"/>
-                            </StackPanel>
-                            <StackPanel Margin="0,0,12,0">
-                                <TextBlock Style="{StaticResource Label}" Text="VÍDEO"/>
-                                <TextBlock x:Name="StatBitrate" FontSize="22" FontWeight="SemiBold" Text="—"/>
-                            </StackPanel>
-                            <StackPanel>
-                                <TextBlock Style="{StaticResource Label}" Text="UPLOAD TOTAL"/>
-                                <TextBlock x:Name="StatUpload" FontSize="22" FontWeight="SemiBold" Text="—"/>
-                            </StackPanel>
-                        </UniformGrid>
-                        <TextBlock x:Name="StatDetails" Style="{StaticResource Caption}" Margin="0,12,0,0"/>
-                    </StackPanel>
-                </Border>
 
-                <Border x:Name="ApprovalCard" Style="{StaticResource Card}" Visibility="Collapsed" BorderBrush="{DynamicResource Accent}">
-                    <StackPanel>
-                        <TextBlock Style="{StaticResource Heading}" Text="Pedindo para entrar"/>
-                        <ItemsControl x:Name="ApprovalList" Margin="0,8,0,0">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <Border Background="{DynamicResource SurfaceRaised}" CornerRadius="{DynamicResource RadiusMd}" Padding="12,10" Margin="0,0,0,6">
-                                        <DockPanel>
-                                            <Button DockPanel.Dock="Right" Content="Recusar" Margin="8,0,0,0" Click="Deny_Click" Tag="{Binding}"/>
-                                            <Button DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Content="Aceitar" Click="Approve_Click" Tag="{Binding}"/>
-                                            <StackPanel VerticalAlignment="Center">
-                                                <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
-                                                <TextBlock Text="{Binding Address}" Style="{StaticResource Caption}"/>
-                                            </StackPanel>
-                                        </DockPanel>
-                                    </Border>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </StackPanel>
-                </Border>
+                            <TextBlock Style="{StaticResource Label}" Text="Rede usada" Margin="0,18,0,7"/>
+                            <ComboBox x:Name="AdapterCombo" SelectionChanged="Adapter_SelectionChanged"/>
+                            <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de entrar" Margin="0,18,0,16"/>
+                            <TextBlock Style="{StaticResource Label}" Text="PIN (opcional)"/>
+                            <TextBox x:Name="PinBox" Tag="Sem PIN" MaxLength="32" ToolTip="Deixe vazio para não pedir PIN. Mínimo de 4 caracteres."/>
+                            <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0"
+                                       Text="Qualquer pessoa na mesma rede Radmin alcança o seu IP. Use PIN ou aprovação para controlar quem entra."/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
 
-                <Border Style="{StaticResource Card}">
-                    <StackPanel>
-                        <TextBlock Style="{StaticResource Heading}" Text="Quem está assistindo"/>
-                        <TextBlock x:Name="NoViewers" Style="{StaticResource Muted}" Margin="0,4,0,0" Text="Ninguém ainda. Quem estiver na sua rede Radmin vê você na lista da tela Assistir."/>
-                        <ItemsControl x:Name="ViewerList" Margin="0,12,0,0">
-                            <ItemsControl.ItemTemplate>
-                                <DataTemplate>
-                                    <Border Background="{DynamicResource SurfaceRaised}" CornerRadius="{DynamicResource RadiusMd}" Padding="12,10" Margin="0,0,0,6">
-                                        <DockPanel>
-                                            <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE711;" ToolTip="Remover da transmissão" Click="Kick_Click" Tag="{Binding Id}"/>
-                                            <Button DockPanel.Dock="Right" Content="Testar banda" Margin="8,0,4,0" Click="Bandwidth_Click" Tag="{Binding Id}"/>
-                                            <StackPanel VerticalAlignment="Center">
-                                                <TextBlock Text="{Binding Title}" FontWeight="SemiBold"/>
-                                                <TextBlock Text="{Binding Details}" Style="{StaticResource Caption}"/>
-                                            </StackPanel>
-                                        </DockPanel>
-                                    </Border>
-                                </DataTemplate>
-                            </ItemsControl.ItemTemplate>
-                        </ItemsControl>
-                    </StackPanel>
-                </Border>
-            </StackPanel>
-        </Grid>
+                <!-- Coluna da direita: ao vivo -->
+                <StackPanel Grid.Column="2">
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <UniformGrid x:Name="StatsGrid" Columns="4" Margin="0,0,-12,0" SizeChanged="StatsGrid_SizeChanged">
+                                <Border Style="{StaticResource InsetCard}" Margin="0,0,12,0">
+                                    <StackPanel>
+                                        <TextBlock Style="{StaticResource Caption}" Text="Assistindo"/>
+                                        <TextBlock x:Name="StatViewers" Style="{StaticResource Stat}" Text="0" Margin="0,4,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Style="{StaticResource InsetCard}" Margin="0,0,12,0">
+                                    <StackPanel>
+                                        <TextBlock x:Name="StatFpsLabel" Style="{StaticResource Caption}" Text="FPS"/>
+                                        <TextBlock x:Name="StatFps" Style="{StaticResource Stat}" Text="—" Margin="0,4,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Style="{StaticResource InsetCard}" Margin="0,0,12,0">
+                                    <StackPanel>
+                                        <TextBlock x:Name="StatBitrateLabel" Style="{StaticResource Caption}" Text="Vídeo"/>
+                                        <TextBlock x:Name="StatBitrate" Style="{StaticResource Stat}" Text="—" Margin="0,4,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Style="{StaticResource InsetCard}" Margin="0,0,12,0">
+                                    <StackPanel>
+                                        <TextBlock Style="{StaticResource Caption}" Text="Upload total"/>
+                                        <TextBlock x:Name="StatUpload" Style="{StaticResource Stat}" Text="—" Margin="0,4,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                            </UniformGrid>
+                            <TextBlock x:Name="StatDetails" Style="{StaticResource Caption}" Margin="2,14,0,0" Text="Os números aparecem quando alguém entra."/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border x:Name="AudioCard" Style="{StaticResource Card}">
+                        <StackPanel>
+                            <DockPanel>
+                                <Border x:Name="LevelPill" DockPanel.Dock="Right" Style="{StaticResource Pill}">
+                                    <TextBlock x:Name="AudioState" Text="Sem som"/>
+                                </Border>
+                                <Border Style="{StaticResource IconTilePink}" Width="38" Height="38" CornerRadius="10" TextElement.FontSize="16" VerticalAlignment="Center">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE8D6;"/>
+                                </Border>
+                                <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Style="{StaticResource Heading}" FontSize="16" Text="Som do PC"/>
+                                    <TextBlock x:Name="AudioDescription" Style="{StaticResource Caption}" Text="O visualizador mexe quando a transmissão começa."/>
+                                </StackPanel>
+                            </DockPanel>
+                            <controls:SpectrumVisualizer x:Name="Spectrum" Height="150" Margin="0,20,0,0" BarGap="5" Mirror="True"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border x:Name="ApprovalCard" Style="{StaticResource Card}" Visibility="Collapsed" BorderBrush="{DynamicResource AccentBorder}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource Heading}" Text="Pedindo para entrar"/>
+                            <ItemsControl x:Name="ApprovalList" Margin="0,12,0,0">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Style="{StaticResource InsetCard}" Margin="0,0,0,8">
+                                            <DockPanel>
+                                                <Button DockPanel.Dock="Right" Content="Recusar" MinHeight="36" Margin="8,0,0,0" Click="Deny_Click" Tag="{Binding}"/>
+                                                <Button DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Content="Aceitar" MinHeight="36" Click="Approve_Click" Tag="{Binding}"/>
+                                                <Border Width="38" Height="38" CornerRadius="19" Background="{DynamicResource BrandGradient}" VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding Initial}" FontWeight="Bold" Foreground="{DynamicResource OnAccent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold"/>
+                                                    <TextBlock Text="{Binding Address}" Style="{StaticResource Caption}"/>
+                                                </StackPanel>
+                                            </DockPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <DockPanel>
+                                <TextBlock x:Name="ViewerCount" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                <TextBlock Style="{StaticResource Heading}" Text="Quem está assistindo"/>
+                            </DockPanel>
+                            <TextBlock x:Name="NoViewers" Style="{StaticResource Muted}" Margin="0,6,0,0"
+                                       Text="Ninguém ainda. Quem estiver na sua rede Radmin vê você na tela Assistir, ou entra digitando o seu IP."/>
+                            <ItemsControl x:Name="ViewerList" Margin="0,14,0,0">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Style="{StaticResource InsetCard}" Margin="0,0,0,8">
+                                            <DockPanel>
+                                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE711;" ToolTip="Remover da transmissão" Click="Kick_Click" Tag="{Binding Id}"/>
+                                                <Button DockPanel.Dock="Right" Content="{Binding TestText}" IsEnabled="{Binding CanTest}" MinHeight="34" Padding="12,0" Margin="8,0,6,0"
+                                                        FontSize="12.5" Click="Bandwidth_Click" Tag="{Binding Id}" ToolTip="Mede a banda até esta pessoa por 3 segundos"/>
+                                                <Border Width="38" Height="38" CornerRadius="19" Background="{DynamicResource BrandGradient}" VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding Initial}" FontWeight="Bold" Foreground="{DynamicResource OnAccent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                                                    <TextBlock FontWeight="SemiBold">
+                                                        <Run Text="{Binding Name, Mode=OneWay}"/><Run Text="  " /><Run Text="{Binding Address, Mode=OneWay}" Foreground="{DynamicResource TextSubtle}" FontWeight="Normal" FontSize="12.5"/>
+                                                    </TextBlock>
+                                                    <TextBlock Text="{Binding Details}" Style="{StaticResource Caption}" Margin="0,2,0,0"/>
+                                                </StackPanel>
+                                            </DockPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </Grid>
+        </StackPanel>
     </ScrollViewer>
 </UserControl>

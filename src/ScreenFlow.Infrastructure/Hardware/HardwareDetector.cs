@@ -144,8 +144,12 @@ public static unsafe class HardwareDetector
         return result;
     }
 
-    /// <summary>Codecs que este PC consegue decodificar (hardware ou software), para anunciar no handshake.</summary>
-    public static VideoCodec[] SupportedDecoders()
+    private static VideoCodec[]? _supportedDecoders;
+
+    /// <summary>Codecs que este PC consegue decodificar (hardware ou software), para anunciar no handshake. Calculado uma vez.</summary>
+    public static VideoCodec[] SupportedDecoders() => _supportedDecoders ??= DetectSupportedDecoders();
+
+    private static VideoCodec[] DetectSupportedDecoders()
     {
         if (!FFmpegLoader.EnsureLoaded()) return [];
         var list = new List<VideoCodec>();
