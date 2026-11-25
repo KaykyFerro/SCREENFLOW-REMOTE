@@ -1,50 +1,88 @@
 name: Release
 
-# Publica uma versão quando uma tag vX.Y.Z é enviada. O app procura atualizações nesses releases.
+# Gera o instalador de uma versão e anexa ao release do GitHub. O app procura atualizações nesses releases.
+# Dois jeitos de lançar a versão X.Y.Z:
+# - no GitHub: Releases › Draft a new release, tag nova vX.Y.Z na main, Publish release;
+# - pelo git: git tag vX.Y.Z && git push origin vX.Y.Z (o workflow cria o release).
 on:
+  release:
+    types: [published]
   push:
     tags: ['v*']
 
 permissions:
   contents: write
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   release:
     runs-on: windows-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Install .NET 10 SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: 10.0.x
       - name: Version from tag
         id: version
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
+          $PSNativeCommandUseErrorActionPreference = $false
+          $version = $env:TAG.TrimStart('v')
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Tag inválida: $env:TAG (use vX.Y.Z)" }
           "value=$version" >> $env:GITHUB_OUTPUT
+          # Release criado no site também cria a tag; o envio do instalador fica com o evento do release.
+          $skip = 'false'
+          if ($env:GITHUB_EVENT_NAME -eq 'push') {
+            gh release view $env:TAG --repo $env:GITHUB_REPOSITORY *> $null
+            if ($LASTEXITCODE -eq 0) {
+              $skip = 'true'
+              Write-Host "O release $env:TAG já existe; o instalador é enviado pela execução do release publicado."
+            }
+          }
+          "skip=$skip" >> $env:GITHUB_OUTPUT
+          $global:LASTEXITCODE = 0
+      - name: Checkout
+        if: steps.version.outputs.skip != 'true'
+        uses: actions/checkout@v4
+      - name: Install .NET 10 SDK
+        if: steps.version.outputs.skip != 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
       - name: Download FFmpeg (LGPL)
+        if: steps.version.outputs.skip != 'true'
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./scripts/fetch-ffmpeg.ps1
       - name: Test
+        if: steps.version.outputs.skip != 'true'
         run: dotnet test tests/ScreenFlow.Tests --configuration Release
       - name: Publish
+        if: steps.version.outputs.skip != 'true'
         run: dotnet publish src/ScreenFlow.App/ScreenFlow.App.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/publish -p:Version=${{ steps.version.outputs.value }}
       - name: Install Inno Setup
+        if: steps.version.outputs.skip != 'true'
         run: choco install innosetup --yes --no-progress
       - name: Build installer
+        if: steps.version.outputs.skip != 'true'
         shell: pwsh
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.value }}" installer\ScreenFlow.iss
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
           $hash = (Get-FileHash artifacts/ScreenFlow-Setup-win-x64.exe -Algorithm SHA256).Hash.ToLower()
           "$hash  ScreenFlow-Setup-win-x64.exe" | Out-File -Encoding ascii artifacts/ScreenFlow-Setup-win-x64.exe.sha256
-      - name: Create GitHub release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attach installer to the GitHub release
+        if: steps.version.outputs.skip != 'true'
         shell: pwsh
         run: |
-          gh release create "${{ github.ref_name }}" artifacts/ScreenFlow-Setup-win-x64.exe artifacts/ScreenFlow-Setup-win-x64.exe.sha256 --title "ScreenFlow ${{ steps.version.outputs.value }}" --generate-notes
+          $PSNativeCommandUseErrorActionPreference = $false
+          $files = 'artifacts/ScreenFlow-Setup-win-x64.exe', 'artifacts/ScreenFlow-Setup-win-x64.exe.sha256'
+          if ($env:GITHUB_EVENT_NAME -eq 'release') {
+            gh release upload $env:TAG @files --clobber --repo $env:GITHUB_REPOSITORY
+          } else {
+            gh release create $env:TAG @files --title "ScreenFlow ${{ steps.version.outputs.value }}" --generate-notes --repo $env:GITHUB_REPOSITORY
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Não foi possível publicar o instalador no release $env:TAG" }

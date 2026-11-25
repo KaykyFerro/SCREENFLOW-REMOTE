@@ -30,12 +30,14 @@ O instalador sai em `artifacts/ScreenFlow-Setup-win-x64.exe`.
 
 ## Lançar uma versão
 
+Pelo site: **Releases › Draft a new release**, crie a tag nova `v1.1.0` na `main` e clique em **Publish release**. Ou pelo git:
+
 ```powershell
 git tag v1.1.0
 git push origin v1.1.0
 ```
 
-O workflow `release.yml` usa a tag como versão, gera o instalador e o `.sha256` e cria o release no GitHub. O app instalado encontra a versão nova sozinho.
+Nos dois casos o workflow `release.yml` usa a tag como versão, gera o instalador e o `.sha256` e anexa ao release (pelo git, ele também cria o release). Leva uns 10 minutos. O app instalado só oferece a versão nova depois que o instalador estiver anexado.
 
 ## Testar com dois PCs
 
