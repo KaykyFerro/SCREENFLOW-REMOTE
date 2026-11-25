@@ -56,6 +56,17 @@ public static class Quality
         return (int)Math.Clamp(Math.Round(kbps / 500) * 500, 2_000, 150_000);
     }
 
+    /// <summary>
+    /// Bitrate por viewer quando o host envia uma cópia para cada pessoa: divide 80% do upload pelo número de viewers.
+    /// Retorna o próprio alvo quando o upload é desconhecido.
+    /// </summary>
+    public static int PerViewerBitrateKbps(int targetKbps, double uploadMbps, int viewers)
+    {
+        if (uploadMbps <= 0 || viewers <= 0) return targetKbps;
+        var share = (int)(uploadMbps * 1000 * 0.8 / viewers);
+        return Math.Max(1_000, Math.Min(targetKbps, share));
+    }
+
     public static string CodecLabel(VideoCodec codec) => codec switch
     {
         VideoCodec.Av1 => "AV1",

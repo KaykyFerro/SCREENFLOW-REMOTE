@@ -33,7 +33,10 @@ public sealed class AppSettings
     // Segurança
     public string? Pin { get; set; }
     public bool ApproveEachViewer { get; set; } = true;
-    public int MaxViewers { get; set; } = 8;
+    public int MaxViewers { get; set; } = 20;
+
+    /// <summary>Upload do host em Mbps (medido pelo teste de banda ou digitado). 0 = desconhecido.</summary>
+    public double UploadMbps { get; set; }
 
     // Viewer
     public List<string> RecentHosts { get; set; } = [];
@@ -65,7 +68,8 @@ public sealed class AppSettings
         BitrateKbps = BitrateKbps <= 0 ? 0 : Math.Clamp(BitrateKbps, 1_000, 200_000);
         AudioBitrateKbps = Math.Clamp(AudioBitrateKbps, 64, 256);
         FecGroupSize = Math.Clamp(FecGroupSize, 0, 32);
-        MaxViewers = Math.Clamp(MaxViewers, 1, 32);
+        MaxViewers = Math.Clamp(MaxViewers, 1, 64);
+        UploadMbps = Math.Clamp(UploadMbps, 0, 100_000);
         Volume = Math.Clamp(Volume, 0, 1);
         if (!Security.SessionCrypto.IsValidPin(Pin)) Pin = null;
         if (string.IsNullOrWhiteSpace(DeviceName)) DeviceName = Environment.MachineName;

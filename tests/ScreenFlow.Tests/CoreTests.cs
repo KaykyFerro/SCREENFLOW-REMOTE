@@ -289,3 +289,15 @@ public class ClockTests
         Assert.Equal(47801, AppInfo.DefaultControlPort);
     }
 }
+
+public class MultiViewerTests
+{
+    [Fact]
+    public void UploadIsSplitBetweenViewers()
+    {
+        Assert.Equal(120_000, Quality.PerViewerBitrateKbps(120_000, 0, 10));
+        Assert.Equal(8_000, Quality.PerViewerBitrateKbps(120_000, 100, 10));
+        Assert.Equal(120_000, Quality.PerViewerBitrateKbps(120_000, 1000, 1));
+        Assert.Equal(1_000, Quality.PerViewerBitrateKbps(120_000, 5, 50));
+    }
+}
