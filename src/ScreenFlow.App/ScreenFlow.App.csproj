@@ -16,6 +16,10 @@
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Assets\screenflow.ico" />
+    <Resource Include="Assets\aurora.jpg" />
+    <!-- Fonte Inter (SIL Open Font License), só com os caracteres latinos usados pelo app. -->
+    <Resource Include="Assets\Fonts\*.otf" />
+    <None Include="Assets\Fonts\OFL.txt" Link="licenses\Inter-OFL.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\ScreenFlow.Core\ScreenFlow.Core.csproj" />

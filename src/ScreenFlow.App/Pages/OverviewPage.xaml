@@ -1,0 +1,180 @@
+<UserControl x:Class="ScreenFlow.App.Pages.OverviewPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer Style="{StaticResource PageScroll}">
+        <StackPanel Margin="{DynamicResource PagePadding}" MaxWidth="{DynamicResource ContentMaxWidth}">
+            <TextBlock Style="{StaticResource PageTitle}" Text="Visão geral" Margin="0,22,0,6"/>
+            <TextBlock Style="{StaticResource Subtitle}" Margin="0,0,0,26"
+                       Text="Compartilhe a tela, a câmera ou o som do PC com quem está na sua rede Radmin, ou entre na transmissão de alguém."/>
+
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="1.65*"/>
+                    <ColumnDefinition Width="22"/>
+                    <ColumnDefinition Width="*" MinWidth="320"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Cartão principal com a aurora -->
+                <Grid MinHeight="404">
+                    <Border CornerRadius="{DynamicResource RadiusXl}">
+                        <Border.Background>
+                            <ImageBrush ImageSource="/Assets/aurora.jpg" Stretch="UniformToFill" AlignmentX="Right" AlignmentY="Top"/>
+                        </Border.Background>
+                    </Border>
+                    <Border x:Name="HeroTint" CornerRadius="{DynamicResource RadiusXl}" Opacity="0"/>
+                    <Border CornerRadius="{DynamicResource RadiusXl}" Background="{DynamicResource HeroScrim}" BorderBrush="#26FFFFFF" BorderThickness="1"/>
+
+                    <StackPanel Margin="30,26,30,28" TextElement.Foreground="#FFFFFF">
+                        <DockPanel>
+                            <Border x:Name="HeroIcon" Style="{StaticResource IconTile}" Background="#262EE6A6" BorderBrush="#552EE6A6" TextElement.Foreground="#5DF5C2">
+                                <TextBlock x:Name="HeroGlyph" Style="{StaticResource Icon}" Text="&#xE7F4;"/>
+                            </Border>
+                            <StackPanel x:Name="ModeChips" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                <RadioButton x:Name="ChipScreen" GroupName="heroMode" Style="{StaticResource Chip}" Tag="&#xE7F4;" Content="Tela" Checked="Mode_Checked"/>
+                                <RadioButton x:Name="ChipCamera" GroupName="heroMode" Style="{StaticResource Chip}" Tag="&#xE8B8;" Content="Câmera" Checked="Mode_Checked"/>
+                                <RadioButton x:Name="ChipParty" GroupName="heroMode" Style="{StaticResource Chip}" Tag="&#xE8D6;" Content="Festa de música" Checked="Mode_Checked" Margin="0"/>
+                            </StackPanel>
+                        </DockPanel>
+
+                        <TextBlock x:Name="HeroTitle" Style="{StaticResource HeroTitle}" Text="Compartilhar tela" Margin="0,22,0,6"/>
+                        <TextBlock x:Name="HeroText" FontSize="14.5" LineHeight="22" Foreground="#C8D3EC" TextWrapping="Wrap" MaxWidth="380" HorizontalAlignment="Left"
+                                   Text="Escolha a qualidade e inicie. Quem estiver na sua rede Radmin entra com o seu IP."/>
+
+                        <!-- Tela -->
+                        <Grid x:Name="ScreenFields" Margin="0,22,0,0" MaxWidth="440" HorizontalAlignment="Left">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.7*"/>
+                                <ColumnDefinition Width="14"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource Label}" Foreground="#FFFFFF" Text="Resolução"/>
+                                <ComboBox x:Name="ResolutionCombo" Background="#B30B1430" BorderBrush="#40FFFFFF" Foreground="#FFFFFF"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Style="{StaticResource Label}" Foreground="#FFFFFF" Text="FPS"/>
+                                <ComboBox x:Name="FpsCombo" Background="#B30B1430" BorderBrush="#40FFFFFF" Foreground="#FFFFFF"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- Câmera -->
+                        <Grid x:Name="CameraFields" Margin="0,22,0,0" MaxWidth="440" HorizontalAlignment="Left" Visibility="Collapsed">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="1.7*"/>
+                                <ColumnDefinition Width="14"/>
+                                <ColumnDefinition Width="*"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource Label}" Foreground="#FFFFFF" Text="Câmera"/>
+                                <ComboBox x:Name="CameraCombo" Background="#B30B1430" BorderBrush="#40FFFFFF" Foreground="#FFFFFF"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="2">
+                                <TextBlock Style="{StaticResource Label}" Foreground="#FFFFFF" Text="Qualidade"/>
+                                <ComboBox x:Name="CameraQualityCombo" Background="#B30B1430" BorderBrush="#40FFFFFF" Foreground="#FFFFFF"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <!-- Festa de música -->
+                        <Grid x:Name="PartyFields" Margin="0,22,0,0" MaxWidth="440" HorizontalAlignment="Left" Visibility="Collapsed">
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource Label}" Foreground="#FFFFFF" Text="Qualidade do som"/>
+                                <ComboBox x:Name="MusicCombo" Background="#B30B1430" BorderBrush="#40FFFFFF" Foreground="#FFFFFF" Width="270" HorizontalAlignment="Left"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <CheckBox x:Name="AudioCheck" Content="Compartilhar áudio do computador" Foreground="#FFFFFF" Margin="0,18,0,0"/>
+
+                        <StackPanel Orientation="Horizontal" Margin="0,24,0,0">
+                            <Button x:Name="StartButton" Style="{StaticResource PrimaryButton}" MinHeight="46" Padding="22,0" Click="Start_Click">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock x:Name="StartGlyph" Style="{StaticResource Icon}" Text="&#xE7F4;" Margin="0,0,10,0"/>
+                                    <TextBlock x:Name="StartText" Text="Iniciar transmissão" FontSize="15"/>
+                                </StackPanel>
+                            </Button>
+                            <Border x:Name="LiveBadge" Style="{StaticResource Pill}" Margin="14,0,0,0" Background="#33FF4D8D" BorderBrush="#66FF4D8D"
+                                    TextElement.Foreground="#FFFFFF" Visibility="Collapsed">
+                                <StackPanel Orientation="Horizontal">
+                                    <Ellipse Width="7" Height="7" Fill="#FF4D8D" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                                    <TextBlock x:Name="LiveText" Text="Ao vivo"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </StackPanel>
+                </Grid>
+
+                <!-- Conectar a uma sessão -->
+                <Border Grid.Column="2" Style="{StaticResource Card}" Margin="0" Padding="26">
+                    <StackPanel>
+                        <Border Style="{StaticResource IconTileViolet}">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE71B;"/>
+                        </Border>
+                        <TextBlock Style="{StaticResource Title}" Text="Conectar a uma sessão" Margin="0,20,0,8"/>
+                        <TextBlock Style="{StaticResource Muted}" Text="Digite o IP do Radmin de quem está transmitindo (26.x.x.x). Tela, câmera ou festa de música: o app descobre sozinho."/>
+                        <TextBlock Style="{StaticResource Label}" Text="IP do anfitrião" Margin="0,22,0,8"/>
+                        <TextBox x:Name="HostBox" Tag="26.000.000.000" FontFamily="{DynamicResource FontMono}" FontSize="16" MinHeight="46" KeyDown="HostBox_KeyDown"/>
+                        <Button Margin="0,12,0,0" MinHeight="46" HorizontalContentAlignment="Center" Click="Connect_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Text="Conectar" FontSize="15"/>
+                                <TextBlock Style="{StaticResource Icon}" Text="&#xE72A;" FontSize="13" Margin="10,1,0,0"/>
+                            </StackPanel>
+                        </Button>
+                        <TextBlock x:Name="RecentLabel" Style="{StaticResource Caption}" Text="Recentes" Margin="0,18,0,8" Visibility="Collapsed"/>
+                        <WrapPanel x:Name="RecentPanel"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+
+            <TextBlock Style="{StaticResource SectionTitle}" Text="Ambiente local" Margin="0,34,0,16"/>
+            <UniformGrid x:Name="EnvGrid" Columns="4" Margin="0,0,-16,0">
+                <Border Style="{StaticResource Card}" Margin="0,0,16,16" Padding="20">
+                    <DockPanel>
+                        <Border Style="{StaticResource IconTile}" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE7F4;"/>
+                        </Border>
+                        <StackPanel Margin="16,0,0,0" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource Caption}" Text="Monitor atual"/>
+                            <TextBlock x:Name="MonitorValue" FontSize="20" FontWeight="Bold" Text="—" Margin="0,3,0,2" TextWrapping="Wrap"/>
+                            <TextBlock x:Name="MonitorDetail" Style="{StaticResource Caption}"/>
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Margin="0,0,16,16" Padding="20">
+                    <DockPanel>
+                        <Border Style="{StaticResource IconTileViolet}" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE81E;"/>
+                        </Border>
+                        <StackPanel Margin="16,0,0,0" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource Caption}" Text="Perfil de qualidade"/>
+                            <TextBlock x:Name="ProfileValue" FontSize="20" FontWeight="Bold" Text="—" Margin="0,3,0,2"/>
+                            <TextBlock x:Name="ProfileDetail" Style="{StaticResource Caption}"/>
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Margin="0,0,16,16" Padding="20">
+                    <DockPanel>
+                        <Border Style="{StaticResource IconTileBlue}" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE950;"/>
+                        </Border>
+                        <StackPanel Margin="16,0,0,0" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource Caption}" Text="Processamento gráfico"/>
+                            <TextBlock x:Name="GpuValue" FontSize="17" FontWeight="Bold" Text="Detectando…" Margin="0,3,0,2" TextWrapping="Wrap"/>
+                            <TextBlock x:Name="GpuDetail" Style="{StaticResource Caption}"/>
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+                <Border Style="{StaticResource Card}" Margin="0,0,16,16" Padding="20">
+                    <DockPanel>
+                        <Border x:Name="NetworkTile" Style="{StaticResource IconTileCyan}" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE774;"/>
+                        </Border>
+                        <StackPanel Margin="16,0,0,0" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource Caption}" Text="Rede Radmin"/>
+                            <TextBlock x:Name="NetworkValue" FontSize="20" FontWeight="Bold" Text="—" Margin="0,3,0,2" TextWrapping="Wrap"/>
+                            <TextBlock x:Name="NetworkDetail" Style="{StaticResource Caption}"/>
+                        </StackPanel>
+                    </DockPanel>
+                </Border>
+            </UniformGrid>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

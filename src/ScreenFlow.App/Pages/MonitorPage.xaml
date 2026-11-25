@@ -1,0 +1,86 @@
+<UserControl x:Class="ScreenFlow.App.Pages.MonitorPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer Style="{StaticResource PageScroll}">
+        <StackPanel Margin="{DynamicResource PagePadding}" MaxWidth="{DynamicResource ContentMaxWidth}">
+            <DockPanel Margin="0,22,0,6">
+                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                    <Border x:Name="SourceSwitch" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource Border}" BorderThickness="1"
+                            CornerRadius="19" Padding="3" Margin="0,0,12,0" Visibility="Collapsed">
+                        <StackPanel Orientation="Horizontal">
+                            <RadioButton x:Name="SourceHost" GroupName="source" Style="{StaticResource Segment}" Content="Transmissão" IsChecked="True" Checked="Source_Checked"/>
+                            <RadioButton x:Name="SourceViewer" GroupName="source" Style="{StaticResource Segment}" Content="Assistindo" Checked="Source_Checked"/>
+                        </StackPanel>
+                    </Border>
+                    <Border x:Name="LiveBadge" Style="{StaticResource Pill}" Padding="12,5">
+                        <StackPanel Orientation="Horizontal">
+                            <Ellipse x:Name="LiveDot" Width="7" Height="7" Fill="{DynamicResource TextSubtle}" Margin="0,0,8,0" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="LiveText" Text="Nada ao vivo"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+                <TextBlock Style="{StaticResource PageTitle}" Text="Monitoramento"/>
+            </DockPanel>
+            <TextBlock x:Name="SubtitleText" Style="{StaticResource Subtitle}" Margin="0,0,0,26" TextTrimming="CharacterEllipsis"
+                       Text="Desempenho ao vivo, segundo a segundo, dos últimos 90 segundos."/>
+
+            <StackPanel x:Name="LivePanel">
+                <UniformGrid x:Name="MetricGrid" Columns="3" Margin="0,0,-16,4"/>
+
+                <Grid Margin="0,12,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition x:Name="PeopleGap" Width="22"/>
+                        <ColumnDefinition x:Name="PeopleColumn" Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <Border Style="{StaticResource Card}" Margin="0">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource Heading}" Text="Detalhes" Margin="0,0,0,14"/>
+                            <Grid x:Name="DetailsGrid">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" MinWidth="130"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                            </Grid>
+                        </StackPanel>
+                    </Border>
+                    <Border x:Name="PeopleCard" Grid.Column="2" Style="{StaticResource Card}" Margin="0">
+                        <StackPanel>
+                            <DockPanel Margin="0,0,0,14">
+                                <TextBlock x:Name="PeopleCount" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                <TextBlock Style="{StaticResource Heading}" Text="Conexão de cada pessoa"/>
+                            </DockPanel>
+                            <StackPanel x:Name="PeopleList"/>
+                            <TextBlock x:Name="NoPeople" Style="{StaticResource Muted}" Text="Ninguém assistindo ainda."/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </StackPanel>
+
+            <Border x:Name="EmptyState" Style="{StaticResource Card}" Padding="40,36" Visibility="Collapsed">
+                <StackPanel HorizontalAlignment="Center">
+                    <Border Style="{StaticResource IconTileBlue}" Width="64" Height="64" CornerRadius="18" TextElement.FontSize="28" HorizontalAlignment="Center">
+                        <TextBlock Style="{StaticResource Icon}" Text="&#xE9D9;" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <TextBlock Style="{StaticResource Title}" Text="Nada ao vivo agora" HorizontalAlignment="Center" Margin="0,20,0,8"/>
+                    <TextBlock Style="{StaticResource Muted}" TextAlignment="Center" MaxWidth="460"
+                               Text="Comece uma transmissão ou entre na de alguém: FPS, banda, ping, perda e o som aparecem aqui, segundo a segundo."/>
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,24,0,0">
+                        <Button Style="{StaticResource PrimaryButton}" Click="GoTransmit_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Style="{StaticResource Icon}" Text="&#xE714;" Margin="0,0,10,0"/>
+                                <TextBlock Text="Transmitir"/>
+                            </StackPanel>
+                        </Button>
+                        <Button Margin="10,0,0,0" Click="GoWatch_Click">
+                            <StackPanel Orientation="Horizontal">
+                                <TextBlock Style="{StaticResource Icon}" Text="&#xE768;" Margin="0,0,10,0"/>
+                                <TextBlock Text="Assistir"/>
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

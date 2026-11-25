@@ -522,7 +522,8 @@ public sealed class ViewerSession : IAsyncDisposable
                 var stats = new ViewerStatistics(fps, kbps / 1000, _latencyMs, _clock.RoundTripMs, _lossRate,
                     _config.VideoEnabled ? Quality.CodecLabel(_config.Codec) : "Opus", _config.Width, _config.Height,
                     _config.VideoEnabled ? _decoderLabel : "Opus · só áudio", _reassembler.FramesDropped, _reassembler.PacketsRecoveredByFec, _config.Reason,
-                    _config.Mode, audio?.Buffered.TotalMilliseconds ?? 0, audio?.PacketsRecovered ?? 0, 0, _owner._gpuRendering == true);
+                    _config.Mode, audio?.Buffered.TotalMilliseconds ?? 0, audio?.PacketsRecovered ?? 0,
+                    _config.VideoEnabled ? 0 : kbps, _owner._gpuRendering == true);
                 _owner._lastStats = stats;
                 _owner.StatisticsUpdated?.Invoke(stats);
             }

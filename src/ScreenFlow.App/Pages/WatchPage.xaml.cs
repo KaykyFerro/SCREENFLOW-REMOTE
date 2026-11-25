@@ -1,177 +1,399 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media.Animation;
+using System.Windows.Shapes;
 using System.Windows.Threading;
 using ScreenFlow.App.Services;
 using ScreenFlow.App.Windows;
+using ScreenFlow.Core.Diagnostics;
+using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Network;
+using ScreenFlow.Core.Protocol;
+using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Hardware;
 using ScreenFlow.Infrastructure.Network;
 using ScreenFlow.Infrastructure.Session;
 
 namespace ScreenFlow.App.Pages;
 
-public partial class WatchPage : UserControl
+/// <summary>Assistir: transmissões encontradas na rede Radmin, conexão pelo IP e o resumo do que você está assistindo.</summary>
+public partial class WatchPage : UserControl, IShellPage
 {
     private readonly MainWindow _shell;
     private readonly DispatcherTimer _refresh = new() { Interval = TimeSpan.FromSeconds(1) };
+    private readonly ObservableCollection<SessionCard> _sessions = [];
     private DiscoveryListener? _discovery;
     private PlayerWindow? _player;
+    private UniformGrid? _sessionGrid;
+    private string? _currentHost;
+    private bool _connecting;
+    private bool _pulsing;
 
     public WatchPage(MainWindow shell)
     {
         _shell = shell;
         InitializeComponent();
-        _refresh.Tick += (_, _) => RefreshHosts();
-        Loaded += (_, _) => OnShown();
+        SessionList.ItemsSource = _sessions;
+        _refresh.Tick += (_, _) => RefreshSessions();
         Unloaded += async (_, _) => await StopDiscoveryAsync();
+        SizeChanged += (_, _) => UpdateColumns();
+        Telemetry.Updated += () =>
+        {
+            if (_player is not null && IsLoaded) UpdateNowCard();
+        };
     }
 
-    private void OnShown()
+    /// <summary>Tem um player aberto (conectando, assistindo ou tentando reconectar).</summary>
+    public bool IsWatching => _player is not null;
+
+    private AppSettings Settings => AppServices.Settings.Current;
+
+    public void OnShown()
     {
-        var settings = AppServices.Settings.Current;
-        HostBox.ItemsSource = settings.RecentHosts.ToList();
-        if (string.IsNullOrEmpty(HostBox.Text) && settings.RecentHosts.Count > 0) HostBox.Text = settings.RecentHosts[0];
-        if (_discovery is null)
+        RefreshRecent();
+        StartDiscovery();
+        RefreshSessions();
+        UpdateNowCard();
+    }
+
+    // ───────────────────────── Descoberta ─────────────────────────
+
+    private void StartDiscovery()
+    {
+        if (_discovery is null && !AppServices.DemoMode)
         {
-            _discovery = new DiscoveryListener(settings.DiscoveryPort);
-            _discovery.Start();
+            var discovery = new DiscoveryListener(Settings.DiscoveryPort);
+            discovery.Changed += () => Dispatcher.BeginInvoke(RefreshSessions);
+            discovery.Start();
+            _discovery = discovery;
         }
         _refresh.Start();
-        RefreshHosts();
-        HostBox.Focus();
     }
 
     private async Task StopDiscoveryAsync()
     {
         _refresh.Stop();
-        if (_discovery is not null)
+        var discovery = _discovery;
+        _discovery = null;
+        if (discovery is not null) await discovery.DisposeAsync();
+    }
+
+    /// <summary>Atualiza os cartões no lugar (sem recriar), para não piscar a cada segundo.</summary>
+    private void RefreshSessions()
+    {
+        IReadOnlyList<DiscoveryAnnouncement> found = AppServices.DemoMode
+            ? DemoData.Sessions
+            : _discovery?.Hosts.Select(h => h.Announcement).ToList() ?? [];
+        foreach (var gone in _sessions.Where(s => found.All(f => f.Address != s.Address)).ToList()) _sessions.Remove(gone);
+        foreach (var announcement in found)
         {
-            await _discovery.DisposeAsync();
-            _discovery = null;
+            var card = _sessions.FirstOrDefault(s => s.Address == announcement.Address);
+            if (card is null)
+            {
+                card = new SessionCard(announcement.Address);
+                var index = 0;
+                while (index < _sessions.Count && string.Compare(_sessions[index].Name, announcement.HostName, StringComparison.CurrentCultureIgnoreCase) < 0) index++;
+                _sessions.Insert(index, card);
+            }
+            card.Update(announcement, _player is not null && _currentHost == announcement.Address);
         }
-    }
 
-    private void RefreshHosts()
-    {
-        if (_discovery is null) return;
-        var selected = (HostList.SelectedItem as HostRow)?.Address;
-        var hosts = _discovery.Hosts.Select(h => new HostRow(h)).ToList();
-        HostList.ItemsSource = hosts;
-        HostList.SelectedItem = hosts.FirstOrDefault(h => h.Address == selected);
-        NoHosts.Visibility = hosts.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        ScanText.Text = hosts.Count == 0 ? "Procurando…" : $"{hosts.Count} encontrada(s)";
-    }
-
-    private void HostList_SelectionChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (HostList.SelectedItem is HostRow row) HostBox.Text = row.Address;
-    }
-
-    private void HostList_DoubleClick(object sender, MouseButtonEventArgs e)
-    {
-        if (HostList.SelectedItem is HostRow row)
+        var any = _sessions.Count > 0;
+        SessionList.Visibility = any ? Visibility.Visible : Visibility.Collapsed;
+        NoSessions.Visibility = any ? Visibility.Collapsed : Visibility.Visible;
+        ScanText.Text = _sessions.Count switch
         {
-            HostBox.Text = row.Address;
-            Connect();
-        }
+            0 => _discovery is null && !AppServices.DemoMode ? "Busca parada" : "Procurando…",
+            1 => "1 transmissão ao vivo",
+            var n => $"{n} transmissões ao vivo",
+        };
+        SetPulse(!any && !AppServices.DemoMode);
     }
 
-    private void Connect_Click(object sender, RoutedEventArgs e) => Connect();
-
-    private async void Connect()
+    private void SetPulse(bool on)
     {
-        var host = HostBox.Text.Trim();
-        if (!RadminAddress.TryParseHost(host, out var address))
+        if (on == _pulsing) return;
+        _pulsing = on;
+        ScanDot.BeginAnimation(OpacityProperty, on
+            ? new DoubleAnimation(1, 0.2, TimeSpan.FromSeconds(0.8)) { AutoReverse = true, RepeatBehavior = RepeatBehavior.Forever }
+            : null);
+        ScanDot.SetResourceReference(Shape.FillProperty, on ? "Accent" : "Pink");
+    }
+
+    private void SessionGrid_Loaded(object sender, RoutedEventArgs e)
+    {
+        _sessionGrid = sender as UniformGrid;
+        UpdateColumns();
+    }
+
+    private void UpdateColumns()
+    {
+        if (_sessionGrid is null) return;
+        _sessionGrid.Columns = ActualWidth >= 1060 ? 3 : ActualWidth >= 720 ? 2 : 1;
+    }
+
+    // ───────────────────────── Conectar ─────────────────────────
+
+    /// <summary>Usado pela Visão geral: conecta direto no IP digitado lá.</summary>
+    public void ConnectTo(string host)
+    {
+        HostBox.Text = host.Trim();
+        _ = ConnectAsync(host);
+    }
+
+    private void Connect_Click(object sender, RoutedEventArgs e) => _ = ConnectAsync(HostBox.Text);
+
+    private void HostBox_KeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter) return;
+        e.Handled = true;
+        _ = ConnectAsync(HostBox.Text);
+    }
+
+    private void Join_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not SessionCard card) return;
+        HostBox.Text = card.Address;
+        _ = ConnectAsync(card.Address, card.Mode);
+    }
+
+    private async Task ConnectAsync(string text, StreamMode? expectedMode = null)
+    {
+        if (!RadminAddress.TryParseHost(text.Trim(), out var address))
         {
-            ShowState("Digite um IP válido, por exemplo 26.12.34.56.", "Danger");
+            ShowState("Digite um IP válido, por exemplo 26.12.34.56.", "Danger", canCancel: false);
+            HostBox.Focus();
             return;
         }
+        var host = address.ToString();
         if (_player is not null)
         {
-            _player.Activate();
-            return;
+            if (_currentHost == host)
+            {
+                _player.BringToFront();
+                return;
+            }
+            if (!ConfirmDialog.Ask(Window.GetWindow(this), "Trocar de transmissão?", $"Você está assistindo {_currentHost}. Sair e entrar em {host}?", "Trocar"))
+                return;
+            await _player.ShutdownAsync();
         }
-
-        var settings = AppServices.Settings.Current;
-        settings.RememberHost(address.ToString());
-        AppServices.Settings.Save();
-        HostBox.ItemsSource = settings.RecentHosts.ToList();
-
+        if (_connecting) return;
+        _connecting = true;
         ConnectButton.IsEnabled = false;
-        ShowState($"Conectando em {address}…", "Warning");
-
-        var hardware = await AppServices.Hardware;
-        var decoders = await Task.Run(HardwareDetector.SupportedDecoders);
-        if (decoders.Length == 0)
+        try
         {
-            ShowState("Nenhum decoder de vídeo foi encontrado. Confira se a pasta 'ffmpeg' está junto do ScreenFlow.exe.", "Danger");
-            ConnectButton.IsEnabled = true;
-            return;
+            Settings.RememberHost(host);
+            AppServices.Settings.Save();
+            RefreshRecent();
+            ShowState($"Conectando em {host}…", "Warning", canCancel: false);
+
+            var hardware = await AppServices.Hardware;
+            var decoders = await Task.Run(HardwareDetector.SupportedDecoders);
+            if (decoders.Length == 0 && expectedMode is not StreamMode.AudioOnly)
+            {
+                const string missing = "Nenhum decoder de vídeo foi encontrado: confira se a pasta 'ffmpeg' está junto do ScreenFlow.exe. Festas de música funcionam mesmo assim.";
+                if (expectedMode is not null)
+                {
+                    ShowState(missing, "Danger", canCancel: false);
+                    return;
+                }
+                _shell.Toast(missing, ToastKind.Warning);
+            }
+
+            var options = new ViewerOptions(host, Settings.ControlPort, Settings.DeviceName, null, (float)Settings.Volume, decoders,
+                Math.Max(1280, hardware.MonitorWidth), Math.Max(720, hardware.MonitorHeight), Math.Max(60, hardware.MonitorRefreshHz));
+            var session = new ViewerSession(options);
+            var player = new PlayerWindow(session, host, expectedMode);
+            session.PinProvider = wrong => Dispatcher.InvokeAsync(() => PinDialog.Ask(player.IsVisible ? player : Window.GetWindow(this), host, wrong)).Task;
+            session.StateChanged += (state, message) => Dispatcher.BeginInvoke(() => OnStateChanged(player, state, message));
+            session.StatisticsUpdated += stats => Dispatcher.BeginInvoke(() =>
+            {
+                if (_player == player) Telemetry.Record(stats, session.HostName.Length > 0 ? session.HostName : host);
+            });
+            player.Closed += (_, _) => OnPlayerClosed(player);
+
+            _player = player;
+            _currentHost = host;
+            player.Show();
+            session.Start();
+            UpdateNowCard();
+            RefreshSessions();
+            _shell.NotifyLiveStateChanged();
         }
-
-        var hostText = address.ToString();
-        var options = new ViewerOptions(hostText, settings.ControlPort, settings.DeviceName, null, (float)settings.Volume, decoders,
-            Math.Max(1280, hardware.MonitorWidth), Math.Max(720, hardware.MonitorHeight), Math.Max(60, hardware.MonitorRefreshHz));
-        var session = new ViewerSession(options);
-        session.PinProvider = wrong => Dispatcher.InvokeAsync(() => PinDialog.Ask(Window.GetWindow(this), hostText, wrong)).Task;
-        session.StateChanged += (state, message) => Dispatcher.BeginInvoke(() => OnStateChanged(state, message));
-
-        _player = new PlayerWindow(session, hostText);
-        _player.Closed += async (_, _) =>
+        catch (Exception exception)
         {
-            var player = _player;
-            _player = null;
+            Log.Error("Falha ao conectar", exception);
+            ShowState(exception.Message, "Danger", canCancel: false);
+        }
+        finally
+        {
+            _connecting = false;
             ConnectButton.IsEnabled = true;
-            StatePanel.Visibility = Visibility.Collapsed;
-            if (player is not null) await player.Session.DisposeAsync();
-        };
-        _player.Show();
-        session.Start();
+        }
     }
 
-    private void OnStateChanged(ConnectionState state, string message)
+    private void OnStateChanged(PlayerWindow player, ConnectionState state, string message)
     {
+        if (_player != player) return;
         switch (state)
         {
             case ConnectionState.Connected:
-                ShowState(message, "Success");
+                ShowState(message, "Success", canCancel: true);
+                _shell.NotifyLiveStateChanged();
                 break;
             case ConnectionState.Error:
-                ShowState(message, "Danger");
+                ShowState(message, "Danger", canCancel: true);
                 break;
             case ConnectionState.Closed:
-                StatePanel.Visibility = Visibility.Collapsed;
-                ConnectButton.IsEnabled = true;
                 break;
             default:
-                ShowState(message, "Warning");
+                ShowState(message, "Warning", canCancel: true);
                 break;
         }
+        UpdateNowCard();
     }
 
-    private void ShowState(string message, string brush)
+    private void OnPlayerClosed(PlayerWindow player)
+    {
+        if (_player != player) return;
+        _player = null;
+        _currentHost = null;
+        Telemetry.EndViewer();
+        StatePanel.Visibility = Visibility.Collapsed;
+        UpdateNowCard();
+        RefreshSessions();
+        _shell.NotifyLiveStateChanged();
+    }
+
+    private void ShowState(string message, string brush, bool canCancel)
     {
         StatePanel.Visibility = Visibility.Visible;
         StateText.Text = message;
-        StateDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, brush);
-        CancelButton.Visibility = _player is null ? Visibility.Collapsed : Visibility.Visible;
-        _shell.SetStatus(message);
+        StateDot.SetResourceReference(Shape.FillProperty, brush);
+        CancelButton.Visibility = canCancel && _player is not null ? Visibility.Visible : Visibility.Collapsed;
+        CancelButton.Content = _player?.Session.State == ConnectionState.Connected ? "Sair" : "Cancelar";
     }
 
-    private void Cancel_Click(object sender, RoutedEventArgs e) => _player?.Close();
+    private async void Cancel_Click(object sender, RoutedEventArgs e)
+    {
+        if (_player is { } player) await player.ShutdownAsync();
+    }
+
+    private void OpenPlayer_Click(object sender, RoutedEventArgs e) => _player?.BringToFront();
 
     public async Task ShutdownAsync()
     {
-        _player?.Close();
+        if (_player is { } player) await player.ShutdownAsync();
         await StopDiscoveryAsync();
     }
 
-    private sealed class HostRow(DiscoveredHost host)
+    private void RefreshRecent()
     {
-        public string Name { get; } = host.Announcement.HostName;
-        public string Address { get; } = host.Announcement.Address;
-        public string Subtitle { get; } = (host.Announcement.PinRequired ? "PIN · " : string.Empty)
-                                          + (host.Announcement.Viewers == 1 ? "1 assistindo" : $"{host.Announcement.Viewers} assistindo");
+        RecentPanel.Children.Clear();
+        foreach (var host in Settings.RecentHosts.Take(6))
+        {
+            var chip = new Button { Content = host, Style = (Style)FindResource("ChipButton"), FontFamily = (System.Windows.Media.FontFamily)FindResource("FontMono"), ToolTip = $"Conectar em {host}" };
+            chip.Click += (_, _) =>
+            {
+                HostBox.Text = host;
+                _ = ConnectAsync(host);
+            };
+            RecentPanel.Children.Add(chip);
+        }
+        RecentLabel.Visibility = RecentPanel.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        if (HostBox.Text.Length == 0 && Settings.RecentHosts.Count > 0) HostBox.Text = Settings.RecentHosts[0];
+    }
+
+    // ───────────────────────── Assistindo agora ─────────────────────────
+
+    private void UpdateNowCard()
+    {
+        var watching = _player is not null;
+        NowCard.Visibility = watching ? Visibility.Visible : Visibility.Collapsed;
+        TipsCard.Visibility = watching ? Visibility.Collapsed : Visibility.Visible;
+        if (_player is null) return;
+
+        var session = _player.Session;
+        var mode = session.Config?.Mode ?? _player.ExpectedMode ?? StreamMode.Screen;
+        var name = session.HostName.Length > 0 ? session.HostName : _currentHost ?? string.Empty;
+        NowTitle.Text = name;
+        (NowGlyph.Text, NowTile.Style) = mode switch
+        {
+            StreamMode.Camera => ("", (Style)FindResource("IconTileCyan")),
+            StreamMode.AudioOnly => ("", (Style)FindResource("IconTilePink")),
+            _ => ("", (Style)FindResource("IconTile")),
+        };
+
+        var stats = Telemetry.Viewer;
+        var config = session.Config;
+        NowDetail.Text = session.State switch
+        {
+            ConnectionState.Connected when mode == StreamMode.AudioOnly => $"Festa de música · {_currentHost}",
+            ConnectionState.Connected when config is not null => $"{StreamModes.Label(mode)} · {config.Width} × {config.Height} · {Quality.CodecLabel(config.Codec)} · {_currentHost}",
+            ConnectionState.Connected => $"{StreamModes.Label(mode)} · {_currentHost}",
+            ConnectionState.WaitingApproval => "Esperando o anfitrião aprovar a entrada…",
+            ConnectionState.Reconnecting => "A conexão caiu, reconectando…",
+            ConnectionState.Error => "Não foi possível conectar. Veja o aviso no player.",
+            _ => $"Conectando em {_currentHost}…",
+        };
+
+        if (mode == StreamMode.AudioOnly)
+        {
+            NowStat1Label.Text = "Buffer";
+            NowStat1.Text = stats is null ? "—" : $"{stats.AudioBufferMs:0} ms";
+            NowStat2Label.Text = "Áudio";
+            NowStat2.Text = stats is null ? "—" : $"{stats.AudioKbps:0}k";
+        }
+        else
+        {
+            NowStat1Label.Text = "FPS";
+            NowStat1.Text = stats is null ? "—" : $"{stats.Fps:0}";
+            NowStat2Label.Text = "Mbps";
+            NowStat2.Text = stats is null ? "—" : $"{stats.BitrateMbps:0.#}";
+        }
+        NowStat3.Text = stats is null ? "—" : $"{stats.RoundTripMs:0} ms";
+    }
+
+    /// <summary>Cartão de uma transmissão encontrada na rede.</summary>
+    public sealed class SessionCard(string address) : INotifyPropertyChanged
+    {
+        private string _name = address;
+        private StreamMode _mode;
+        private int _viewers;
+        private bool _pin;
+        private bool _current;
+
+        public string Address { get; } = address;
+        public string Name { get => _name; private set => Set(ref _name, value, nameof(Name)); }
+        public StreamMode Mode { get => _mode; private set => Set(ref _mode, value, nameof(Mode), nameof(IsScreen), nameof(IsCamera), nameof(IsParty), nameof(ModeLabel), nameof(ActionText)); }
+        public bool PinRequired { get => _pin; private set => Set(ref _pin, value, nameof(PinRequired)); }
+        public bool IsScreen => Mode == StreamMode.Screen;
+        public bool IsCamera => Mode == StreamMode.Camera;
+        public bool IsParty => Mode == StreamMode.AudioOnly;
+        public string ModeLabel => StreamModes.Label(Mode);
+        public string ViewersText => _viewers switch { 0 => "ninguém ainda", 1 => "1 assistindo", var n => $"{n} assistindo" };
+        public string ActionText => _current ? "Abrir o player" : Mode == StreamMode.AudioOnly ? "Entrar na festa" : "Assistir";
+
+        public void Update(DiscoveryAnnouncement announcement, bool current)
+        {
+            Name = announcement.HostName;
+            Mode = announcement.Mode;
+            PinRequired = announcement.PinRequired;
+            Set(ref _viewers, announcement.Viewers, nameof(ViewersText));
+            Set(ref _current, current, nameof(ActionText));
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        private void Set<T>(ref T field, T value, params string[] names)
+        {
+            if (EqualityComparer<T>.Default.Equals(field, value)) return;
+            field = value;
+            foreach (var name in names) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+        }
     }
 }
