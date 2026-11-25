@@ -1,32 +1,43 @@
 # ScreenFlow Remote
 
-Aplicativo desktop Windows para compartilhamento remoto de tela, projetado para baixa latência, conexão P2P, captura eficiente e qualidade adaptativa.
+Aplicativo desktop Windows de compartilhamento de tela. O repositório agora contém um **MVP LAN funcional em desenvolvimento**, com host, visualizador, aprovação explícita, autenticação por código aleatório e frames criptografados.
 
-> **Status atual: Fase 1 / Fundação.** A base da solução, dashboard WPF e detecção real de monitores estão no repositório. Captura WGC, vídeo WebRTC e transmissão ainda não foram implementados nem testados.
+> **Status honesto:** o caminho LAN atual usa captura GDI + JPEG por TCP, com largura limitada a 1920 pixels e alvo de até 30 FPS. Ainda não é a arquitetura final de baixa latência baseada em Windows Graphics Capture, Direct3D e WebRTC. Não existe validação de 4K/165 FPS.
 
 ## Requisitos
+
 - Windows 10/11 x64
 - .NET 10 SDK
 
-## Build e execução
-```powershell
-dotnet restore ScreenFlowRemote.sln
-dotnet build ScreenFlowRemote.sln
-dotnet run --project src/ScreenFlow.Remote/ScreenFlow.Remote.csproj
-```
+## Build
 
-## Estrutura
-- `ScreenFlow.Remote`: aplicativo desktop WPF
-- `ScreenFlow.Core`: modelos e contratos
-- `ScreenFlow.Infrastructure`: serviços de Windows e diagnóstico
-- `tests/`: testes automatizados
-- `docs/`: arquitetura, decisões técnicas, desenvolvimento, roadmap e troubleshooting
+    dotnet restore ScreenFlowRemote.sln
+    dotnet build ScreenFlowRemote.sln --configuration Release
+    dotnet test ScreenFlowRemote.sln --configuration Release
+    dotnet run --project src/ScreenFlow.Remote/ScreenFlow.Remote.csproj
 
-## Documentação
+Um workflow do GitHub Actions executa build/teste em Windows e publica um artefato win-x64 a cada push na branch main.
+
+## Usar o MVP LAN
+
+1. Abra o ScreenFlow Remote no computador que compartilhará a tela.
+2. Selecione monitor, largura máxima e FPS.
+3. Clique em INICIAR COMPARTILHAMENTO.
+4. Compartilhe o IP mostrado, a porta TCP 39217 e o código da sessão com o outro computador.
+5. No segundo computador, informe IP e código e clique em CONECTAR.
+6. Aprove a solicitação no computador transmissor.
+
+Os dois computadores precisam estar na mesma rede local. Libere TCP 39217 apenas no perfil de rede privada confiável do Windows.
+
+## Segurança
+
+O código possui 128 bits de aleatoriedade. O cliente prova que conhece o código por meio de um desafio novo por conexão, e os frames são protegidos com AES-GCM. A transmissão só começa depois da aprovação explícita no computador transmissor. O MVP ainda não passou por auditoria externa e não deve ser exposto diretamente à Internet.
+
+## Arquitetura e documentação
+
+- [LAN MVP](docs/LAN_MVP.md)
 - [Arquitetura](docs/ARCHITECTURE.md)
 - [Decisões técnicas](docs/TECHNICAL_DECISIONS.md)
 - [Desenvolvimento](docs/DEVELOPMENT.md)
 - [Roadmap](docs/ROADMAP.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
-
-O objetivo arquitetural é suportar até 4K e 165 FPS quando equipamento, encoder, decoder e rede forem capazes. Esses limites não são garantias de desempenho.
