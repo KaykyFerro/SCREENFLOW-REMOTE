@@ -97,7 +97,7 @@
                             </DockPanel>
                             <CheckBox x:Name="AutoToggle" Style="{StaticResource Switch}" Content="Procurar sozinho (ao abrir e a cada 6 horas) e avisar no sininho"
                                       Checked="AutoToggle_Changed" Unchecked="AutoToggle_Changed"/>
-                            <Border Style="{StaticResource Divider}" Margin="0,18"/>
+                            <Border Style="{StaticResource DividerLine}" Margin="0,18"/>
                             <DockPanel Margin="0,0,0,10">
                                 <TextBlock x:Name="LastCheckText" DockPanel.Dock="Right" Style="{StaticResource Body}" FontSize="13.5" Text="Nunca"/>
                                 <TextBlock Style="{StaticResource Caption}" FontSize="13" Text="Última verificação"/>

@@ -134,7 +134,7 @@
                         <Button DockPanel.Dock="Right" Style="{StaticResource LinkButton}" Content="Marcar como lidas" FontSize="12.5" Click="MarkRead_Click"/>
                         <TextBlock Text="Notificações" FontSize="15.5" FontWeight="SemiBold"/>
                     </DockPanel>
-                    <Border Style="{StaticResource Divider}"/>
+                    <Border Style="{StaticResource DividerLine}"/>
                     <ScrollViewer MaxHeight="440" VerticalScrollBarVisibility="Auto">
                         <ItemsControl x:Name="NoticeList" Margin="8,8,8,0">
                             <ItemsControl.ItemTemplate>
