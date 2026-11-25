@@ -82,7 +82,11 @@
                             </StackPanel>
                         </Grid>
 
-                        <CheckBox x:Name="AudioCheck" Content="Compartilhar áudio do computador" Foreground="#FFFFFF" Margin="0,18,0,0"/>
+                        <WrapPanel Margin="0,18,0,-6">
+                            <CheckBox x:Name="AudioCheck" Content="Compartilhar áudio do computador" Foreground="#FFFFFF" Margin="0,0,24,6"/>
+                            <CheckBox x:Name="CameraCheck" Content="Mandar a câmera junto" Foreground="#FFFFFF" Margin="0,0,24,6"
+                                      ToolTip="Quem assiste vê a sua webcam num quadrinho no canto da tela."/>
+                        </WrapPanel>
 
                         <StackPanel Orientation="Horizontal" Margin="0,24,0,0">
                             <Button x:Name="StartButton" Style="{StaticResource PrimaryButton}" MinHeight="46" Padding="22,0" Click="Start_Click">

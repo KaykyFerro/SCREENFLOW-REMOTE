@@ -55,6 +55,8 @@ public sealed class AppSettings
     public bool ShowStatsOverlay { get; set; }
     /// <summary>Desenha o vídeo direto na GPU (D3D11). Desligado, usa o caminho antigo pela CPU.</summary>
     public bool GpuVideoRenderer { get; set; } = true;
+    /// <summary>Canto do quadrinho da câmera no player: 0 em cima à direita, 1 embaixo à direita, 2 embaixo à esquerda.</summary>
+    public int PlayerCameraCorner { get; set; }
 
     // Bandeja
     /// <summary>Fechar e minimizar levam o app para a bandeja (perto do relógio) em vez de fechar.</summary>
@@ -102,6 +104,7 @@ public sealed class AppSettings
         if (!Quality.CameraFrameRates.Contains(CameraFps)) CameraFps = 30;
         MusicBitrateKbps = Math.Clamp(MusicBitrateKbps, AudioProfile.MinMusicKbps, AudioProfile.MaxMusicKbps);
         if (string.IsNullOrWhiteSpace(CameraId)) CameraId = null;
+        if (PlayerCameraCorner is < 0 or > 2) PlayerCameraCorner = 0;
         BitrateKbps = BitrateKbps <= 0 ? 0 : Math.Clamp(BitrateKbps, 1_000, 200_000);
         AudioBitrateKbps = Math.Clamp(AudioBitrateKbps, 64, 256);
         FecGroupSize = Math.Clamp(FecGroupSize, 0, 32);

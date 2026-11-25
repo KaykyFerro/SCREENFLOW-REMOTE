@@ -50,8 +50,9 @@ public enum ViewerState { Authenticating, WaitingApproval, Streaming }
 
 public sealed record ViewerInfo(Guid Id, string Name, string Address, ViewerState State, double RoundTripMs, double LossRate, double ReceivedMbps, double LatencyMs);
 
+/// <param name="Camera">A câmera que vai junto com a tela ("1280×720 · 30 FPS · 2,1 Mbps"), o problema dela, ou vazio.</param>
 public sealed record HostStatistics(int Viewers, double EncodeFps, double BitrateMbps, double UploadMbps, string Encoder, string Capture, StreamTarget Target, string Reason,
-    StreamMode Mode = StreamMode.Screen, double AudioKbps = 0);
+    StreamMode Mode = StreamMode.Screen, double AudioKbps = 0, string Camera = "");
 
 public sealed record ApprovalRequest(Guid Id, string Name, string Address);
 
@@ -59,6 +60,8 @@ public sealed record ApprovalRequest(Guid Id, string Name, string Address);
 /// Sessão de transmissão: aceita viewers no canal TCP, captura e codifica a tela (ou a câmera) uma vez só e envia o
 /// mesmo vídeo (criptografado por viewer) para todos via UDP. Suporta dezenas de viewers; o limite prático é o upload.
 /// No modo festa de música não há vídeo: só o áudio do PC em qualidade de música, com redundância.
+/// Com "câmera junto", a câmera vai numa segunda faixa de vídeo (pacotes próprios, encoder próprio) e quem assiste vê
+/// num quadrinho por cima da tela.
 /// </summary>
 public sealed class HostSession : IAsyncDisposable
 {
@@ -67,7 +70,11 @@ public sealed class HostSession : IAsyncDisposable
     private readonly ConcurrentDictionary<string, (DateTimeOffset Start, int Count)> _failures = new();
     private readonly CancellationTokenSource _cancellation = new();
     private readonly RetransmitCache _retransmit = new(96);
+    private readonly RetransmitCache _cameraRetransmit = new(48, MediaPacketType.CameraVideo);
     private readonly AutoResetEvent _wake = new(false);
+    private readonly AutoResetEvent _cameraWake = new(false);
+    private readonly RateMeter _cameraFrames = new();
+    private readonly RateMeter _cameraBytes = new();
     private readonly RateMeter _encodedFrames = new();
     private readonly RateMeter _encodedBytes = new();
     private readonly RateMeter _audioBytes = new();
@@ -77,12 +84,17 @@ public sealed class HostSession : IAsyncDisposable
     private MediaSender? _sender;
     private DiscoveryAnnouncer? _announcer;
     private Thread? _pipeline;
+    private Thread? _cameraPipeline;
     private Task? _acceptLoop;
     private Task? _udpDrain;
     private IAudioSource? _audio;
     private uint _audioSequence;
     private byte[] _previousAudio = [];
     private volatile bool _keyframeRequested;
+    private volatile bool _cameraKeyframeRequested;
+    private volatile string? _cameraProblem;
+    private volatile string _cameraFormat = "";
+    private int _cameraKbps;
     private StreamTarget _profile;
     private volatile StreamTarget _target;
     private VideoCodec _codec;
@@ -101,6 +113,11 @@ public sealed class HostSession : IAsyncDisposable
         _target = _profile;
         _audioProfile = AudioProfile.ForMode(options.Mode, options.AudioBitrateKbps, options.MusicBitrateKbps);
         _sourceSize = (options.Target.Width, options.Target.Height);
+        if (HasCameraOverlay)
+        {
+            var camera = options.OverlayCamera!;
+            _cameraKbps = Quality.CameraOverlayBitrateKbps(camera.Width, camera.Height, camera.Fps, options.PreferredCodec ?? VideoCodec.Hevc);
+        }
     }
 
     public StreamMode Mode => _options.Mode;
@@ -109,6 +126,9 @@ public sealed class HostSession : IAsyncDisposable
 
     /// <summary>A câmera vai junto com a tela (modo tela com "câmera junto" ligado).</summary>
     public bool HasCameraOverlay => _options.Mode == StreamMode.Screen && _options.OverlayCamera is not null;
+
+    /// <summary>O que vai para quem assiste, em poucas palavras: "tela, câmera e áudio".</summary>
+    public string Summary => StreamModes.Summary(_options.Mode, AudioEnabled, HasCameraOverlay);
     public AudioProfile AudioProfile => _audioProfile;
 
     /// <summary>Nível e espectro do áudio capturado (null sem áudio).</summary>
@@ -132,7 +152,7 @@ public sealed class HostSession : IAsyncDisposable
         _listener.Start(32);
         _announcer = new DiscoveryAnnouncer(_options.BindAddress, _options.BroadcastAddress, _options.DiscoveryPort, () =>
             new DiscoveryAnnouncement(AppInfo.Name, AppInfo.ProtocolVersion, _options.DeviceName, _options.BindAddress.ToString(), _options.ControlPort, AppInfo.DisplayVersion,
-                !string.IsNullOrEmpty(_options.Pin), _viewers.Values.Count(v => v.State == ViewerState.Streaming), _options.Mode));
+                !string.IsNullOrEmpty(_options.Pin), _viewers.Values.Count(v => v.State == ViewerState.Streaming), _options.Mode, HasCameraOverlay));
         _announcer.Start();
         _acceptLoop = Task.Run(AcceptLoopAsync);
         _udpDrain = Task.Run(DrainUdpAsync);
@@ -141,10 +161,16 @@ public sealed class HostSession : IAsyncDisposable
             _pipeline = new Thread(PipelineLoop) { IsBackground = true, Name = "ScreenFlow pipeline", Priority = ThreadPriority.AboveNormal };
             _pipeline.Start();
         }
+        if (HasCameraOverlay)
+        {
+            _cameraPipeline = new Thread(CameraLoop) { IsBackground = true, Name = "ScreenFlow câmera junto", Priority = ThreadPriority.AboveNormal };
+            _cameraPipeline.Start();
+        }
         StartAudio();
         _ = Task.Run(StatsLoopAsync);
         Log.Info($"Host iniciado em {_options.BindAddress} (controle TCP {_options.ControlPort}, mídia UDP {_options.MediaPort}), modo {_options.Mode}, "
-                 + (HasVideo ? $"perfil {_profile}" : $"áudio {_audioProfile.BitrateKbps} kbps"));
+                 + (HasVideo ? $"perfil {_profile}" : $"áudio {_audioProfile.BitrateKbps} kbps")
+                 + (HasCameraOverlay ? $", câmera junto ({_options.OverlayCamera!.Name})" : string.Empty));
         StatusChanged?.Invoke($"Transmitindo em {_options.BindAddress}. Aguardando viewers.");
     }
 
@@ -256,7 +282,9 @@ public sealed class HostSession : IAsyncDisposable
             await viewer.SendAsync(new WelcomeMessage(_options.DeviceName, Convert.ToBase64String(salt), _options.MediaPort, CurrentConfig("conexão")), token);
             viewer.State = ViewerState.Streaming;
             _keyframeRequested = true;
+            _cameraKeyframeRequested = true;
             _wake.Set();
+            _cameraWake.Set();
             ViewersChanged?.Invoke();
             Log.Info($"Viewer {name} ({ip}) conectado. Total: {_viewers.Count}");
             StatusChanged?.Invoke(_options.Mode == StreamMode.AudioOnly ? $"{name} entrou na festa." : $"{name} começou a assistir.");
@@ -302,11 +330,13 @@ public sealed class HostSession : IAsyncDisposable
                     viewer.LastStats = stats;
                     break;
                 case NackMessage nack:
-                    foreach (var chunk in _retransmit.Lookup(nack.FrameId, nack.Missing.Take(256)))
+                    var cache = nack.Track == VideoTrack.Camera ? _cameraRetransmit : _retransmit;
+                    foreach (var chunk in cache.Lookup(nack.FrameId, nack.Missing.Take(256)))
                         _sender!.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress, retransmit: true);
                     break;
-                case KeyframeRequestMessage:
-                    _keyframeRequested = true;
+                case KeyframeRequestMessage request:
+                    if (request.Track == VideoTrack.Camera) _cameraKeyframeRequested = true;
+                    else _keyframeRequested = true;
                     break;
                 case BandwidthTestResultMessage result:
                     Log.Info($"Teste de banda até {viewer.Name}: {result.ReceivedMbps:0.0} Mbps, perda {result.LossRate:P1}");
@@ -422,7 +452,9 @@ public sealed class HostSession : IAsyncDisposable
     private StreamTarget ApplyUploadBudget(StreamTarget target)
     {
         var watching = Math.Max(1, _viewers.Values.Count(v => v.State == ViewerState.Streaming));
-        var limit = Quality.PerViewerBitrateKbps(target.BitrateKbps, _options.UploadMbps, watching);
+        // A câmera junto usa um pedaço do upload de cada pessoa: a tela fica com o resto.
+        var camera = HasCameraOverlay ? Volatile.Read(ref _cameraKbps) : 0;
+        var limit = Math.Max(1_000, Quality.PerViewerBitrateKbps(target.BitrateKbps + camera, _options.UploadMbps, watching) - camera);
         return limit < target.BitrateKbps ? target with { BitrateKbps = limit } : target;
     }
 
@@ -440,7 +472,7 @@ public sealed class HostSession : IAsyncDisposable
                 VideoEnabled: false, Mode: _options.Mode);
         var (w, h) = _target.Resolution.FitTo(_sourceSize.Width, _sourceSize.Height);
         return new StreamConfigMessage(_codec, w, h, _target.Fps, _target.BitrateKbps, AudioEnabled, AudioProfile.SampleRate, AudioProfile.Channels, _encoderName, reason,
-            VideoEnabled: true, Mode: _options.Mode);
+            VideoEnabled: true, Mode: _options.Mode, CameraOverlay: HasCameraOverlay);
     }
 
     private async Task StatsLoopAsync()
@@ -472,7 +504,8 @@ public sealed class HostSession : IAsyncDisposable
             }
             var encoder = !HasVideo ? $"Opus {_audioProfile.BitrateKbps} kbps" : string.IsNullOrEmpty(_encoderName) ? "—" : $"{Quality.CodecLabel(_codec)} · {_encoderName}";
             StatisticsUpdated?.Invoke(new HostStatistics(streaming.Count, _encodedFrames.PerSecond(now), _encodedBytes.PerSecond(now) * 8 / 1_000_000.0, sentMbps,
-                encoder, HasVideo ? _captureBackend : "WASAPI loopback", _target, HasVideo ? _reason : "festa de música", _options.Mode, _audioBytes.PerSecond(now) * 8 / 1000.0));
+                encoder, HasVideo ? _captureBackend : "WASAPI loopback", _target, HasVideo ? _reason : "festa de música", _options.Mode, _audioBytes.PerSecond(now) * 8 / 1000.0,
+                CameraSummary(streaming, now)));
             ViewersChanged?.Invoke();
         }
     }
@@ -595,6 +628,177 @@ public sealed class HostSession : IAsyncDisposable
         }
     }
 
+    // ───────────────────────── Câmera junto com a tela ─────────────────────────
+
+    /// <summary>Quem recebe a câmera: está assistindo e tem uma versão que mostra o quadrinho (1.1.0 ou mais nova).</summary>
+    private RemoteViewer[] CameraAudience()
+        => _viewers.Values.Where(v => v.State == ViewerState.Streaming && v.Hello.Supports(StreamModes.FeatureCameraOverlay)).ToArray();
+
+    /// <summary>
+    /// A segunda faixa de vídeo: a câmera, no mesmo codec da tela e num tamanho de quadrinho (até 720p). Tem device,
+    /// captura e encoder próprios, então a tela não espera a câmera. Se a câmera falhar (em uso, desligada, bloqueada
+    /// pela privacidade do Windows), a tela continua e a câmera tenta de novo com espera crescente.
+    /// </summary>
+    private void CameraLoop()
+    {
+        var camera = _options.OverlayCamera!;
+        var fps = Math.Clamp(camera.Fps, 5, 60);
+        var interval = 1_000_000 / fps;
+        GpuDevice? gpu = null;
+        CameraCapture? capture = null;
+        GpuColorConverter? converter = null;
+        VideoEncoder? encoder = null;
+        string? activeEncoder = null;
+        uint frameId = 0;
+        var packets = new List<EncodedPacket>(4);
+        long lastEncodeUs = 0;
+        long lastKeyframeUs = 0;
+        var failures = 0;
+
+        void TearDown()
+        {
+            encoder?.Dispose(); encoder = null;
+            converter?.Dispose(); converter = null;
+            capture?.Dispose(); capture = null;
+            gpu?.Dispose(); gpu = null;
+            activeEncoder = null;
+            _cameraFormat = string.Empty;
+        }
+
+        try
+        {
+            while (!_cancellation.IsCancellationRequested)
+            {
+                var audience = CameraAudience();
+                string encoderName;
+                VideoCodec codec;
+                lock (_configGate) (encoderName, codec) = (_encoderName, _codec);
+                if (audience.Length == 0 || encoderName.Length == 0)
+                {
+                    if (gpu is not null) { TearDown(); Log.Info("Ninguém recebendo a câmera: câmera desligada."); }
+                    _cameraWake.WaitOne(250);
+                    continue;
+                }
+
+                try
+                {
+                    if (gpu is null)
+                    {
+                        gpu = GpuDevice.Create(_options.Monitor?.DeviceName);
+                        capture = new CameraCapture(gpu, camera.DeviceId, camera.Width, camera.Height, fps);
+                    }
+                    if (capture!.SizeChanged)
+                    {
+                        Log.Info("A câmera mudou de formato: recriando.");
+                        TearDown();
+                        continue;
+                    }
+
+                    // Mesmo codec da tela: quando a tela troca de encoder (alguém entrou ou saiu), a câmera acompanha.
+                    if (encoder is null || activeEncoder != encoderName)
+                    {
+                        encoder?.Dispose();
+                        converter?.Dispose();
+                        var (w, h) = Quality.FitWithin(capture.Width, capture.Height, camera.Width, camera.Height);
+                        var kbps = Quality.CameraOverlayBitrateKbps(w, h, fps, codec);
+                        converter = new GpuColorConverter(gpu, capture.Texture, capture.Width, capture.Height, w, h, fps);
+                        encoder = OpenCameraEncoder(gpu, new EncoderSettings(encoderName, codec, w, h, fps, kbps));
+                        activeEncoder = encoderName;
+                        _cameraFormat = $"{w}×{h}";
+                        if (Interlocked.Exchange(ref _cameraKbps, kbps) != kbps && _options.UploadMbps > 0)
+                            SetTarget(ApplyUploadBudget(_adaptive?.Current ?? _profile), _reason);
+                        _cameraKeyframeRequested = true;
+                        if (_cameraProblem is not null) StatusChanged?.Invoke("A câmera voltou e está indo junto com a tela.");
+                        _cameraProblem = null;
+                        failures = 0;
+                    }
+
+                    var got = capture.WaitForFrame(TimeSpan.FromMilliseconds(Math.Max(1, interval / 1000)), out var timestamp);
+                    var now = MediaClock.NowUs;
+                    var since = now - lastEncodeUs;
+                    // Sem frame novo (câmera travou ou foi tampada): reenvia de vez em quando para quem acabou de entrar.
+                    if (!got && since < 500_000 && !_cameraKeyframeRequested) continue;
+                    if (got && since < interval * 0.85 && !_cameraKeyframeRequested) continue;
+                    if (!got) timestamp = now;
+                    lastEncodeUs = now;
+
+                    if (_cameraKeyframeRequested && now - lastKeyframeUs > 200_000)
+                    {
+                        encoder!.RequestKeyframe();
+                        lastKeyframeUs = now;
+                        _cameraKeyframeRequested = false;
+                    }
+
+                    converter!.Convert();
+                    packets.Clear();
+                    encoder!.Encode(converter.Output, timestamp, packets);
+                    foreach (var packet in packets)
+                    {
+                        var id = frameId++;
+                        var chunks = Packetizer.Packetize(MediaPacketType.CameraVideo, id, packet.Data, packet.TimestampUs, packet.Keyframe, fecGroupSize: _options.FecGroupSize);
+                        _cameraRetransmit.Store(id, chunks);
+                        _cameraFrames.Add(1, now);
+                        _cameraBytes.Add(packet.Data.Length, now);
+                        foreach (var viewer in audience)
+                            foreach (var chunk in chunks)
+                                _sender!.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress);
+                    }
+                }
+                catch (Exception exception) when (!_cancellation.IsCancellationRequested)
+                {
+                    failures++;
+                    TearDown();
+                    var problem = exception.Message;
+                    if (_cameraProblem != problem)
+                    {
+                        Log.Error("A câmera junto com a tela falhou", exception);
+                        StatusChanged?.Invoke($"A câmera não foi junto: {problem} A tela continua normal; a câmera tenta de novo sozinha.");
+                    }
+                    _cameraProblem = problem;
+                    // 2 s, 4 s, 8 s, 16 s e depois a cada 30 s; alguém entrando tenta na hora.
+                    var wait = TimeSpan.FromSeconds(Math.Min(30, 2 << Math.Min(failures - 1, 4)));
+                    WaitHandle.WaitAny([_cancellation.Token.WaitHandle, _cameraWake], wait);
+                }
+            }
+        }
+        finally
+        {
+            TearDown();
+        }
+    }
+
+    /// <summary>Abre o encoder da câmera: o mesmo da tela e, se ele recusar uma segunda sessão, outro do mesmo codec.</summary>
+    private VideoEncoder OpenCameraEncoder(GpuDevice gpu, EncoderSettings settings)
+    {
+        try
+        {
+            return new VideoEncoder(gpu, settings);
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"Encoder {settings.EncoderName} recusou a câmera: {exception.Message}");
+            foreach (var fallback in _options.Encoders.Where(e => e.Codec == settings.Codec && e.FfmpegName != settings.EncoderName).OrderByDescending(e => e.Hardware))
+            {
+                try { return new VideoEncoder(gpu, settings with { EncoderName = fallback.FfmpegName }); }
+                catch (Exception inner) { Log.Warn($"Encoder {fallback.FfmpegName} também recusou a câmera: {inner.Message}"); }
+            }
+            throw new InvalidOperationException($"Nenhum encoder {Quality.CodecLabel(settings.Codec)} aceitou a câmera junto com a tela.", exception);
+        }
+    }
+
+    /// <summary>Uma linha sobre a câmera junto para a tela Transmissão (vazio sem câmera).</summary>
+    private string CameraSummary(List<RemoteViewer> streaming, long now)
+    {
+        if (!HasCameraOverlay) return string.Empty;
+        if (_cameraProblem is { } problem) return $"Câmera com problema: {problem}";
+        if (streaming.Count == 0) return "Câmera junto: liga quando alguém entrar.";
+        if (!streaming.Any(v => v.Hello.Supports(StreamModes.FeatureCameraOverlay)))
+            return "Câmera junto: quem está assistindo usa uma versão antiga do ScreenFlow, que não mostra a câmera.";
+        var frames = _cameraFrames.PerSecond(now);
+        if (frames == 0) return "Câmera junto: ligando…";
+        return $"Câmera junto: {_cameraFormat} · {frames:0} FPS · {_cameraBytes.PerSecond(now) * 8 / 1_000_000.0:0.0} Mbps";
+    }
+
     private VideoEncoder OpenEncoder(GpuDevice gpu, int width, int height, StreamTarget target)
     {
         var settings = new EncoderSettings(_encoderName, _codec, width, height, target.Fps, target.BitrateKbps);
@@ -696,12 +900,14 @@ public sealed class HostSession : IAsyncDisposable
         }
         _cancellation.Cancel();
         _wake.Set();
+        _cameraWake.Set();
         _listener?.Stop();
         if (_announcer is not null) await _announcer.DisposeAsync();
         _audio?.Dispose();
         foreach (var viewer in _viewers.Values) viewer.Dispose();
         _viewers.Clear();
         _pipeline?.Join(TimeSpan.FromSeconds(3));
+        _cameraPipeline?.Join(TimeSpan.FromSeconds(3));
         _udp?.Dispose();
         if (_acceptLoop is not null) try { await _acceptLoop; } catch { }
         if (_udpDrain is not null) try { await _udpDrain; } catch { }

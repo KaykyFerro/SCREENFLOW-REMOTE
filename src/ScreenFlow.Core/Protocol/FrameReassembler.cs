@@ -15,25 +15,31 @@ public sealed class FrameReassembler
     private readonly SortedDictionary<uint, Assembly> _frames = new();
     private readonly TimeSpan _nackDelay;
     private readonly TimeSpan _deadline;
+    private readonly MediaPacketType _dataType;
+    private readonly MediaPacketType _fecType;
     private uint _nextFrame;
     private bool _started;
     private bool _gapPending;
 
-    public FrameReassembler(TimeSpan? nackDelay = null, TimeSpan? deadline = null)
+    /// <param name="dataType">Faixa remontada: <see cref="MediaPacketType.Video"/> (a tela) ou <see cref="MediaPacketType.CameraVideo"/>
+    /// (a câmera que vai junto). Pacotes da outra faixa são ignorados.</param>
+    public FrameReassembler(TimeSpan? nackDelay = null, TimeSpan? deadline = null, MediaPacketType dataType = MediaPacketType.Video)
     {
         _nackDelay = nackDelay ?? TimeSpan.FromMilliseconds(8);
         _deadline = deadline ?? TimeSpan.FromMilliseconds(120);
+        _dataType = dataType;
+        _fecType = VideoTrack.FecType(dataType) ?? throw new ArgumentException("Só faixas de vídeo são remontadas.", nameof(dataType));
     }
 
     public long FramesCompleted { get; private set; }
     public long FramesDropped { get; private set; }
     public long PacketsRecoveredByFec { get; private set; }
 
-    /// <summary>Adiciona um pacote de vídeo ou FEC. Retorna os frames que ficaram prontos, em ordem.</summary>
+    /// <summary>Adiciona um pacote de vídeo ou FEC da faixa. Retorna os frames que ficaram prontos, em ordem.</summary>
     public List<AssembledFrame> Add(in MediaHeader header, ReadOnlySpan<byte> payload, TimeSpan now)
     {
         var ready = new List<AssembledFrame>();
-        if (header.Type is not (MediaPacketType.Video or MediaPacketType.VideoFec)) return ready;
+        if (header.Type != _dataType && header.Type != _fecType) return ready;
         if (!_started)
         {
             _started = true;
@@ -49,7 +55,7 @@ public sealed class FrameReassembler
             _frames[header.FrameId] = frame;
         }
 
-        if (header.Type == MediaPacketType.Video) frame.AddData(header.Index, payload);
+        if (header.Type == _dataType) frame.AddData(header.Index, payload);
         else frame.AddParity(header.Index, payload);
 
         PacketsRecoveredByFec += frame.TryRecover();

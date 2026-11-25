@@ -474,6 +474,8 @@ public partial class MainWindow : Window
         VoiceButtons.Columns = _compact ? 1 : 0;
         VoiceButtons.Margin = _compact ? new Thickness(0, -3, 0, -3) : new Thickness(-3, 10, -3, 0);
         foreach (FrameworkElement child in VoiceButtons.Children) child.Margin = _compact ? new Thickness(0, 3, 0, 3) : new Thickness(3, 0, 3, 0);
+        // Recolhido, o menu pode não caber em janelas baixas: continua rolando com a rodinha, sem a barra por cima dos ícones.
+        NavScroll.VerticalScrollBarVisibility = _compact ? ScrollBarVisibility.Hidden : ScrollBarVisibility.Auto;
         UpdateVoicePanel();
     }
 
@@ -719,6 +721,8 @@ public partial class MainWindow : Window
         DeafenToggle.ToolTip = room.Deafened ? "Ligar o som" : "Desligar o som de todo mundo";
         JoinVoiceLabel.Visibility = _compact ? Visibility.Collapsed : Visibility.Visible;
         ChatLabel.Visibility = inVoice || _compact ? Visibility.Collapsed : Visibility.Visible;
+        // No menu recolhido o chat já está na lista (com a bolinha de não lidas): o painel fica só com a voz.
+        ChatButtonBox.Visibility = _compact ? Visibility.Collapsed : Visibility.Visible;
         UpdateTray();
     }
 

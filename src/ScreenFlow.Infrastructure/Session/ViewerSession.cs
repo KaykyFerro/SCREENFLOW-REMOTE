@@ -26,6 +26,7 @@ public sealed class ConnectionRejectedException(string code, string message) : E
 /// <summary>
 /// Conecta num host pelo IP, faz o handshake, recebe vídeo e áudio por UDP, decodifica e reconecta sozinho
 /// com backoff se a conexão cair. Com um <see cref="Presenter"/>, o vídeo é desenhado direto na GPU.
+/// Quando o host manda a câmera junto com a tela, ela chega numa segunda faixa e sai em <see cref="CameraFrameReady"/>.
 /// </summary>
 public sealed class ViewerSession : IAsyncDisposable
 {
@@ -67,6 +68,9 @@ public sealed class ViewerSession : IAsyncDisposable
 
     public event Action<ConnectionState, string>? StateChanged;
     public event Action<DecodedFrame>? FrameReady;
+
+    /// <summary>Um frame da câmera que vai junto com a tela (BGRA, pela CPU), para o quadrinho do player.</summary>
+    public event Action<DecodedFrame>? CameraFrameReady;
     public event Action<ViewerStatistics>? StatisticsUpdated;
     public event Action<StreamConfigMessage>? ConfigChanged;
 
@@ -230,6 +234,10 @@ public sealed class ViewerSession : IAsyncDisposable
         private readonly FrameReassembler _reassembler = new();
         private readonly object _reassemblyGate = new();
         private readonly BlockingCollection<AssembledFrame> _decodeQueue = new(8);
+        private readonly FrameReassembler _cameraReassembler = new(dataType: MediaPacketType.CameraVideo);
+        private readonly object _cameraGate = new();
+        private readonly BlockingCollection<AssembledFrame> _cameraQueue = new(4);
+        private readonly RateMeter _cameraDecoded = new();
         private readonly SemaphoreSlim _writeLock = new(1, 1);
         private readonly ClockSync _clock = new();
         private readonly RateMeter _bytes = new();
@@ -242,6 +250,10 @@ public sealed class ViewerSession : IAsyncDisposable
         private string _decoderLabel = "—";
         private long _lastVideoTimestampViewerUs;
         private long _lastKeyframeRequestUs;
+        private long _lastCameraKeyframeRequestUs;
+        private volatile bool _cameraSeen;
+        private int _cameraWidth;
+        private int _cameraHeight;
         private ulong _highestPacket;
         private ulong _windowStartPacket;
         private long _windowReceived;
@@ -269,8 +281,13 @@ public sealed class ViewerSession : IAsyncDisposable
             var t = linked.Token;
             var receive = new Thread(() => ReceiveLoop(t)) { IsBackground = true, Name = "ScreenFlow UDP", Priority = ThreadPriority.Highest };
             var decode = new Thread(() => DecodeLoop(t)) { IsBackground = true, Name = "ScreenFlow decoder", Priority = ThreadPriority.AboveNormal };
+            var camera = new Thread(() => CameraDecodeLoop(t)) { IsBackground = true, Name = "ScreenFlow decoder da câmera" };
             receive.Start();
-            if (_config.VideoEnabled) decode.Start();
+            if (_config.VideoEnabled)
+            {
+                decode.Start();
+                camera.Start();
+            }
             if (_config.AudioEnabled) StartAudio();
 
             var tick = Task.Run(() => TickLoopAsync(t));
@@ -284,8 +301,10 @@ public sealed class ViewerSession : IAsyncDisposable
             {
                 _stop.Cancel();
                 _decodeQueue.CompleteAdding();
+                _cameraQueue.CompleteAdding();
                 receive.Join(1000);
                 if (decode.IsAlive) decode.Join(1000);
+                if (camera.IsAlive) camera.Join(1000);
                 try { await Task.WhenAll(tick, timers); } catch { }
             }
         }
@@ -374,6 +393,13 @@ public sealed class ViewerSession : IAsyncDisposable
                         lock (_reassemblyGate) ready = _reassembler.Add(header, payload, MediaClock.Now);
                         Enqueue(ready);
                         break;
+                    case MediaPacketType.CameraVideo:
+                    case MediaPacketType.CameraFec:
+                        List<AssembledFrame> cameraReady;
+                        lock (_cameraGate) cameraReady = _cameraReassembler.Add(header, payload, MediaClock.Now);
+                        _cameraSeen = true;
+                        EnqueueCamera(cameraReady);
+                        break;
                     case MediaPacketType.Audio:
                         var audio = _owner._audio;
                         if (audio is not null)
@@ -416,12 +442,28 @@ public sealed class ViewerSession : IAsyncDisposable
             }
         }
 
-        private void RequestKeyframe(string reason)
+        /// <summary>Frames da câmera: fila curta, porque no quadrinho vale mais o frame novo que todos os frames.</summary>
+        private void EnqueueCamera(List<AssembledFrame> frames)
+        {
+            foreach (var frame in frames)
+            {
+                if (frame.AfterGap && !frame.Keyframe) RequestKeyframe("perda de frame da câmera", VideoTrack.Camera);
+                if (!_cameraQueue.TryAdd(frame))
+                {
+                    _cameraQueue.TryTake(out _);
+                    _cameraQueue.TryAdd(frame);
+                    RequestKeyframe("decoder da câmera atrasado", VideoTrack.Camera);
+                }
+            }
+        }
+
+        private void RequestKeyframe(string reason, int track = VideoTrack.Main)
         {
             var now = MediaClock.NowUs;
-            if (now - Interlocked.Read(ref _lastKeyframeRequestUs) < 300_000) return;
-            Interlocked.Exchange(ref _lastKeyframeRequestUs, now);
-            _ = SendAsync(new KeyframeRequestMessage(reason), CancellationToken.None);
+            ref var last = ref track == VideoTrack.Camera ? ref _lastCameraKeyframeRequestUs : ref _lastKeyframeRequestUs;
+            if (now - Interlocked.Read(ref last) < 300_000) return;
+            Interlocked.Exchange(ref last, now);
+            _ = SendAsync(new KeyframeRequestMessage(reason, track), CancellationToken.None);
         }
 
         private void DecodeLoop(CancellationToken token)
@@ -469,6 +511,52 @@ public sealed class ViewerSession : IAsyncDisposable
             }
         }
 
+        /// <summary>
+        /// Decodifica a câmera que vai junto com a tela, sempre para a CPU (BGRA): o quadrinho é pequeno e é desenhado
+        /// pelo WPF. Um problema aqui não derruba a tela: o decoder é recriado depois de alguns segundos.
+        /// </summary>
+        private void CameraDecodeLoop(CancellationToken token)
+        {
+            VideoDecoder? decoder = null;
+            long retryAfterUs = 0;
+            try
+            {
+                foreach (var frame in _cameraQueue.GetConsumingEnumerable(token))
+                {
+                    if (MediaClock.NowUs < retryAfterUs) continue;
+                    try
+                    {
+                        var codec = _config.Codec;
+                        if (decoder is null || decoder.Codec != codec)
+                        {
+                            decoder?.Dispose();
+                            decoder = null;
+                            decoder = new VideoDecoder(codec);
+                            if (!frame.Keyframe) RequestKeyframe("decoder da câmera novo", VideoTrack.Camera);
+                        }
+                        var image = decoder.Decode(frame.Data, frame.TimestampUs);
+                        if (image is null) continue;
+                        _cameraDecoded.Add(1, MediaClock.NowUs);
+                        _cameraWidth = image.Width;
+                        _cameraHeight = image.Height;
+                        _owner.CameraFrameReady?.Invoke(image);
+                    }
+                    catch (Exception exception) when (exception is not OperationCanceledException)
+                    {
+                        Log.Warn($"Câmera junto com a tela: {exception.Message}. Tentando de novo em 3 segundos.");
+                        decoder?.Dispose();
+                        decoder = null;
+                        retryAfterUs = MediaClock.NowUs + 3_000_000;
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+            finally
+            {
+                decoder?.Dispose();
+            }
+        }
+
         private VideoDecoder CreateDecoder(D3D11VideoPresenter? presenter)
         {
             if (presenter is not null)
@@ -491,6 +579,12 @@ public sealed class ViewerSession : IAsyncDisposable
                 Enqueue(ready);
                 if (dropped > 0) RequestKeyframe("frames perdidos");
                 foreach (var nack in nacks) await SendAsync(new NackMessage(nack.FrameId, nack.Missing), token);
+
+                if (!_cameraSeen) continue;
+                lock (_cameraGate) (nacks, ready, dropped) = _cameraReassembler.Tick(MediaClock.Now);
+                EnqueueCamera(ready);
+                if (dropped > 0) RequestKeyframe("frames da câmera perdidos", VideoTrack.Camera);
+                foreach (var nack in nacks) await SendAsync(new NackMessage(nack.FrameId, nack.Missing, VideoTrack.Camera), token);
             }
         }
 
@@ -523,7 +617,8 @@ public sealed class ViewerSession : IAsyncDisposable
                     _config.VideoEnabled ? Quality.CodecLabel(_config.Codec) : "Opus", _config.Width, _config.Height,
                     _config.VideoEnabled ? _decoderLabel : "Opus · só áudio", _reassembler.FramesDropped, _reassembler.PacketsRecoveredByFec, _config.Reason,
                     _config.Mode, audio?.Buffered.TotalMilliseconds ?? 0, audio?.PacketsRecovered ?? 0,
-                    _config.VideoEnabled ? 0 : kbps, _owner._gpuRendering == true);
+                    _config.VideoEnabled ? 0 : kbps, _owner._gpuRendering == true,
+                    _cameraSeen ? _cameraDecoded.PerSecond(now) : 0, _cameraWidth, _cameraHeight);
                 _owner._lastStats = stats;
                 _owner.StatisticsUpdated?.Invoke(stats);
             }
@@ -541,6 +636,7 @@ public sealed class ViewerSession : IAsyncDisposable
         {
             _stop.Cancel();
             _decodeQueue.Dispose();
+            _cameraQueue.Dispose();
             _stop.Dispose();
         }
     }

@@ -111,10 +111,11 @@ public static class Screenshots
         });
         ThemeManager.Apply(AppTheme.Dark);
 
-        foreach (var (name, mode, state) in new[]
+        foreach (var (name, mode, state, camera) in new[]
                  {
-                     ("09-player-festa-de-musica.png", StreamMode.AudioOnly, ConnectionState.Connected),
-                     ("10-player-conectando.png", StreamMode.Screen, ConnectionState.WaitingApproval),
+                     ("09-player-festa-de-musica.png", StreamMode.AudioOnly, ConnectionState.Connected, false),
+                     ("10-player-conectando.png", StreamMode.Screen, ConnectionState.WaitingApproval, false),
+                     ("18-player-tela-e-camera.png", StreamMode.Screen, ConnectionState.Connected, true),
                  })
         {
             PlayerWindow? player = null;
@@ -134,7 +135,7 @@ public static class Screenshots
                 AllowAnySize(player);
                 player.Show();
                 Resize(player, new Size(1280, 720));
-                player.ShowDemo(mode, state);
+                player.ShowDemo(mode, state, camera);
                 return Task.Delay(700);
             }, () => WindowRoot(player!));
             if (player is not null) await player.ShutdownAsync();

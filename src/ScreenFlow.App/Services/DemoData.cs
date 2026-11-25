@@ -9,7 +9,7 @@ using ScreenFlow.Infrastructure.Session;
 namespace ScreenFlow.App.Services;
 
 /// <summary>Dados de exemplo para as capturas de tela do CI (o runner não tem GPU, Radmin nem câmera).</summary>
-public static class DemoData
+public static partial class DemoData
 {
     public static HardwareProfile Hardware { get; } = new(
         [new GpuInfo("NVIDIA GeForce RTX 2060", EncoderVendor.Nvidia, 6144), new GpuInfo("Parsec Virtual Display Adapter", EncoderVendor.Software, 0)],
@@ -88,7 +88,7 @@ public static class DemoData
     /// <summary>Transmissões "encontradas na rede" para a tela Assistir.</summary>
     public static IReadOnlyList<DiscoveryAnnouncement> Sessions { get; } =
     [
-        new(AppInfo.Name, AppInfo.ProtocolVersion, "PC-do-Lucas", "26.40.18.100", AppInfo.DefaultControlPort, AppInfo.DisplayVersion, false, 3, StreamMode.Screen),
+        new(AppInfo.Name, AppInfo.ProtocolVersion, "PC-do-Lucas", "26.40.18.100", AppInfo.DefaultControlPort, AppInfo.DisplayVersion, false, 3, StreamMode.Screen, CameraOverlay: true),
         new(AppInfo.Name, AppInfo.ProtocolVersion, "Festa da Mari", "26.47.19.113", AppInfo.DefaultControlPort, AppInfo.DisplayVersion, true, 6, StreamMode.AudioOnly),
         new(AppInfo.Name, AppInfo.ProtocolVersion, "Estúdio", "26.54.20.126", AppInfo.DefaultControlPort, AppInfo.DisplayVersion, false, 1, StreamMode.Camera),
     ];

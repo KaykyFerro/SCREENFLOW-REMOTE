@@ -421,11 +421,11 @@ public sealed class RoomService
     public void LoadDemo(bool inVoice = true, int unread = 2)
     {
         _demo = true;
-        SelfId = new Guid("6b1f1d5e-0c4a-4f7e-9d3b-2a8c5e7f9a10");
+        SelfId = new Guid("6b1f1d5e-0c4a-4f7e-9d3b-2a8c5e7f9a0f");
         _demoVoice = inVoice;
-        var ana = new Guid("0d6f3a52-8b1e-4c9a-a7f2-5e3b9c1d2f40");
+        var ana = new Guid("0d6f3a52-8b1e-4c9a-a7f2-5e3b9c1d2f42");
         var bruno = new Guid("9a2c7e14-3f5b-4d8a-b6e1-7c4f2a9d3e51");
-        var carla = new Guid("4e8b1c63-7a2d-4f9e-8c5b-1d6a3f7e2b62");
+        var carla = new Guid("4e8b1c63-7a2d-4f9e-8c5b-1d6a3f7e2b5f");
         var diego = new Guid("c3a9e275-1b6f-4a8d-9e2c-6f1b8d4a7c73");
         People.Clear();
         People.Add(RoomPersonRow.Demo(ana, "Ana Lu", "Ao vivo · tela, câmera e áudio", true, StreamMode.Screen, "26.47.19.113", false));

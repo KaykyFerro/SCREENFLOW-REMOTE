@@ -94,6 +94,16 @@
                                         <ComboBox x:Name="FpsCombo"/>
                                     </StackPanel>
                                 </Grid>
+                                <CheckBox x:Name="CameraWithScreenToggle" Style="{StaticResource Switch}" Content="Mandar a câmera junto"
+                                          ToolTip="Quem assiste vê a sua webcam num quadrinho no canto da tela."
+                                          Checked="CameraWithScreen_Changed" Unchecked="CameraWithScreen_Changed"/>
+                                <StackPanel x:Name="OverlayCameraPanel" Visibility="Collapsed">
+                                    <TextBlock Style="{StaticResource Label}" Text="Câmera que vai junto"/>
+                                    <DockPanel Margin="{DynamicResource FieldGap}">
+                                        <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar câmeras de novo" Click="RefreshCameras_Click" Margin="8,0,0,0"/>
+                                        <ComboBox x:Name="OverlayCameraCombo"/>
+                                    </DockPanel>
+                                </StackPanel>
                             </StackPanel>
 
                             <StackPanel x:Name="CameraOptions" Visibility="Collapsed">

@@ -19,20 +19,30 @@ namespace ScreenFlow.App.Windows;
 /// <summary>
 /// Player: o vídeo é desenhado direto pela GPU (swapchain D3D11 numa janela nativa) ou, como alternativa, copiado pela
 /// CPU. Na festa de música mostra o visualizador. Os controles somem com o mouse parado; com o vídeo na GPU eles ficam
-/// em janelas sobrepostas, porque o WPF não desenha por cima de uma janela nativa.
+/// em janelas sobrepostas, porque o WPF não desenha por cima de uma janela nativa. Quando a câmera vem junto com a
+/// tela, ela aparece num quadrinho num canto (clique muda de canto, C esconde).
 /// </summary>
 public partial class PlayerWindow : Window
 {
     private static readonly Uri DarkTheme = new("/Themes/Dark.xaml", UriKind.Relative);
     private readonly DispatcherTimer _hideControls = new() { Interval = TimeSpan.FromSeconds(2.5) };
+    private readonly DispatcherTimer _cameraWatch = new() { Interval = TimeSpan.FromSeconds(1) };
     private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly string _host;
     private VideoSurface? _surface;
     private D3D11VideoPresenter? _presenter;
     private OverlayWindow? _controlsOverlay;
     private OverlayWindow? _statsOverlay;
+    private OverlayWindow? _cameraOverlay;
     private DecodedFrame? _pending;
+    private DecodedFrame? _pendingCamera;
     private WriteableBitmap? _bitmap;
+    private WriteableBitmap? _cameraBitmap;
+    private DateTime _lastCameraFrame = DateTime.MinValue;
+    private bool _cameraExpected;
+    private bool _cameraHidden;
+    private bool _cameraDemo;
+    private int _cameraCorner;
     private StreamMode _mode;
     private bool _gpuPath;
     private bool _demo;
@@ -62,9 +72,11 @@ public partial class PlayerWindow : Window
         VolumeSlider.Value = settings.Volume;
         if (settings.Volume > 0.001) _volumeBeforeMute = settings.Volume;
         _statsShown = settings.ShowStatsOverlay;
+        _cameraCorner = settings.PlayerCameraCorner;
         PartySpectrum.Source = () => Session.AudioMeter;
 
         session.FrameReady += frame => Interlocked.Exchange(ref _pending, frame);
+        session.CameraFrameReady += frame => Interlocked.Exchange(ref _pendingCamera, frame);
         session.StateChanged += (state, message) => Dispatcher.BeginInvoke(() => ShowState(state, message));
         session.StatisticsUpdated += stats => Dispatcher.BeginInvoke(() => ShowStatistics(stats));
         session.ConfigChanged += config => Dispatcher.BeginInvoke(() => ApplyConfig(config));
@@ -76,14 +88,20 @@ public partial class PlayerWindow : Window
 
         CompositionTarget.Rendering += OnRendering;
         _hideControls.Tick += (_, _) => HideControls();
+        _cameraWatch.Tick += (_, _) => UpdateCameraPip();
         SourceInitialized += (_, _) => ThemeManager.ApplyFrame(this);
         Loaded += (_, _) => OnLoaded();
         LocationChanged += (_, _) => RepositionOverlays();
-        SizeChanged += (_, _) => RepositionOverlays();
+        SizeChanged += (_, _) =>
+        {
+            ResizeCameraPip();
+            RepositionOverlays();
+        };
         StateChanged += (_, _) => RepositionOverlays();
         ShowState(ConnectionState.Connecting, $"Conectando em {host}…");
         UpdateLayers();
         UpdateStatsVisibility();
+        PlaceCameraPip();
     }
 
     public ViewerSession Session { get; }
@@ -140,6 +158,7 @@ public partial class PlayerWindow : Window
             _statsOverlay = MoveToOverlay(StatsPanel, HorizontalAlignment.Left, VerticalAlignment.Top, new Thickness(18));
             UpdateStatsVisibility();
             UpdateLayers();
+            UpdateCameraPip();
         }
         catch (Exception exception)
         {
@@ -169,6 +188,7 @@ public partial class PlayerWindow : Window
     {
         _controlsOverlay?.Reposition();
         _statsOverlay?.Reposition();
+        _cameraOverlay?.Reposition();
     }
 
     /// <summary>O que aparece: vídeo pela GPU, vídeo pela CPU ou a festa de música.</summary>
@@ -181,22 +201,28 @@ public partial class PlayerWindow : Window
         VideoImage.Visibility = connected && !party && !gpu ? Visibility.Visible : Visibility.Collapsed;
         PartyView.Visibility = party ? Visibility.Visible : Visibility.Collapsed;
         if (_surface is not null) _surface.SkipErase = gpu;
+        UpdateCameraPip();
     }
 
     private void ApplyConfig(StreamConfigMessage config)
     {
         _mode = config.VideoEnabled ? config.Mode : StreamMode.AudioOnly;
+        _cameraExpected = config.VideoEnabled && config.CameraOverlay;
         if (Session.HostName.Length > 0)
         {
             Title = $"{Session.HostName} · ScreenFlow";
             BarTitle.Text = PartyHost.Text = Session.HostName;
+            CameraLabel.Text = $"Câmera · {Session.HostName}";
         }
+        if (_cameraExpected) _cameraWatch.Start();
+        else _cameraWatch.Stop();
         UpdateLayers();
     }
 
     /// <summary>Caminho pela CPU: copia o frame mais recente na hora da composição (sem fila, sem latência acumulada).</summary>
     private void OnRendering(object? sender, EventArgs e)
     {
+        ShowCameraFrame();
         var frame = Interlocked.Exchange(ref _pending, null);
         if (frame is null) return;
         if (_bitmap is null || _bitmap.PixelWidth != frame.Width || _bitmap.PixelHeight != frame.Height)
@@ -204,7 +230,8 @@ public partial class PlayerWindow : Window
             _bitmap = new WriteableBitmap(frame.Width, frame.Height, 96, 96, PixelFormats.Bgra32, null);
             VideoImage.Source = _bitmap;
         }
-        _bitmap.WritePixels(new Int32Rect(0, 0, frame.Width, frame.Height), frame.Pixels, frame.Stride, 0);
+        // O lock segura o buffer enquanto ele é copiado (o decoder reaproveita três buffers).
+        lock (frame) _bitmap.WritePixels(new Int32Rect(0, 0, frame.Width, frame.Height), frame.Pixels, frame.Stride, 0);
         _framesShown++;
         var now = DateTime.UtcNow;
         if ((now - _fpsWindow).TotalSeconds >= 1)
@@ -213,6 +240,98 @@ public partial class PlayerWindow : Window
             _framesShown = 0;
             _fpsWindow = now;
         }
+    }
+
+    // ───────────────────────── Câmera junto com a tela ─────────────────────────
+
+    /// <summary>Copia o frame mais novo da câmera para o quadrinho (sempre pela CPU: é pequeno).</summary>
+    private void ShowCameraFrame()
+    {
+        var frame = Interlocked.Exchange(ref _pendingCamera, null);
+        if (frame is null) return;
+        lock (frame)
+        {
+            if (_cameraBitmap is null || _cameraBitmap.PixelWidth != frame.Width || _cameraBitmap.PixelHeight != frame.Height)
+            {
+                _cameraBitmap = new WriteableBitmap(frame.Width, frame.Height, 96, 96, PixelFormats.Bgra32, null);
+                CameraBrush.ImageSource = _cameraBitmap;
+                ResizeCameraPip();
+            }
+            _cameraBitmap.WritePixels(new Int32Rect(0, 0, frame.Width, frame.Height), frame.Pixels, frame.Stride, 0);
+        }
+        var wasStale = DateTime.UtcNow - _lastCameraFrame > CameraTimeout;
+        _lastCameraFrame = DateTime.UtcNow;
+        if (wasStale) UpdateCameraPip();
+    }
+
+    private static readonly TimeSpan CameraTimeout = TimeSpan.FromSeconds(3);
+
+    /// <summary>O quadrinho aparece quando a câmera está chegando e a pessoa não escondeu.</summary>
+    private void UpdateCameraPip()
+    {
+        var connected = _demo || Session.State == ConnectionState.Connected;
+        var arriving = _cameraDemo || DateTime.UtcNow - _lastCameraFrame < CameraTimeout;
+        var show = _cameraExpected && !_cameraHidden && connected && _mode == StreamMode.Screen && arriving && !_shuttingDown;
+        if (show && _cameraOverlay is null && _presenter is not null && WindowState != WindowState.Minimized)
+        {
+            // Com o vídeo na GPU o quadrinho precisa de uma janela sobreposta; ela só nasce quando a câmera chega.
+            var (horizontal, vertical, margin) = CameraPlacement;
+            _cameraOverlay = MoveToOverlay(CameraPip, horizontal, vertical, margin);
+        }
+        if (_cameraOverlay is not null) _cameraOverlay.Visibility = show ? Visibility.Visible : Visibility.Hidden;
+        else CameraPip.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        CameraButton.Visibility = _cameraExpected && _mode == StreamMode.Screen ? Visibility.Visible : Visibility.Collapsed;
+        CameraButton.SetResourceReference(ForegroundProperty, _cameraHidden ? "Text" : "AccentText");
+        CameraButton.ToolTip = _cameraHidden ? "Mostrar a câmera (C)" : arriving ? "Esconder a câmera (C)" : "A câmera de quem transmite ainda não chegou (C esconde)";
+    }
+
+    /// <summary>Largura de uns 22% do player (entre 200 e 440), na proporção da câmera.</summary>
+    private void ResizeCameraPip()
+    {
+        var width = Math.Round(Math.Clamp(ActualWidth * 0.22, 200, 440));
+        var aspect = _cameraBitmap is { PixelWidth: > 0 } bitmap ? bitmap.PixelHeight / (double)bitmap.PixelWidth
+            : CameraBrush.ImageSource is BitmapSource { PixelWidth: > 0 } source ? source.PixelHeight / (double)source.PixelWidth
+            : 9 / 16.0;
+        CameraPip.Width = width;
+        CameraPip.Height = Math.Round(width * Math.Clamp(aspect, 0.4, 1.4));
+    }
+
+    /// <summary>Em cima à direita (longe da barra e das estatísticas), embaixo à direita ou embaixo à esquerda.</summary>
+    private (HorizontalAlignment Horizontal, VerticalAlignment Vertical, Thickness Margin) CameraPlacement => _cameraCorner switch
+    {
+        1 => (HorizontalAlignment.Right, VerticalAlignment.Bottom, new Thickness(0, 0, 24, 96)),
+        2 => (HorizontalAlignment.Left, VerticalAlignment.Bottom, new Thickness(24, 0, 0, 96)),
+        _ => (HorizontalAlignment.Right, VerticalAlignment.Top, new Thickness(0, 24, 24, 0)),
+    };
+
+    private void PlaceCameraPip()
+    {
+        var (horizontal, vertical, margin) = CameraPlacement;
+        if (_cameraOverlay is not null)
+        {
+            _cameraOverlay.SetPlacement(horizontal, vertical, margin);
+            return;
+        }
+        CameraPip.HorizontalAlignment = horizontal;
+        CameraPip.VerticalAlignment = vertical;
+        CameraPip.Margin = margin;
+    }
+
+    private void CameraPip_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        _cameraCorner = (_cameraCorner + 1) % 3;
+        AppServices.Settings.Current.PlayerCameraCorner = _cameraCorner;
+        PlaceCameraPip();
+        e.Handled = true;
+    }
+
+    private void Camera_Click(object sender, RoutedEventArgs e) => ToggleCamera();
+
+    private void ToggleCamera()
+    {
+        if (!_cameraExpected) return;
+        _cameraHidden = !_cameraHidden;
+        UpdateCameraPip();
     }
 
     // ───────────────────────── Estado e estatísticas ─────────────────────────
@@ -271,6 +390,7 @@ public partial class PlayerWindow : Window
             $"Decoder       {s.Decoder}\n" +
             $"Desenho       {path}\n" +
             $"Áudio         buffer {s.AudioBufferMs:0} ms\n" +
+            (s.CameraFps > 0 ? $"Câmera        {s.CameraWidth}×{s.CameraHeight} · {s.CameraFps:0} FPS\n" : _cameraExpected ? "Câmera        esperando a câmera de quem transmite\n" : string.Empty) +
             $"FEC           {s.FecRecovered:N0} recuperados · {s.FramesDropped:N0} frames perdidos\n" +
             $"Qualidade     {s.QualityReason}";
     }
@@ -364,6 +484,7 @@ public partial class PlayerWindow : Window
                 ToggleStats();
                 break;
             case Key.M: ToggleMute(); break;
+            case Key.C when _cameraExpected: ToggleCamera(); break;
             case Key.Up: VolumeSlider.Value = Math.Min(1, VolumeSlider.Value + 0.05); break;
             case Key.Down: VolumeSlider.Value = Math.Max(0, VolumeSlider.Value - 0.05); break;
             default: return;
@@ -432,9 +553,11 @@ public partial class PlayerWindow : Window
         _shuttingDown = true;
         CompositionTarget.Rendering -= OnRendering;
         _hideControls.Stop();
+        _cameraWatch.Stop();
         _controlsOverlay?.Close();
         _statsOverlay?.Close();
-        _controlsOverlay = _statsOverlay = null;
+        _cameraOverlay?.Close();
+        _controlsOverlay = _statsOverlay = _cameraOverlay = null;
         Hide();
         AppServices.Settings.Save();
         try { await Session.DisposeAsync(); }
@@ -454,11 +577,21 @@ public partial class PlayerWindow : Window
 
     // ───────────────────────── Capturas de tela (CI) ─────────────────────────
 
-    /// <summary>Mostra o player com dados de exemplo (sem rede): a festa de música ou o aviso de conexão.</summary>
-    internal void ShowDemo(StreamMode mode, ConnectionState state)
+    /// <summary>Mostra o player com dados de exemplo (sem rede): a festa de música, a tela com a câmera junto ou o aviso de conexão.</summary>
+    internal void ShowDemo(StreamMode mode, ConnectionState state, bool withCamera = false)
     {
         _demo = true;
         _mode = mode;
+        if (withCamera && mode == StreamMode.Screen)
+        {
+            BarTitle.Text = "Ana Lu";
+            CameraLabel.Text = "Câmera · Ana Lu";
+            VideoImage.Source = DemoData.ScreenFrame();
+            CameraBrush.ImageSource = DemoData.CameraFrame();
+            _cameraExpected = _cameraDemo = true;
+            ResizeCameraPip();
+            ShowStatistics(DemoData.ViewerStats(StreamMode.Screen) with { CameraFps = 30, CameraWidth = 1280, CameraHeight = 720 });
+        }
         if (mode == StreamMode.AudioOnly)
         {
             var meter = DemoData.LiveMeter(64);

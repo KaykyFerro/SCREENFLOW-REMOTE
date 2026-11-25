@@ -88,6 +88,26 @@
             </Grid>
         </Grid>
 
+        <!-- Câmera que vai junto com a tela: quadrinho num canto. Com o vídeo na GPU, vai para uma janela sobreposta. -->
+        <Border x:Name="CameraPip" Width="320" Height="180" CornerRadius="16" BorderThickness="1" BorderBrush="#4DFFFFFF" Background="#FF0B1224"
+                HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,24,24,0" Visibility="Collapsed" Cursor="Hand"
+                ToolTip="Câmera de quem está transmitindo. Clique para mudar de canto; C esconde e mostra."
+                MouseLeftButtonUp="CameraPip_MouseLeftButtonUp">
+            <Grid>
+                <Border CornerRadius="15">
+                    <Border.Background>
+                        <ImageBrush x:Name="CameraBrush" Stretch="UniformToFill"/>
+                    </Border.Background>
+                </Border>
+                <Border HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="10" CornerRadius="9" Padding="8,3" Background="#B30B1224">
+                    <StackPanel Orientation="Horizontal">
+                        <Ellipse Width="6" Height="6" Fill="{DynamicResource Pink}" Margin="0,0,7,0" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="CameraLabel" FontSize="11.5" FontWeight="SemiBold" Text="Câmera" TextTrimming="CharacterEllipsis" MaxWidth="200"/>
+                    </StackPanel>
+                </Border>
+            </Grid>
+        </Border>
+
         <!-- Estados: conectando, aguardando aprovação, reconectando, erro -->
         <Border x:Name="StateOverlay" Background="#F20B1224" BorderBrush="#26FFFFFF" BorderThickness="1" CornerRadius="22" Padding="40,34"
                 HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="540" Margin="24">
@@ -130,6 +150,8 @@
                 <Button x:Name="MuteButton" Style="{StaticResource IconButton}" Content="&#xE767;" ToolTip="Mudo (M)" Click="Mute_Click"/>
                 <Slider x:Name="VolumeSlider" Width="130" Minimum="0" Maximum="1" VerticalAlignment="Center" Margin="6,0,10,0" ValueChanged="Volume_Changed"/>
                 <Border Width="1" Height="22" Background="#26FFFFFF" Margin="4,0,8,0"/>
+                <Button x:Name="CameraButton" Style="{StaticResource IconButton}" Content="&#xE8B8;" ToolTip="Mostrar ou esconder a câmera (C)" Click="Camera_Click"
+                        Margin="0,0,4,0" Visibility="Collapsed"/>
                 <Button x:Name="StatsButton" Style="{StaticResource IconButton}" Content="&#xE9D9;" ToolTip="Estatísticas (F3)" Click="Stats_Click"/>
                 <Button x:Name="FullscreenButton" Style="{StaticResource IconButton}" Content="&#xE740;" ToolTip="Tela cheia (F ou duplo clique)" Click="Fullscreen_Click" Margin="4,0,0,0"/>
                 <Border Width="1" Height="22" Background="#26FFFFFF" Margin="8,0,8,0"/>

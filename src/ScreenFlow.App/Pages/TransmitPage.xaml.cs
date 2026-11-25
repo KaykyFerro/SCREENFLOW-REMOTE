@@ -27,7 +27,8 @@ public partial class TransmitPage : UserControl, IShellPage
     private IReadOnlyList<DisplayMonitor> _monitors = [];
     private bool _loaded;
     private bool _starting;
-    private bool _camerasLoaded;
+    private Task? _camerasLoading;
+    private bool _camerasFound;
 
     public TransmitPage(MainWindow shell)
     {
@@ -63,7 +64,7 @@ public partial class TransmitPage : UserControl, IShellPage
     public int Viewers => _viewerRows.Count;
 
     /// <summary>O que está indo para quem assiste agora ("tela, câmera e áudio"). Vazio quando parado.</summary>
-    public string LiveSummary => _session is null ? string.Empty : StreamModes.Summary(_session.Mode, _session.AudioEnabled, _session.HasCameraOverlay);
+    public string LiveSummary => _session?.Summary ?? string.Empty;
 
     /// <summary>Modo da transmissão no ar (null quando parado).</summary>
     public StreamMode? LiveMode => _session?.Mode;
@@ -97,6 +98,7 @@ public partial class TransmitPage : UserControl, IShellPage
         CameraQualityCombo.SelectValue((Resolution.FromLabel(Settings.CameraResolution), Settings.CameraFps));
         MusicCombo.SelectValue(Settings.MusicBitrateKbps, k => k);
         AudioToggle.IsChecked = Settings.AudioEnabled;
+        CameraWithScreenToggle.IsChecked = Settings.CameraWithScreen;
         ApproveToggle.IsChecked = Settings.ApproveEachViewer;
         PinBox.Text = Settings.Pin ?? string.Empty;
         (Settings.Mode switch
@@ -131,6 +133,16 @@ public partial class TransmitPage : UserControl, IShellPage
         UpdateProfileHint();
     }
 
+    /// <summary>"Mandar a câmera junto": mostra a escolha da câmera e já procura as câmeras do PC.</summary>
+    private void CameraWithScreen_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsInitialized) return;
+        var on = CameraWithScreenToggle.IsChecked == true;
+        OverlayCameraPanel.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        if (on) _ = LoadCamerasAsync();
+        UpdateProfileHint();
+    }
+
     private void UpdateAudioCard()
     {
         var mode = _session?.Mode ?? SelectedMode;
@@ -157,6 +169,8 @@ public partial class TransmitPage : UserControl, IShellPage
                 var screenCodec = Settings.PreferredCodec ?? VideoCodec.Hevc;
                 var target = Settings.BitrateKbps > 0 ? Settings.BitrateKbps : Quality.TargetBitrateKbps(resolution, fps.Value, screenCodec);
                 var text = $"Perfil {Quality.TierLabel(resolution, fps.Value)}: cerca de {target / 1000.0:0} Mbps por pessoa em {Quality.CodecLabel(screenCodec)}.";
+                if (CameraWithScreenToggle.IsChecked == true)
+                    text += $" A câmera junto usa mais uns {Quality.CameraOverlayBitrateKbps(1280, 720, 30, screenCodec) / 1000.0:0.#} Mbps por pessoa.";
                 if (Settings.UploadMbps > 0)
                 {
                     var people = Math.Max(1, (int)(Settings.UploadMbps * 0.8 * 1000 / target));
@@ -221,20 +235,34 @@ public partial class TransmitPage : UserControl, IShellPage
             tile.Margin = new Thickness(0, 0, 12, columns == 4 ? 0 : 12);
     }
 
-    private async Task LoadCamerasAsync(bool force = false)
+    /// <summary>
+    /// Procura as câmeras do PC uma vez. Quem pedir enquanto a busca está andando espera a mesma busca (iniciar pela
+    /// Visão geral não pode começar com a lista ainda vazia); sem câmera nenhuma, a próxima chamada procura de novo.
+    /// </summary>
+    private Task LoadCamerasAsync(bool force = false)
     {
-        if (_camerasLoaded && !force) return;
-        _camerasLoaded = true;
+        if (!force && _camerasLoading is { } loading && (!loading.IsCompleted || _camerasFound)) return loading;
+        return _camerasLoading = FillCamerasAsync();
+    }
+
+    private async Task FillCamerasAsync()
+    {
         IReadOnlyList<CameraDevice> cameras = AppServices.DemoMode ? [new CameraDevice("demo", "Logitech C920 HD Pro")] : await CameraDiscovery.GetCamerasAsync();
-        CameraCombo.Items.Clear();
-        foreach (var camera in cameras) CameraCombo.Items.Add(camera);
-        CameraCombo.SelectedItem = cameras.FirstOrDefault(c => c.Id == Settings.CameraId) ?? cameras.FirstOrDefault();
-        if (cameras.Count == 0)
+        // A mesma lista serve para o modo câmera e para a câmera que vai junto com a tela.
+        var preferred = cameras.FirstOrDefault(c => c.Id == Settings.CameraId) ?? cameras.FirstOrDefault();
+        foreach (var combo in new[] { CameraCombo, OverlayCameraCombo })
         {
-            CameraCombo.Items.Add("Nenhuma câmera encontrada");
-            CameraCombo.SelectedIndex = 0;
-            _camerasLoaded = false;
+            var previous = combo.SelectedItem as CameraDevice;
+            combo.Items.Clear();
+            foreach (var camera in cameras) combo.Items.Add(camera);
+            combo.SelectedItem = cameras.FirstOrDefault(c => c.Id == previous?.Id) ?? preferred;
+            if (cameras.Count == 0)
+            {
+                combo.Items.Add("Nenhuma câmera encontrada");
+                combo.SelectedIndex = 0;
+            }
         }
+        _camerasFound = cameras.Count > 0;
     }
 
     private async void RefreshCameras_Click(object sender, RoutedEventArgs e) => await LoadCamerasAsync(force: true);
@@ -257,7 +285,7 @@ public partial class TransmitPage : UserControl, IShellPage
     {
         if (_session is not null) return;
         LoadFromSettings();
-        if (Settings.Mode == StreamMode.Camera) await LoadCamerasAsync();
+        if (Settings.Mode == StreamMode.Camera || Settings.CameraWithScreen) await LoadCamerasAsync();
         await StartAsync();
     }
 
@@ -274,6 +302,7 @@ public partial class TransmitPage : UserControl, IShellPage
         var mode = SelectedMode;
         CaptureTarget target;
         DisplayMonitor? monitor = null;
+        CameraOverlay? overlay = null;
         Resolution resolution;
         int fps;
         switch (mode)
@@ -308,6 +337,17 @@ public partial class TransmitPage : UserControl, IShellPage
                 monitor = source.Kind == CaptureKind.Monitor ? _monitors.FirstOrDefault(m => m.DeviceName == source.Id) : null;
                 resolution = QualityCombo.Value<Resolution>() ?? Resolution.P1080;
                 fps = FpsCombo.SelectedItem is Choice<int> f ? f.Value : 60;
+                if (CameraWithScreenToggle.IsChecked == true)
+                {
+                    if (OverlayCameraCombo.SelectedItem is not CameraDevice overlayCamera)
+                    {
+                        ShowError("Nenhuma câmera encontrada para mandar junto. Conecte uma webcam e clique em atualizar, ou desligue “Mandar a câmera junto”.");
+                        return;
+                    }
+                    // A câmera vai num quadrinho: 720p a 30 FPS sobra (e pesa pouco no upload).
+                    overlay = new CameraOverlay(overlayCamera.Id, overlayCamera.Name, 1280, 720, 30);
+                    Settings.CameraId = overlayCamera.Id;
+                }
                 Settings.Resolution = resolution.Label;
                 Settings.Fps = fps;
                 break;
@@ -321,6 +361,7 @@ public partial class TransmitPage : UserControl, IShellPage
 
         Settings.Mode = mode;
         Settings.AudioEnabled = AudioToggle.IsChecked == true;
+        Settings.CameraWithScreen = CameraWithScreenToggle.IsChecked == true;
         Settings.ApproveEachViewer = ApproveToggle.IsChecked == true;
         Settings.Pin = pin.Length == 0 ? null : pin;
         AppServices.Settings.Save();
@@ -342,7 +383,7 @@ public partial class TransmitPage : UserControl, IShellPage
                 target, monitor, resolution, fps, mode == StreamMode.Screen ? Settings.BitrateKbps : 0,
                 Settings.PreferredCodec, Settings.PreferredEncoder, hardware.Encoders,
                 mode == StreamMode.AudioOnly || Settings.AudioEnabled, Settings.AudioBitrateKbps, Settings.AdaptiveQuality, Settings.FecGroupSize, Settings.UploadMbps,
-                mode, Settings.MusicBitrateKbps);
+                mode, Settings.MusicBitrateKbps, OverlayCamera: overlay);
 
             var session = new HostSession(options) { ApprovalHandler = RequestApprovalAsync };
             session.StatusChanged += message => Dispatcher.BeginInvoke(() => StateText.Text = message);
@@ -359,7 +400,7 @@ public partial class TransmitPage : UserControl, IShellPage
             SetBadge("Ao vivo", "Pink", "PinkSoft");
             StateText.Text = mode == StreamMode.AudioOnly
                 ? $"Festa no ar em {adapter.Address}. Quem quiser ouvir só precisa digitar esse IP."
-                : $"Transmitindo em {adapter.Address}. Quem quiser assistir só precisa digitar esse IP.";
+                : $"Transmitindo {session.Summary} em {adapter.Address}. Quem quiser assistir só precisa digitar esse IP.";
             StatFpsLabel.Text = mode == StreamMode.AudioOnly ? "Opus" : "FPS";
             StatBitrateLabel.Text = mode == StreamMode.AudioOnly ? "Áudio enviado" : "Vídeo";
             AudioDescription.Text = session.AudioDescription ?? (session.AudioEnabled ? "Som do PC" : "Som desligado");
@@ -496,6 +537,7 @@ public partial class TransmitPage : UserControl, IShellPage
             : audioOnly
                 ? $"{stats.Encoder} · {_session.AudioDescription} · upload em Mbps"
                 : $"{stats.Encoder} · {stats.Capture} · alvo {stats.Target} · {stats.Reason} · vídeo e upload em Mbps";
+        if (stats.Camera.Length > 0) StatDetails.Text += "\n" + stats.Camera;
         var level = _session.AudioMeter?.Level ?? 0;
         AudioState.Text = !_session.AudioEnabled ? "Desligado" : level > 0.05 ? "Tocando" : "Silêncio";
         Telemetry.Record(stats, _session.Viewers.Where(v => v.State == ViewerState.Streaming).ToList());
@@ -531,18 +573,20 @@ public partial class TransmitPage : UserControl, IShellPage
     {
         LoadFromSettings();
         ModeScreen.IsChecked = true;
+        CameraWithScreenToggle.IsChecked = true;
         var meter = DemoData.LiveMeter();
         Spectrum.Source = () => meter;
         ModeGrid.IsEnabled = OptionsPanel.IsEnabled = AccessPanel.IsEnabled = false;
         StartButton.Visibility = Visibility.Collapsed;
         StopButton.Visibility = Visibility.Visible;
         SetBadge("Ao vivo", "Pink", "PinkSoft");
-        StateText.Text = $"Transmitindo em {DemoData.Radmin.Address}. Quem quiser assistir só precisa digitar esse IP.";
+        StateText.Text = $"Transmitindo tela, câmera e áudio em {DemoData.Radmin.Address}. Quem quiser assistir só precisa digitar esse IP.";
         StatViewers.Text = "3";
         StatFps.Text = "165";
         StatBitrate.Text = "38.5";
         StatUpload.Text = "117";
-        StatDetails.Text = "HEVC · hevc_nvenc · Windows.Graphics.Capture · alvo 1440p 165 FPS 40 Mbps · rede estável · vídeo e upload em Mbps";
+        StatDetails.Text = "HEVC · hevc_nvenc · Windows.Graphics.Capture · alvo 1440p 165 FPS 40 Mbps · rede estável · vídeo e upload em Mbps"
+                           + "\nCâmera junto: 1280×720 · 30 FPS · 2.1 Mbps";
         AudioDescription.Text = "Alto-falantes (Realtek) · Opus 160 kbps";
         AudioState.Text = "Tocando";
         _viewerRows.Clear();

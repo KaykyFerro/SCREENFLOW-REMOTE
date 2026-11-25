@@ -9,13 +9,16 @@ public static class StreamModes
     public const string FeatureAudioOnly = "audio-only";
     public const string FeatureCamera = "camera";
 
-    public static IReadOnlyList<string> ViewerFeatures { get; } = [FeatureAudioOnly, FeatureCamera];
+    /// <summary>O viewer recebe a segunda faixa de vídeo (a câmera junto com a tela) e mostra num quadrinho (1.1.0).</summary>
+    public const string FeatureCameraOverlay = "camera-overlay";
 
-    public static string Label(StreamMode mode) => mode switch
+    public static IReadOnlyList<string> ViewerFeatures { get; } = [FeatureAudioOnly, FeatureCamera, FeatureCameraOverlay];
+
+    public static string Label(StreamMode mode, bool cameraWithScreen = false) => mode switch
     {
         StreamMode.Camera => "Câmera",
         StreamMode.AudioOnly => "Festa de música",
-        _ => "Tela",
+        _ => cameraWithScreen ? "Tela + câmera" : "Tela",
     };
 
     public static string Description(StreamMode mode) => mode switch

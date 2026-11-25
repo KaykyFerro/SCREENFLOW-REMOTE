@@ -356,7 +356,7 @@ public partial class WatchPage : UserControl, IShellPage
         NowDetail.Text = session.State switch
         {
             ConnectionState.Connected when mode == StreamMode.AudioOnly => $"Festa de música · {_currentHost}",
-            ConnectionState.Connected when config is not null => $"{StreamModes.Label(mode)} · {config.Width} × {config.Height} · {Quality.CodecLabel(config.Codec)} · {_currentHost}",
+            ConnectionState.Connected when config is not null => $"{StreamModes.Label(mode, config.CameraOverlay)} · {config.Width} × {config.Height} · {Quality.CodecLabel(config.Codec)} · {_currentHost}",
             ConnectionState.Connected => $"{StreamModes.Label(mode)} · {_currentHost}",
             ConnectionState.WaitingApproval => "Esperando o anfitrião aprovar a entrada…",
             ConnectionState.Reconnecting => "A conexão caiu, reconectando…",
@@ -388,6 +388,7 @@ public partial class WatchPage : UserControl, IShellPage
         private StreamMode _mode;
         private int _viewers;
         private bool _pin;
+        private bool _camera;
         private bool _current;
 
         public string Address { get; } = address;
@@ -397,7 +398,7 @@ public partial class WatchPage : UserControl, IShellPage
         public bool IsScreen => Mode == StreamMode.Screen;
         public bool IsCamera => Mode == StreamMode.Camera;
         public bool IsParty => Mode == StreamMode.AudioOnly;
-        public string ModeLabel => StreamModes.Label(Mode);
+        public string ModeLabel => StreamModes.Label(Mode, _camera);
         public string ViewersText => _viewers switch { 0 => "ninguém ainda", 1 => "1 assistindo", var n => $"{n} assistindo" };
         public string ActionText => _current ? "Abrir o player" : Mode == StreamMode.AudioOnly ? "Entrar na festa" : "Assistir";
 
@@ -405,6 +406,7 @@ public partial class WatchPage : UserControl, IShellPage
         {
             Name = announcement.HostName;
             Mode = announcement.Mode;
+            Set(ref _camera, announcement.CameraOverlay, nameof(ModeLabel));
             PinRequired = announcement.PinRequired;
             Set(ref _viewers, announcement.Viewers, nameof(ViewersText));
             Set(ref _current, current, nameof(ActionText));

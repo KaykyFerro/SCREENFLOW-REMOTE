@@ -69,6 +69,7 @@ public partial class OverviewPage : UserControl, IShellPage
         CameraQualityCombo.SelectValue((Resolution.FromLabel(Settings.CameraResolution), Settings.CameraFps));
         MusicCombo.SelectValue(Settings.MusicBitrateKbps, k => k);
         AudioCheck.IsChecked = Settings.AudioEnabled;
+        CameraCheck.IsChecked = Settings.CameraWithScreen;
         _loading = false;
         (Settings.Mode switch
         {
@@ -92,11 +93,12 @@ public partial class OverviewPage : UserControl, IShellPage
         CameraFields.Visibility = mode == StreamMode.Camera ? Visibility.Visible : Visibility.Collapsed;
         PartyFields.Visibility = mode == StreamMode.AudioOnly ? Visibility.Visible : Visibility.Collapsed;
         AudioCheck.Visibility = mode == StreamMode.AudioOnly ? Visibility.Collapsed : Visibility.Visible;
+        CameraCheck.Visibility = mode == StreamMode.Screen ? Visibility.Visible : Visibility.Collapsed;
         (HeroTitle.Text, HeroText.Text, HeroGlyph.Text) = mode switch
         {
             StreamMode.Camera => ("Compartilhar câmera", "Mostre a sua webcam ou placa de captura. A câmera só liga quando alguém entra.", ""),
             StreamMode.AudioOnly => ("Festa de música", "Toque qualquer música no PC e todo mundo ouve junto, sem vídeo e com som de alta qualidade.", ""),
-            _ => ("Compartilhar tela", "Escolha a qualidade e inicie. Quem estiver na sua rede Radmin entra com o seu IP.", ""),
+            _ => ("Compartilhar tela", "Escolha a qualidade e inicie. O som do PC e a sua câmera podem ir junto. Quem estiver na sua rede Radmin entra com o seu IP.", ""),
         };
         StartGlyph.Text = HeroGlyph.Text;
         HeroTint.SetResourceReference(Border.BackgroundProperty, mode == StreamMode.AudioOnly ? "PartyGradient" : "CameraGradient");
@@ -157,6 +159,7 @@ public partial class OverviewPage : UserControl, IShellPage
         if (CameraCombo.SelectedItem is CameraDevice device) Settings.CameraId = device.Id;
         if (MusicCombo.SelectedItem is Choice<int> music) Settings.MusicBitrateKbps = music.Value;
         Settings.AudioEnabled = AudioCheck.IsChecked == true;
+        Settings.CameraWithScreen = CameraCheck.IsChecked == true;
         AppServices.Settings.Save();
     }
 
