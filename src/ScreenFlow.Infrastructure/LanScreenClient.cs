@@ -15,6 +15,7 @@ public sealed class LanScreenClient : IAsyncDisposable
 
     public event Action<byte[]>? FrameReceived;
     public event Action<string>? StatusChanged;
+    public event Action? Disconnected;
 
     public async Task ConnectAsync(string host, string sessionCode, int port = LanScreenHost.DefaultPort, CancellationToken cancellationToken = default)
     {
@@ -37,6 +38,8 @@ public sealed class LanScreenClient : IAsyncDisposable
             var authMaterial = authLabel.Concat(challenge).ToArray();
             var proof = HMACSHA256.HashData(authenticationKey, authMaterial);
             await stream.WriteAsync(proof, cancellationToken);
+            CryptographicOperations.ZeroMemory(proof);
+            CryptographicOperations.ZeroMemory(authMaterial);
 
             var response = new byte[1];
             await stream.ReadExactlyAsync(response, cancellationToken);
@@ -47,6 +50,7 @@ public sealed class LanScreenClient : IAsyncDisposable
             var mediaMaterial = mediaLabel.Concat(challenge).ToArray();
             var mediaKey = HMACSHA256.HashData(authenticationKey, mediaMaterial);
             CryptographicOperations.ZeroMemory(authenticationKey);
+            CryptographicOperations.ZeroMemory(mediaMaterial);
 
             _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             StatusChanged?.Invoke("Conectado. Recebendo transmissão criptografada.");
@@ -91,6 +95,7 @@ public sealed class LanScreenClient : IAsyncDisposable
         {
             CryptographicOperations.ZeroMemory(mediaKey);
             StatusChanged?.Invoke("Visualizador desconectado.");
+            Disconnected?.Invoke();
         }
     }
 
