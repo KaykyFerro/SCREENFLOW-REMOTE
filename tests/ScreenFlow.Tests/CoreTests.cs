@@ -161,6 +161,17 @@ public class QualityTests
 
 public class SettingsTests
 {
+    [Theory]
+    [InlineData("NVIDIA GeForce RTX 2060", "RTX 2060")]
+    [InlineData("NVIDIA GeForce GTX 1660 SUPER", "GTX 1660 SUPER")]
+    [InlineData("AMD Radeon RX 7800 XT", "Radeon RX 7800 XT")]
+    [InlineData("AMD Radeon(TM) Graphics", "Radeon")]
+    [InlineData("Intel(R) Arc(TM) A770 Graphics", "Arc A770")]
+    [InlineData("Intel(R) UHD Graphics 770", "UHD Graphics 770")]
+    [InlineData("Microsoft Basic Render Driver", "Microsoft Basic Render Driver")]
+    public void GpuShortNameDropsVendorNoise(string name, string expected)
+        => Assert.Equal(expected, new GpuInfo(name, EncoderVendor.Nvidia, 0).ShortName);
+
     private static HardwareProfile Hardware(EncoderInfo[] encoders, int w = 3840, int h = 2160, int hz = 165, string gpu = "NVIDIA GeForce RTX 4080")
         => new([new GpuInfo(gpu, EncoderVendor.Nvidia, 16000)], encoders, [VideoCodec.Hevc], 16, 32000, w, h, hz, "Windows 11");
 

@@ -1,8 +1,24 @@
+using System.Text.RegularExpressions;
 using ScreenFlow.Core.Media;
 
 namespace ScreenFlow.Core.Settings;
 
-public sealed record GpuInfo(string Name, EncoderVendor Vendor, long DedicatedVideoMemoryMb);
+public sealed record GpuInfo(string Name, EncoderVendor Vendor, long DedicatedVideoMemoryMb)
+{
+    /// <summary>Nome curto para mostrar num cartão: "NVIDIA GeForce RTX 2060" vira "RTX 2060", "Intel(R) Arc(TM) A770 Graphics" vira "Arc A770".</summary>
+    public string ShortName
+    {
+        get
+        {
+            var name = Regex.Replace(Name, @"\((R|TM)\)|[®™]", string.Empty, RegexOptions.IgnoreCase);
+            name = Regex.Replace(name, @"^\s*(NVIDIA|AMD|Intel)\s+", string.Empty, RegexOptions.IgnoreCase);
+            name = Regex.Replace(name, @"^GeForce\s+(?=(RTX|GTX)\b)", string.Empty, RegexOptions.IgnoreCase);
+            name = Regex.Replace(name, @"\s+(Graphics|Series)\s*$", string.Empty, RegexOptions.IgnoreCase);
+            name = Regex.Replace(name, @"\s{2,}", " ").Trim();
+            return name.Length > 0 ? name : Name;
+        }
+    }
+}
 
 public sealed record EncoderInfo(string FfmpegName, VideoCodec Codec, EncoderVendor Vendor, bool Hardware, int MaxWidth, int MaxHeight)
 {

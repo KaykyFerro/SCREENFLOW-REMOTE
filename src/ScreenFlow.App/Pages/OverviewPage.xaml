@@ -156,7 +156,7 @@
                             <TextBlock Style="{StaticResource Icon}" Text="&#xE950;"/>
                         </Border>
                         <StackPanel Margin="16,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Style="{StaticResource Caption}" Text="Processamento gráfico"/>
+                            <TextBlock Style="{StaticResource Caption}" Text="Placa de vídeo"/>
                             <TextBlock x:Name="GpuValue" FontSize="17" FontWeight="Bold" Text="Detectando…" Margin="0,3,0,2" TextWrapping="Wrap"/>
                             <TextBlock x:Name="GpuDetail" Style="{StaticResource Caption}"/>
                         </StackPanel>

@@ -226,7 +226,8 @@ public partial class OverviewPage : UserControl, IShellPage
 
         var hardware = await AppServices.Hardware;
         var gpu = AppServices.MainGpu(hardware);
-        GpuValue.Text = gpu?.Name ?? "GPU não identificada";
+        GpuValue.Text = gpu?.ShortName ?? "Não identificada";
+        GpuValue.ToolTip = gpu?.Name;
         var encoder = hardware.Encoders.FirstOrDefault(e => e.FfmpegName == Settings.PreferredEncoder)
                       ?? hardware.Encoders.OrderByDescending(e => e.Hardware).ThenByDescending(e => e.Codec).FirstOrDefault();
         GpuDetail.Text = encoder is null ? "Sem encoder de vídeo" : $"Encoder {Quality.CodecLabel(encoder.Codec)} · {encoder.FfmpegName}" + (encoder.Hardware ? string.Empty : " (software)");
