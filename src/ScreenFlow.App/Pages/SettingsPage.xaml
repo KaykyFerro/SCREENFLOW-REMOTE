@@ -1,0 +1,189 @@
+<UserControl x:Class="ScreenFlow.App.Pages.SettingsPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer VerticalScrollBarVisibility="Auto">
+        <StackPanel MaxWidth="860" Margin="24">
+
+            <!-- Configuração automática -->
+            <Border Style="{StaticResource Card}" BorderBrush="{DynamicResource Accent}">
+                <StackPanel>
+                    <DockPanel>
+                        <Button x:Name="AutoButton" DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Content="Detectar e configurar agora" Click="Auto_Click"/>
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource Heading}" Text="Configuração automática"/>
+                            <TextBlock Style="{StaticResource Muted}" Text="Identifica a GPU, os codecs, o monitor e a rede Radmin e escolhe a melhor qualidade para este PC."/>
+                        </StackPanel>
+                    </DockPanel>
+                    <TextBlock x:Name="AutoResult" Style="{StaticResource Body}" Margin="0,16,0,0"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Transmissão -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource Heading}" Text="Transmissão" Margin="0,0,0,16"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="QUALIDADE PADRÃO"/>
+                            <ComboBox x:Name="QualityCombo"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="FPS PADRÃO"/>
+                            <ComboBox x:Name="FpsCombo"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="4" Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="ENCODER"/>
+                            <ComboBox x:Name="EncoderCombo"/>
+                        </StackPanel>
+                    </Grid>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="BITRATE (MBPS, 0 = AUTOMÁTICO)"/>
+                            <TextBox x:Name="BitrateBox"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="ÁUDIO (KBPS)"/>
+                            <ComboBox x:Name="AudioBitrateCombo"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="4" Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="FEC (1 PARIDADE A CADA N)"/>
+                            <ComboBox x:Name="FecCombo"/>
+                        </StackPanel>
+                    </Grid>
+                    <CheckBox x:Name="AdaptiveToggle" Style="{StaticResource Switch}" Content="Qualidade adaptativa (baixa bitrate, depois FPS, depois resolução quando a rede não aguenta)"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Rede -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource Heading}" Text="Rede e várias pessoas assistindo" Margin="0,0,0,16"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="MÍDIA (UDP)"/>
+                            <TextBox x:Name="MediaPortBox"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="CONTROLE (TCP)"/>
+                            <TextBox x:Name="ControlPortBox"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="4" Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="DESCOBERTA (UDP)"/>
+                            <TextBox x:Name="DiscoveryPortBox"/>
+                        </StackPanel>
+                    </Grid>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="SEU UPLOAD (MBPS, 0 = DESCONHECIDO)"/>
+                            <TextBox x:Name="UploadBox" ToolTip="Medido pelo botão 'Testar banda' na tela Transmitir. Usado para dividir a qualidade entre quem assiste."/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="MÁXIMO DE PESSOAS ASSISTINDO"/>
+                            <TextBox x:Name="MaxViewersBox"/>
+                        </StackPanel>
+                    </Grid>
+                    <DockPanel>
+                        <Button DockPanel.Dock="Right" Content="Criar regras do firewall" Click="Firewall_Click"/>
+                        <TextBlock x:Name="FirewallText" Style="{StaticResource Muted}" VerticalAlignment="Center"/>
+                    </DockPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Segurança e aparência -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <TextBlock Style="{StaticResource Heading}" Text="Segurança e aparência" Margin="0,0,0,16"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition/>
+                            <ColumnDefinition Width="16"/>
+                            <ColumnDefinition/>
+                        </Grid.ColumnDefinitions>
+                        <StackPanel Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="NOME DESTE PC"/>
+                            <TextBox x:Name="NameBox" MaxLength="40"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="2" Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="PIN PADRÃO (OPCIONAL)"/>
+                            <TextBox x:Name="PinBox" MaxLength="32"/>
+                        </StackPanel>
+                        <StackPanel Grid.Column="4" Margin="{DynamicResource FieldGap}">
+                            <TextBlock Style="{StaticResource Label}" Text="TEMA"/>
+                            <ComboBox x:Name="ThemeCombo"/>
+                        </StackPanel>
+                    </Grid>
+                    <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de mostrar a tela"/>
+                </StackPanel>
+            </Border>
+
+            <DockPanel Margin="{DynamicResource StackGap}">
+                <TextBlock x:Name="SavedText" Style="{StaticResource Muted}" VerticalAlignment="Center"/>
+                <Button DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Content="Salvar" MinWidth="140" HorizontalAlignment="Right" Click="Save_Click"/>
+            </DockPanel>
+
+            <!-- Atualizações -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <DockPanel>
+                        <Button DockPanel.Dock="Right" Content="Procurar atualização" Click="Update_Click"/>
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource Heading}" Text="Atualizações"/>
+                            <TextBlock x:Name="VersionText" Style="{StaticResource Muted}"/>
+                        </StackPanel>
+                    </DockPanel>
+                    <CheckBox x:Name="UpdateToggle" Style="{StaticResource Switch}" Margin="0,16,0,0" Content="Procurar atualização ao abrir o app"/>
+                </StackPanel>
+            </Border>
+
+            <!-- Diagnóstico -->
+            <Border Style="{StaticResource Card}">
+                <StackPanel>
+                    <DockPanel>
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                            <Button Content="Copiar" Click="CopyDiagnostics_Click"/>
+                            <Button Content="Abrir logs" Margin="8,0,0,0" Click="OpenLogs_Click"/>
+                            <Button Content="Atualizar" Margin="8,0,0,0" Click="RefreshDiagnostics_Click"/>
+                        </StackPanel>
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource Heading}" Text="Diagnóstico"/>
+                            <TextBlock Style="{StaticResource Muted}" Text="IP do Radmin, GPU, codecs e firewall. O teste de banda fica em Transmitir, ao lado de cada pessoa conectada."/>
+                        </StackPanel>
+                    </DockPanel>
+                    <Border Background="{DynamicResource Background}" CornerRadius="{DynamicResource RadiusMd}" Padding="16" Margin="0,16,0,0">
+                        <TextBox x:Name="DiagnosticsText" IsReadOnly="True" TextWrapping="Wrap" FontFamily="{DynamicResource FontMono}" FontSize="12"
+                                 BorderThickness="0" Background="Transparent" Padding="0" Text="Carregando…"/>
+                    </Border>
+                    <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0" Text="Também dá para rodar pelo terminal: ScreenFlow.exe --diagnostico"/>
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>
