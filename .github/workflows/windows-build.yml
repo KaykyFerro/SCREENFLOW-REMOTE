@@ -34,40 +34,72 @@ jobs:
         run: dotnet test ScreenFlow.sln --configuration Release --no-build --logger "trx;LogFileName=screenflow-tests.trx"
       - name: Publish self-contained Windows x64 app
         run: dotnet publish src/ScreenFlow.App/ScreenFlow.App.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/publish
-      # O runner não tem placa de som. A Scream é uma placa de som virtual com driver assinado: com ela o Windows toca e
-      # captura som de verdade, e o autoteste confere o som do PC separado por app. Se não instalar, esse teste é pulado.
+      # O runner não tem placa de som. O VB-CABLE é uma placa de som virtual: com ela o Windows toca e captura som de
+      # verdade, e o autoteste confere o som do PC separado por app. O Windows Server só carrega drivers com assinatura
+      # antiga (de antes de 2015) ou certificados pela Microsoft, então vai o driver "win7" do pacote, de 2014. O devcon
+      # (ferramenta da Microsoft que cria o dispositivo virtual) vem do pacote da Scream. Se nada instalar, o teste do
+      # som é pulado e o passo do autoteste avisa.
       - name: Virtual sound card (for the PC sound self-test)
         shell: pwsh
         continue-on-error: true
-        timeout-minutes: 5
+        timeout-minutes: 6
         run: |
-          foreach ($name in "AudioEndpointBuilder", "Audiosrv") {
-            Set-Service -Name $name -StartupType Automatic
-            Start-Service -Name $name
+          $dir = Join-Path $env:RUNNER_TEMP "placa-virtual"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          function Get-Pinned([string]$Url, [string]$Sha256, [string]$Name) {
+            $zip = Join-Path $dir "$Name.zip"
+            Invoke-WebRequest $Url -OutFile $zip
+            $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
+            if ($hash -ne $Sha256) { throw "$Name.zip mudou: SHA-256 $hash (esperado $Sha256)." }
+            $out = Join-Path $dir $Name
+            Expand-Archive $zip -DestinationPath $out -Force
+            return $out
           }
-          try { Write-Host "Secure Boot: $(Confirm-SecureBootUEFI)" } catch { Write-Host "Secure Boot: não deu para ler ($($_.Exception.Message))" }
-          $zip = Join-Path $env:RUNNER_TEMP "Scream4.0.zip"
-          Invoke-WebRequest "https://github.com/duncanthrax/scream/releases/download/4.0/Scream4.0.zip" -OutFile $zip
-          $hash = (Get-FileHash $zip -Algorithm SHA256).Hash
-          if ($hash -ne "FA33E25F9A46C61E4E0CD83362C51C3D2A45C6FE4091AAD7507E240E40F1A520") { throw "O Scream4.0.zip baixado não é o esperado ($hash)." }
-          $dir = Join-Path $env:RUNNER_TEMP "scream"
-          Expand-Archive $zip -DestinationPath $dir -Force
-          $driver = Join-Path $dir "Install\driver\x64"
-          # Sem confiar no autor do driver, o Windows abre uma janela perguntando e a instalação trava.
-          $cert = (Get-AuthenticodeSignature (Join-Path $driver "Scream.sys")).SignerCertificate
-          if (-not $cert) { throw "O driver da Scream veio sem assinatura." }
+          $scream = Get-Pinned "https://github.com/duncanthrax/scream/releases/download/4.0/Scream4.0.zip" "FA33E25F9A46C61E4E0CD83362C51C3D2A45C6FE4091AAD7507E240E40F1A520" "scream"
+          $cable = Get-Pinned "https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack46.zip" "BC44E8974191A5A2427D6C979E2DAB08DBB09925F3F435DFA2F0BA3E45B6EB90" "vbcable"
+          $devcon = Join-Path $scream "Install\helpers\devcon-x64.exe"
+
+          # Sem confiar no autor do driver, o Windows abre uma janela perguntando e a instalação fica parada nela.
           $store = [System.Security.Cryptography.X509Certificates.X509Store]::new("TrustedPublisher", "LocalMachine")
           $store.Open("ReadWrite")
-          $store.Add($cert)
+          foreach ($file in "vbaudio_cable64_win7.cat", "vbaudio_cable64_win7.sys") {
+            $signature = Get-AuthenticodeSignature (Join-Path $cable $file)
+            Write-Host "Assinatura de ${file}: $($signature.Status), $($signature.SignerCertificate.Subject), $($signature.SignerCertificate.Thumbprint)"
+            if (-not $signature.SignerCertificate) { throw "$file veio sem assinatura." }
+            $store.Add($signature.SignerCertificate)
+          }
           $store.Close()
-          Push-Location $driver
-          & (Join-Path $dir "Install\helpers\devcon-x64.exe") install Scream.inf "*Scream"
-          $code = $LASTEXITCODE
-          Pop-Location
-          Start-Sleep -Seconds 3
-          Get-CimInstance Win32_SoundDevice | Format-Table Name, Status, ConfigManagerErrorCode -AutoSize
-          # devcon: 0 = instalou, 1 = instalou mas pede reiniciar.
-          if ($code -gt 1) { throw "A instalação da placa de som virtual falhou (devcon $code)." }
+          function Save-Desktop([string]$Path) {
+            try {
+              Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+              $bounds = [System.Windows.Forms.SystemInformation]::VirtualScreen
+              $bitmap = [System.Drawing.Bitmap]::new($bounds.Width, $bounds.Height)
+              $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+              $graphics.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
+              New-Item -ItemType Directory -Force (Split-Path $Path) | Out-Null
+              $bitmap.Save($Path, [System.Drawing.Imaging.ImageFormat]::Png)
+              $graphics.Dispose()
+              $bitmap.Dispose()
+              Write-Host "Tela salva em $Path (vai junto nas capturas)."
+            } catch { Write-Host "Não deu para salvar a tela: $($_.Exception.Message)" }
+          }
+
+          foreach ($name in "AudioEndpointBuilder", "Audiosrv") { Set-Service -Name $name -StartupType Automatic }
+          $install = Start-Process -FilePath $devcon -ArgumentList @("install", "`"$(Join-Path $cable 'vbMmeCable64_win7.inf')`"", "VBAudioVACWDM") `
+            -WorkingDirectory $cable -PassThru -NoNewWindow
+          $null = $install.Handle
+          if (-not $install.WaitForExit(120000)) {
+            Save-Desktop (Join-Path $env:GITHUB_WORKSPACE "artifacts\capturas\ci-placa-de-som.png")
+            Stop-Process -Id $install.Id -Force -ErrorAction SilentlyContinue
+            throw "O devcon ficou parado (o Windows deve ter aberto uma janela pedindo confirmação)."
+          }
+          Write-Host "devcon terminou com código $($install.ExitCode) (0 = instalou, 1 = instalou e pede reiniciar)."
+          # Reinicia o áudio do Windows para a saída nova aparecer na hora.
+          foreach ($name in "AudioEndpointBuilder", "Audiosrv") { Restart-Service -Name $name -Force }
+          Start-Sleep -Seconds 2
+          Get-PnpDevice -Class MEDIA -ErrorAction SilentlyContinue | Format-Table Status, FriendlyName, InstanceId -AutoSize
+          Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Format-Table Status, FriendlyName -AutoSize
+          if ($install.ExitCode -gt 1) { throw "A instalação da placa de som virtual falhou (devcon $($install.ExitCode))." }
       - name: Smoke test (diagnostic command)
         shell: pwsh
         run: |
@@ -128,6 +160,12 @@ jobs:
           $players.Process | Stop-Process -Force -ErrorAction SilentlyContinue
           $report = Get-ChildItem "$env:LOCALAPPDATA/ScreenFlow/logs/autoteste-*.txt" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
           if ($report) { Get-Content $report } else { Write-Host "Sem relatório do autoteste." }
+          if ($report) {
+            # Parte pulada ou incompleta (sem placa de som, por exemplo): aparece como aviso no resumo do CI.
+            foreach ($match in Select-String -Path $report -Pattern "\] (Pulado|Aviso): ") {
+              Write-Host "::warning title=Autoteste::$($match.Line -replace '^\[[^\]]*\] ', '')"
+            }
+          }
           if ($p.ExitCode -ne 0) {
             Get-Content (Get-ChildItem "$env:LOCALAPPDATA/ScreenFlow/logs/screenflow-*.log" | Sort-Object LastWriteTime | Select-Object -Last 1) -Tail 80
             throw "Autoteste falhou (código $($p.ExitCode))."

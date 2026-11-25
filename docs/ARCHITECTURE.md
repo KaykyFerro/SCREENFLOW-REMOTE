@@ -4,9 +4,9 @@
 
 | Projeto | Alvo | Conteúdo |
 |---|---|---|
-| `ScreenFlow.Core` | `net10.0` (testável em qualquer SO) | Protocolo (cabeçalho UDP, FEC, remontagem, NACK, mensagens de controle), criptografia, perfis de qualidade, controle adaptativo, configuração automática, configurações, leitura de releases, log |
-| `ScreenFlow.Infrastructure` | `net10.0-windows10.0.26100.0` | Captura de tela (WGC/DXGI) e de câmera (Windows.Media.Capture), conversão de cor na GPU, encoder/decoder FFmpeg, desenho do vídeo na GPU (D3D11), áudio WASAPI/Opus, sessões host/viewer, Radmin, firewall, descoberta, hardware, atualização |
-| `ScreenFlow.App` | WPF, gera `ScreenFlow.exe` | Tema escuro/claro, menu lateral e telas (Visão geral, Transmissão, Assistir, Monitoramento, Configurações, Atualizações), sininho de avisos, player, telemetria, `--diagnostico`, `--autoteste`, `--capturas` |
+| `ScreenFlow.Core` | `net10.0` (testável em qualquer SO) | Protocolo (cabeçalho UDP, FEC, remontagem, NACK, mensagens de controle), protocolo e estado da sala da rede (presença, chat, histórico), criptografia, perfis de qualidade, controle adaptativo, configuração automática, regras do som do PC por app, configurações, leitura de releases, log |
+| `ScreenFlow.Infrastructure` | `net10.0-windows10.0.26100.0` | Captura de tela (WGC/DXGI) e de câmera (Windows.Media.Capture), conversão de cor na GPU, encoder/decoder FFmpeg, desenho do vídeo na GPU (D3D11), áudio WASAPI/Opus (com o loopback por processo), sala da rede (chat e voz), sessões host/viewer, Radmin, firewall, descoberta, hardware, atualização |
+| `ScreenFlow.App` | WPF, gera `ScreenFlow.exe` | Tema escuro/claro, menu lateral com o painel da voz, telas (Visão geral, Transmissão, Assistir, Chat da rede, Monitoramento, Configurações, Atualizações), sininho de avisos, ícone na bandeja, player, telemetria, `--diagnostico`, `--autoteste`, `--capturas` |
 | `ScreenFlow.Tests` | xUnit | Testes do Core |
 
 ## Pipeline de vídeo (host)
@@ -31,6 +31,10 @@ Packetizer ── pedaços de 1150 bytes + 1 paridade XOR a cada N
 
 A captura (e a câmera) e o encoder só rodam quando há alguém assistindo. Com a tela parada, um frame é reenviado a cada 100 ms para manter o intra-refresh. A câmera usa o formato que ela suporta mais perto da qualidade escolhida, e o Windows entrega o frame já em BGRA.
 
+### Câmera junto com a tela (1.1.0)
+
+No modo tela, a câmera pode ir junto como uma **segunda faixa de vídeo**: device D3D11, captura e encoder próprios, no mesmo codec da tela e num tamanho de quadrinho (até 720p). Os pacotes têm tipos próprios (`CameraVideo` e `CameraFec`), com FEC, NACK e pedido de keyframe separados, então a tela nunca espera a câmera. Se a câmera falhar (em uso por outro app, desligada, bloqueada pela privacidade do Windows), a tela continua e a câmera tenta de novo com espera crescente. O viewer tem um decoder só para a câmera e desenha o quadrinho no canto pela CPU (é pequeno). O host só manda a câmera para quem avisou no `hello` que sabe mostrá-la (`camera-overlay`), então um viewer 1.0.x vê só a tela.
+
 ## Pipeline do viewer
 
 ```
@@ -50,6 +54,26 @@ O decoder é criado no mesmo device D3D11 do presenter, então o frame não é c
 - Cada pacote leva o quadro atual e o anterior: uma perda isolada é recuperada sem buraco no som.
 - O viewer toca com buffer de 120 a 400 ms, em troca de som sem cortes. O player mostra o espectro do som decodificado.
 - A descoberta anuncia o modo (tela, câmera ou festa), e a tela Assistir mostra cada sessão com o modo.
+
+## Som do PC
+
+O som do PC é capturado por WASAPI e vira Opus 48 kHz estéreo. Desde a 1.1.0 ele é separado por app (Windows 10 2004 ou mais novo), para que a voz da rede, os avisos e qualquer som que o próprio ScreenFlow toca não voltem para quem assiste:
+
+- **Sem apps escolhidos**: uma captura de loopback por processo (`ActivateAudioInterfaceAsync` no dispositivo virtual `VAD\Process_Loopback`) no modo "tudo menos a árvore do ScreenFlow".
+- **Com apps escolhidos** (Spotify, Discord...): o Windows só tira uma árvore de processos por captura, então cada app que tem sessão de som é capturado separado ("só este processo e os filhos") e a mistura é feita no ScreenFlow. Quem decide quais processos capturar é o `AppAudioPlan` (no Core, com testes): o ScreenFlow e os apps escolhidos nunca entram; os ancestrais deles também não (capturar a árvore do Explorer traria o som deles junto); e um processo cujo ancestral já entra fica de fora, para não dobrar o volume. A lista é revista a cada segundo. O ritmo da mistura vem de uma captura "tudo menos o ScreenFlow", e cada app tem uma fila com 20 ms de folga e no máximo 120 ms guardados.
+- **Reserva**: se o Windows não deixar separar, vai o loopback normal da saída padrão (todo o som do PC) e a tela Transmissão avisa.
+
+A escolha dos apps vale na hora, durante a transmissão. Os apps são identificados pelo nome do executável, então um app que toca por outro processo com outro nome (o `steamwebhelper` do Steam, por exemplo) aparece separado na lista.
+
+## Sala da rede (UDP 47802)
+
+Todo mundo com o ScreenFlow 1.1 aberto na mesma rede do Radmin se vê, conversa no chat e pode entrar na voz. Não há servidor: tudo passa pela porta de descoberta, que o instalador já libera.
+
+- **Pacotes** binários com cabeçalho de 20 bytes (`SR`, versão, tipo e o id de quem mandou) e no máximo 1400 bytes: presença, saída, chat, confirmação do chat, voz e pedido de histórico. Os anúncios em JSON das transmissões das versões 1.0.x chegam na mesma porta e alimentam a tela Assistir.
+- **Presença** por broadcast nos adaptadores do Radmin a cada 2 s (e direto para quem já é conhecido ou foi adicionado pelo IP), com o nome, se está na voz, mudo, sem som e se está ao vivo (tela, som, câmera). Quem some por 7 s sai da lista.
+- **Chat** direto para cada PC, com confirmação e até 6 tentativas. O histórico guarda as últimas 300 mensagens só na memória; quem chega pede o histórico aos outros.
+- **Voz** direto para quem está na voz: Opus 32 kbps, 48 kHz mono, quadros de 20 ms, com portão de voz (só manda enquanto você fala) e cada quadro levando o anterior para cobrir uma perda isolada. Cada pessoa tem um buffer de jitter e todas são mixadas numa saída só. Sem som (ensurdecer) também desliga o microfone.
+- **Segurança**: os pacotes da sala **não** são criptografados nem autenticados pelo ScreenFlow. Eles contam com o túnel do Radmin VPN, e qualquer um na mesma rede do Radmin com o ScreenFlow aberto ouve a voz e lê o chat. A transmissão de tela continua com ECDH + AES-GCM.
 
 ## Canal de controle (TCP 47801)
 
@@ -72,6 +96,8 @@ Mensagens JSON com 4 bytes de tamanho.
 
 O instalador cria as regras (UDP 47800, TCP 47801, UDP 47802 e o próprio `ScreenFlow.exe`) uma vez só, com os mesmos nomes que o app usa, e as remove na desinstalação. O app confere as regras ao abrir e só pede permissão de novo (pelo sininho) se as portas mudarem.
 
-## Encerramento
+## Bandeja e encerramento
 
-Fechar a janela cancela o fechamento, encerra a sessão (manda `bye`, para áudio, pipeline, sockets, libera encoder/decoder/texturas/device D3D11) e só então fecha.
+- Fechar ou minimizar a janela (com **Configurações › Fechar e minimizar levam o ScreenFlow para a bandeja**, ligado por padrão) só esconde a janela: a transmissão, a voz e o chat continuam. A dica do ícone mostra se está ao vivo e o que está indo (tela, som, câmera), quantas pessoas assistem e a voz; o menu do botão direito tem abrir, transmitir ou encerrar, os controles da voz, o chat e **Sair do ScreenFlow**.
+- Só uma cópia do app roda por vez (mutex `Local\ScreenFlow.Instancia`). Abrir de novo mostra a janela que já estava aberta.
+- **Sair do ScreenFlow** (ou fechar com a bandeja desligada, ou o Windows desligando) encerra a sessão (manda `bye`, para áudio, pipeline, sockets, libera encoder/decoder/texturas/device D3D11), sai da sala da rede e só então fecha.

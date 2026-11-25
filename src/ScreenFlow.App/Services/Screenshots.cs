@@ -81,6 +81,7 @@ public static class Screenshots
             return Task.Delay(300);
         }, () => (FrameworkElement)window.TransmitPage.AppsPopup.Child);
         window.TransmitPage.AppsPopup.IsOpen = false;
+        await Shot("20-cartao-som-do-pc.png", () => Task.Delay(300), () => window.TransmitPage.AudioCard);
         await Shot("03-assistir.png", () => Go(window, window.WatchPage));
         await Shot("04-monitoramento.png", () =>
         {
