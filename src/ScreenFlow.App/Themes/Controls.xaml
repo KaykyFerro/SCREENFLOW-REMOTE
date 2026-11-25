@@ -559,9 +559,12 @@
                 <ControlTemplate TargetType="TextBox">
                     <Border x:Name="Root" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{DynamicResource RadiusMd}">
-                        <Grid Margin="{TemplateBinding Padding}">
-                            <TextBlock x:Name="Placeholder" Text="{TemplateBinding Tag}" Foreground="{DynamicResource TextSubtle}" VerticalAlignment="Center"
-                                       FontFamily="{TemplateBinding FontFamily}" IsHitTestVisible="False" Visibility="Collapsed" Margin="2,0,0,0"/>
+                        <!-- O próprio TextBox já aplica o Padding ao texto; o texto de exemplo recebe o mesmo recuo (Padding + 2). -->
+                        <Grid>
+                            <Border Padding="{TemplateBinding Padding}" IsHitTestVisible="False">
+                                <TextBlock x:Name="Placeholder" Text="{TemplateBinding Tag}" Foreground="{DynamicResource TextSubtle}" VerticalAlignment="Center"
+                                           FontFamily="{TemplateBinding FontFamily}" Visibility="Collapsed" Margin="2,0,0,0"/>
+                            </Border>
                             <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
                         </Grid>
                     </Border>
@@ -598,7 +601,7 @@
                 <ControlTemplate TargetType="PasswordBox">
                     <Border x:Name="Root" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}"
                             BorderThickness="1" CornerRadius="{DynamicResource RadiusMd}">
-                        <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"/>
+                        <ScrollViewer x:Name="PART_ContentHost" VerticalAlignment="Center"/>
                     </Border>
                     <ControlTemplate.Triggers>
                         <Trigger Property="IsKeyboardFocused" Value="True">
@@ -661,7 +664,14 @@
                                       IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}"/>
                         <ContentPresenter x:Name="ContentSite" IsHitTestVisible="False" Margin="{TemplateBinding Padding}" VerticalAlignment="Center"
                                           Content="{TemplateBinding SelectionBoxItem}" ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
-                                          ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"/>
+                                          ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}">
+                            <ContentPresenter.Resources>
+                                <!-- Item longo termina em "…" em vez de cortar a letra no meio -->
+                                <Style TargetType="TextBlock">
+                                    <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
+                                </Style>
+                            </ContentPresenter.Resources>
+                        </ContentPresenter>
                         <TextBox x:Name="PART_EditableTextBox" Visibility="Hidden" Margin="0,0,30,0" BorderThickness="0" Background="Transparent"
                                  IsReadOnly="{TemplateBinding IsReadOnly}" FontSize="{TemplateBinding FontSize}"/>
                         <Popup x:Name="PART_Popup" IsOpen="{TemplateBinding IsDropDownOpen}" Placement="Bottom" AllowsTransparency="True" Focusable="False" PopupAnimation="Fade">

@@ -417,6 +417,7 @@ public partial class MainWindow : Window
         _compact = compact;
         SidebarColumn.Width = new GridLength(_compact ? 86 : 260);
         BrandText.Visibility = MachinePanel.Visibility = _compact ? Visibility.Collapsed : Visibility.Visible;
+        MachineCard.Padding = new Thickness(_compact ? 6 : 12); // só o ícone cabe no menu recolhido
         foreach (var (item, label) in _navLabels)
         {
             item.Content = _compact ? null : label;

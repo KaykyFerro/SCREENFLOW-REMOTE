@@ -54,7 +54,7 @@ public static class Screenshots
                 await prepare();
                 await SettleAsync();
                 window.Toasts.Children.Clear();
-                Save(target?.Invoke() ?? (FrameworkElement)window.Content, Path.Combine(folder, name));
+                Save(target?.Invoke() ?? WindowRoot(window), Path.Combine(folder, name), window.Background);
                 saved++;
             }
             catch (Exception exception)
@@ -118,15 +118,28 @@ public static class Screenshots
                 Resize(player, new Size(1280, 720));
                 player.ShowDemo(mode, state);
                 return Task.Delay(700);
-            }, () => (FrameworkElement)player!.Content);
+            }, () => WindowRoot(player!));
             if (player is not null) await player.ShutdownAsync();
         }
 
+        Window? dialog = null;
+        await Shot("11-pedido-de-pin.png", () =>
+        {
+            dialog = PinDialog.Build(window, "Festa da Mari", wrongPin: true, out var box);
+            box.Password = "1234";
+            dialog.WindowStartupLocation = WindowStartupLocation.Manual;
+            dialog.Left = dialog.Top = -30000;
+            dialog.ShowActivated = false;
+            dialog.Show();
+            return Task.Delay(300);
+        }, () => WindowRoot(dialog!));
+        dialog?.Close();
+
         // Janela no tamanho mínimo: o menu vira ícones e as colunas se empilham.
         Resize(window, new Size(window.MinWidth, window.MinHeight));
-        await Shot("11-transmissao-janela-pequena.png", () => Go(window, window.TransmitPage, 600));
-        await Shot("12-configuracoes-janela-pequena.png", () => Go(window, window.SettingsPage, 600));
-        await Shot("13-atualizacoes-janela-pequena.png", () => Go(window, window.UpdatesPage));
+        await Shot("12-transmissao-janela-pequena.png", () => Go(window, window.TransmitPage, 600));
+        await Shot("13-configuracoes-janela-pequena.png", () => Go(window, window.SettingsPage, 600));
+        await Shot("14-atualizacoes-janela-pequena.png", () => Go(window, window.UpdatesPage));
 
         Telemetry.EndHost();
         await window.StopAllAsync(); // a janela fecha junto com o app
@@ -148,11 +161,14 @@ public static class Screenshots
         await Application.Current.Dispatcher.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle);
     }
 
+    /// <summary>A borda do modelo da janela: ocupa a área interna inteira e já desenha o fundo da janela.</summary>
+    private static FrameworkElement WindowRoot(Window window) => (FrameworkElement)VisualTreeHelper.GetChild(window, 0);
+
     /// <summary>
-    /// Salva exatamente a área do elemento (sem a margem dele e sem a moldura da janela), em escala 2x.
-    /// O VisualBrush ignora o deslocamento do elemento dentro do pai, que o RenderTargetBitmap aplicaria.
+    /// Salva exatamente a área do elemento (sem a margem dele e sem a moldura da janela), em escala 2x, sobre um fundo
+    /// opaco. O VisualBrush ignora o deslocamento do elemento dentro do pai, que o RenderTargetBitmap aplicaria.
     /// </summary>
-    private static void Save(FrameworkElement element, string path)
+    private static void Save(FrameworkElement element, string path, Brush? background)
     {
         element.UpdateLayout();
         var area = new Rect(0, 0, element.ActualWidth, element.ActualHeight);
@@ -161,6 +177,7 @@ public static class Screenshots
         var visual = new DrawingVisual();
         using (var context = visual.RenderOpen())
         {
+            if (background is not null) context.DrawRectangle(background, null, area);
             context.DrawRectangle(new VisualBrush(element)
             {
                 Viewbox = area,

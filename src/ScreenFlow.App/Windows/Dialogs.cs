@@ -76,7 +76,14 @@ public static class PinDialog
 {
     public static string? Ask(Window? owner, string host, bool wrongPin)
     {
-        var box = new PasswordBox { MaxLength = 32 };
+        var window = Build(owner, host, wrongPin, out var box);
+        return window.ShowDialog() == true && box.Password.Length > 0 ? box.Password : null;
+    }
+
+    /// <summary>Monta a janela do PIN sem abrir (as capturas de tela do CI usam direto).</summary>
+    internal static Window Build(Window? owner, string host, bool wrongPin, out PasswordBox passwordBox)
+    {
+        var box = passwordBox = new PasswordBox { MaxLength = 32 };
         var hint = new TextBlock
         {
             Text = wrongPin ? "PIN incorreto. Confira com quem está transmitindo e tente de novo." : string.Empty,
@@ -93,7 +100,7 @@ public static class PinDialog
             "Quem está transmitindo protegeu a sessão com um PIN. Peça para essa pessoa e digite aqui.", extra, "Entrar", "Cancelar", null, out var ok);
         ok.Click += (_, _) => window.DialogResult = true;
         window.Loaded += (_, _) => box.Focus();
-        return window.ShowDialog() == true && box.Password.Length > 0 ? box.Password : null;
+        return window;
     }
 }
 
