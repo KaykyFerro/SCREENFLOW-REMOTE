@@ -533,8 +533,16 @@
                             <Setter TargetName="Root" Property="Background" Value="{DynamicResource SurfaceRaised}"/>
                         </Trigger>
                         <Trigger Property="IsEnabled" Value="False">
-                            <Setter TargetName="Root" Property="Opacity" Value="0.55"/>
+                            <Setter TargetName="Root" Property="Opacity" Value="0.5"/>
                         </Trigger>
+                        <!-- Ao vivo os cartões ficam travados, mas o modo escolhido continua bem legível. -->
+                        <MultiTrigger>
+                            <MultiTrigger.Conditions>
+                                <Condition Property="IsEnabled" Value="False"/>
+                                <Condition Property="IsChecked" Value="True"/>
+                            </MultiTrigger.Conditions>
+                            <Setter TargetName="Root" Property="Opacity" Value="1"/>
+                        </MultiTrigger>
                     </ControlTemplate.Triggers>
                 </ControlTemplate>
             </Setter.Value>
