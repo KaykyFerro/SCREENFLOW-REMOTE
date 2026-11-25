@@ -27,12 +27,23 @@ jobs:
         run: dotnet build ScreenFlowRemote.sln --configuration Release --no-restore
       - name: Run automated tests
         run: dotnet test ScreenFlowRemote.sln --configuration Release --no-build --logger "trx;LogFileName=screenflow-tests.trx"
-      - name: Publish Windows x64 app
-        run: dotnet publish src/ScreenFlow.Remote/ScreenFlow.Remote.csproj --configuration Release --runtime win-x64 --self-contained false --output artifacts/win-x64
-      - name: Upload Windows x64 build
+      - name: Publish self-contained Windows x64 app
+        run: dotnet publish src/ScreenFlow.Remote/ScreenFlow.Remote.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/publish
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $compiler)) { throw "Inno Setup compiler not found at $compiler" }
+          & $compiler installer\ScreenFlowRemote.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed with exit code $LASTEXITCODE" }
+      - name: Upload Windows x64 distribution
         uses: actions/upload-artifact@v4
         with:
           name: ScreenFlow-Remote-win-x64
-          path: artifacts/win-x64/
+          path: |
+            artifacts/ScreenFlowRemote-Setup-win-x64.exe
+            artifacts/publish/
           if-no-files-found: error
           retention-days: 14
