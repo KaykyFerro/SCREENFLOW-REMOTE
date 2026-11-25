@@ -88,4 +88,7 @@ public sealed record ViewerStatistics(
     double AudioBufferMs = 0,
     long AudioRecovered = 0,
     double AudioKbps = 0,
-    bool GpuRendering = false);
+    bool GpuRendering = false,
+    double CameraFps = 0,
+    int CameraWidth = 0,
+    int CameraHeight = 0);

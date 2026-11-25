@@ -54,15 +54,115 @@
                     </DockPanel>
                 </Border>
 
-                <!-- Navegação -->
-                <StackPanel x:Name="Nav">
-                    <RadioButton x:Name="NavOverview" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xF0E2;" Content="Visão geral" Checked="Nav_Checked"/>
-                    <RadioButton x:Name="NavTransmit" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE714;" Content="Transmissão" Checked="Nav_Checked"/>
-                    <RadioButton x:Name="NavWatch" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE768;" Content="Assistir" Checked="Nav_Checked"/>
-                    <RadioButton x:Name="NavMonitor" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE95E;" Content="Monitoramento" Checked="Nav_Checked"/>
-                    <RadioButton x:Name="NavSettings" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE9E9;" Content="Configurações" Checked="Nav_Checked"/>
-                    <RadioButton x:Name="NavUpdates" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE895;" Content="Atualizações" Checked="Nav_Checked"/>
-                </StackPanel>
+                <!-- Voz da rede (como no Discord): logo acima do nome do PC, com quem está na voz, microfone, fone e o chat -->
+                <Border x:Name="VoicePanel" DockPanel.Dock="Bottom" Margin="0,12,0,10" Background="{DynamicResource SurfaceSunken}" BorderBrush="{DynamicResource Border}"
+                        BorderThickness="1" CornerRadius="14" Padding="10">
+                    <StackPanel>
+                        <DockPanel x:Name="VoiceHeader" Margin="2,0,0,0">
+                            <Button x:Name="LeaveVoiceButton" DockPanel.Dock="Right" Style="{StaticResource VoiceHangUpButton}" Content="&#xE778;" ToolTip="Sair da voz"
+                                    VerticalAlignment="Center" Visibility="Collapsed" Click="LeaveVoice_Click"/>
+                            <StackPanel VerticalAlignment="Center">
+                                <StackPanel Orientation="Horizontal">
+                                    <!-- Barrinhas de sinal: verdes quando você está na voz -->
+                                    <Canvas x:Name="VoiceSignal" Width="13" Height="12" Margin="0,0,8,0" VerticalAlignment="Center">
+                                        <Rectangle Canvas.Left="0" Canvas.Top="7" Width="3" Height="5" RadiusX="1" RadiusY="1" Fill="{DynamicResource TextSubtle}"/>
+                                        <Rectangle Canvas.Left="5" Canvas.Top="4" Width="3" Height="8" RadiusX="1" RadiusY="1" Fill="{DynamicResource TextSubtle}"/>
+                                        <Rectangle Canvas.Left="10" Canvas.Top="0" Width="3" Height="12" RadiusX="1" RadiusY="1" Fill="{DynamicResource TextSubtle}"/>
+                                    </Canvas>
+                                    <TextBlock x:Name="VoiceTitle" Text="Voz da rede" FontWeight="SemiBold" FontSize="13.5"/>
+                                </StackPanel>
+                                <TextBlock x:Name="VoiceSubtitle" Style="{StaticResource Caption}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
+                                           Text="Procurando quem está na rede…"/>
+                            </StackPanel>
+                        </DockPanel>
+
+                        <!-- Quem está na voz (anel verde = falando) -->
+                        <ItemsControl x:Name="VoiceList" Margin="-2,8,-2,0" Focusable="False" Visibility="Collapsed">
+                            <ItemsControl.Template>
+                                <ControlTemplate TargetType="ItemsControl">
+                                    <ScrollViewer Style="{StaticResource PageScroll}" MaxHeight="150">
+                                        <ItemsPresenter/>
+                                    </ScrollViewer>
+                                </ControlTemplate>
+                            </ItemsControl.Template>
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Border x:Name="Row" CornerRadius="8" Padding="6,4" Margin="0,0,0,1" Background="Transparent" ToolTip="{Binding DisplayName}">
+                                        <DockPanel>
+                                            <Grid Width="24" Height="24">
+                                                <Ellipse x:Name="Ring" Margin="-3" Stroke="{DynamicResource Success}" StrokeThickness="2" Opacity="0"/>
+                                                <Ellipse Fill="{Binding Avatar.Background}"/>
+                                                <TextBlock Text="{Binding Initial}" Foreground="{Binding Avatar.Foreground}" FontSize="11" FontWeight="Bold"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Grid>
+                                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                                <Grid Width="16" Height="16" Margin="4,0,0,0" ToolTip="Microfone desligado"
+                                                      Visibility="{Binding ShowMuted, Converter={StaticResource BoolToVisibility}}">
+                                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE720;" FontSize="12" Foreground="{DynamicResource Danger}"/>
+                                                    <Path Data="M2.5,2.5 L13.5,13.5" Stroke="{DynamicResource Danger}" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                </Grid>
+                                                <Grid Width="16" Height="16" Margin="4,0,0,0" ToolTip="Som desligado"
+                                                      Visibility="{Binding Deafened, Converter={StaticResource BoolToVisibility}}">
+                                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE7F6;" FontSize="12" Foreground="{DynamicResource Danger}"/>
+                                                    <Path Data="M2.5,2.5 L13.5,13.5" Stroke="{DynamicResource Danger}" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                </Grid>
+                                            </StackPanel>
+                                            <TextBlock x:Name="MemberName" Text="{Binding DisplayName}" Margin="10,0,4,0" FontSize="13" VerticalAlignment="Center"
+                                                       TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextMuted}"/>
+                                        </DockPanel>
+                                    </Border>
+                                    <DataTemplate.Triggers>
+                                        <DataTrigger Binding="{Binding Speaking}" Value="True">
+                                            <Setter TargetName="Ring" Property="Opacity" Value="1"/>
+                                            <Setter TargetName="MemberName" Property="Foreground" Value="{DynamicResource Text}"/>
+                                        </DataTrigger>
+                                        <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Row" Property="Background" Value="{DynamicResource SurfaceHover}"/>
+                                        </Trigger>
+                                    </DataTemplate.Triggers>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+
+                        <!-- Botões: entrar e chat; na voz, microfone, fone e chat -->
+                        <UniformGrid x:Name="VoiceButtons" Rows="1" Margin="-3,10,-3,0">
+                            <Button x:Name="JoinVoiceButton" Style="{StaticResource VoiceJoinButton}" ToolTip="Entrar na voz da rede" Click="JoinVoice_Click">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE7F6;" FontSize="14"/>
+                                    <TextBlock x:Name="JoinVoiceLabel" Text="Entrar" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </Button>
+                            <ToggleButton x:Name="MuteToggle" Style="{StaticResource VoiceToggle}" Content="&#xE720;" ToolTip="Desligar o microfone" Visibility="Collapsed" Click="Mute_Click"/>
+                            <ToggleButton x:Name="DeafenToggle" Style="{StaticResource VoiceToggle}" Content="&#xE7F6;" ToolTip="Desligar o som de todo mundo" Visibility="Collapsed" Click="Deafen_Click"/>
+                            <Button x:Name="CompactLeaveButton" Style="{StaticResource VoiceHangUpButton}" Width="Auto" Height="36" Margin="3,0" Content="&#xE778;" ToolTip="Sair da voz"
+                                    Visibility="Collapsed" Click="LeaveVoice_Click"/>
+                            <Grid x:Name="ChatButtonBox" Margin="3,0">
+                                <Button x:Name="ChatButton" Style="{StaticResource VoiceButton}" Margin="0" ToolTip="Abrir o chat de todo mundo da rede" Click="OpenChat_Click">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE8BD;" FontSize="14"/>
+                                        <TextBlock x:Name="ChatLabel" Text="Chat" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+                                <Border x:Name="ChatBadge" Style="{StaticResource CountBadge}" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-7,-4,0" Visibility="Collapsed">
+                                    <TextBlock x:Name="ChatCount" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                            </Grid>
+                        </UniformGrid>
+                    </StackPanel>
+                </Border>
+
+                <!-- Navegação (rola quando a janela é baixa e a voz está aberta) -->
+                <ScrollViewer x:Name="NavScroll" Style="{StaticResource PageScroll}">
+                    <StackPanel x:Name="Nav">
+                        <RadioButton x:Name="NavOverview" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xF0E2;" Content="Visão geral" Checked="Nav_Checked"/>
+                        <RadioButton x:Name="NavTransmit" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE714;" Content="Transmissão" Checked="Nav_Checked"/>
+                        <RadioButton x:Name="NavWatch" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE768;" Content="Assistir" Checked="Nav_Checked"/>
+                        <RadioButton x:Name="NavChat" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE8BD;" Content="Chat da rede" Checked="Nav_Checked"/>
+                        <RadioButton x:Name="NavMonitor" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE95E;" Content="Monitoramento" Checked="Nav_Checked"/>
+                        <RadioButton x:Name="NavSettings" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE9E9;" Content="Configurações" Checked="Nav_Checked"/>
+                        <RadioButton x:Name="NavUpdates" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE895;" Content="Atualizações" Checked="Nav_Checked"/>
+                    </StackPanel>
+                </ScrollViewer>
             </DockPanel>
         </Border>
 

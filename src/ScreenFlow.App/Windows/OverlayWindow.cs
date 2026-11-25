@@ -14,9 +14,9 @@ public sealed class OverlayWindow : Window
     private const int GwlExStyle = -20, WsExNoActivate = 0x08000000, WsExToolWindow = 0x00000080;
     private const uint SwpNoSize = 0x0001, SwpNoZOrder = 0x0004, SwpNoActivate = 0x0010;
     private readonly Window _owner;
-    private readonly HorizontalAlignment _horizontal;
-    private readonly VerticalAlignment _vertical;
-    private readonly Thickness _margin;
+    private HorizontalAlignment _horizontal;
+    private VerticalAlignment _vertical;
+    private Thickness _margin;
 
     public OverlayWindow(Window owner, FrameworkElement content, HorizontalAlignment horizontal, VerticalAlignment vertical, Thickness margin,
         ResourceDictionary? theme = null)
@@ -46,6 +46,15 @@ public sealed class OverlayWindow : Window
             SetWindowLongW(hwnd, GwlExStyle, GetWindowLongW(hwnd, GwlExStyle) | WsExNoActivate | WsExToolWindow);
         };
         SizeChanged += (_, _) => Reposition();
+    }
+
+    /// <summary>Muda o canto em que a janela fica (o quadrinho da câmera muda de canto com um clique).</summary>
+    public void SetPlacement(HorizontalAlignment horizontal, VerticalAlignment vertical, Thickness margin)
+    {
+        _horizontal = horizontal;
+        _vertical = vertical;
+        _margin = margin;
+        Reposition();
     }
 
     /// <summary>Recoloca a janela em relação à área do player (em pixels, funciona com qualquer DPI).</summary>

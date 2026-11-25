@@ -44,7 +44,7 @@ public static class ThemeManager
             DwmSetWindowAttribute(hwnd, DwmUseImmersiveDarkMode, ref dark, sizeof(int));
             var corner = DwmCornerRound;
             DwmSetWindowAttribute(hwnd, DwmWindowCornerPreference, ref corner, sizeof(int));
-            var border = ColorRef(Current == AppTheme.Dark || window is Windows.PlayerWindow ? Color.FromRgb(0x1D, 0x29, 0x48) : Color.FromRgb(0xD5, 0xDC, 0xEA));
+            var border = ColorRef(Current == AppTheme.Dark || window is Windows.PlayerWindow ? Color.FromRgb(0x1D, 0x29, 0x48) : Color.FromRgb(0xB9, 0xC4, 0xD8));
             DwmSetWindowAttribute(hwnd, DwmBorderColor, ref border, sizeof(int));
             if (window is Windows.PlayerWindow)
             {

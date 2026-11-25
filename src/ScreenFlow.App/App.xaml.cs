@@ -10,6 +10,12 @@ namespace ScreenFlow.App;
 
 public partial class App : Application
 {
+    private const string InstanceName = @"Local\ScreenFlow.Instancia";
+    private const string ShowEventName = @"Local\ScreenFlow.Mostrar";
+    private Mutex? _instance;
+    private EventWaitHandle? _showEvent;
+    private volatile bool _exiting;
+
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -59,9 +65,64 @@ public partial class App : Application
             return;
         }
 
+        // Uma cópia só: abrir o ScreenFlow de novo (atalho, menu Iniciar) traz de volta a que está na bandeja.
+        if (!TryBecomeSingleInstance())
+        {
+            Log.Info("O ScreenFlow já está aberto: pedindo para a outra cópia aparecer.");
+            Log.Flush();
+            Shutdown(0);
+            return;
+        }
+
         var window = new MainWindow();
         MainWindow = window;
+        SessionEnding += (_, _) => window.PrepareForSessionEnd();
         window.Show();
+    }
+
+    private bool TryBecomeSingleInstance()
+    {
+        try
+        {
+            _instance = new Mutex(true, InstanceName, out var created);
+            if (!created)
+            {
+                var owned = false;
+                try { owned = _instance.WaitOne(0); }
+                catch (AbandonedMutexException) { owned = true; } // a cópia anterior fechou sem soltar: agora é nossa
+                if (!owned)
+                {
+                    // Cria ou abre o mesmo evento: se a outra cópia ainda está abrindo, ela recebe o pedido assim que começar a ouvir.
+                    using var show = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+                    AllowSetForegroundWindow(-1); // deixa a outra cópia vir para a frente
+                    show.Set();
+                    _instance.Dispose();
+                    _instance = null;
+                    return false;
+                }
+            }
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            Log.Warn($"Não deu para conferir se já existe outra cópia aberta: {exception.Message}");
+            return true;
+        }
+
+        _showEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowEventName);
+        var listener = new Thread(() =>
+        {
+            while (!_exiting)
+            {
+                try
+                {
+                    if (!_showEvent.WaitOne(1000) || _exiting) continue;
+                    Dispatcher.BeginInvoke(() => (MainWindow as MainWindow)?.ShowFromTray());
+                }
+                catch (ObjectDisposedException) { break; }
+            }
+        }) { IsBackground = true, Name = "ScreenFlow outra cópia" };
+        listener.Start();
+        return true;
     }
 
     private static string? ArgumentValue(string[] args, string name)
@@ -97,6 +158,10 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _exiting = true;
+        try { _instance?.ReleaseMutex(); } catch { }
+        _instance?.Dispose();
+        _showEvent?.Dispose();
         Log.Info("Encerrando.");
         Log.Flush();
         base.OnExit(e);
@@ -104,4 +169,7 @@ public partial class App : Application
 
     [DllImport("kernel32.dll")]
     private static extern bool AttachConsole(int processId);
+
+    [DllImport("user32.dll")]
+    private static extern bool AllowSetForegroundWindow(int processId);
 }

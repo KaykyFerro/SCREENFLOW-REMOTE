@@ -39,6 +39,10 @@ public partial class WatchPage : UserControl, IShellPage
         InitializeComponent();
         SessionList.ItemsSource = _sessions;
         _refresh.Tick += (_, _) => RefreshSessions();
+        AppServices.Room.HostsChanged += () =>
+        {
+            if (IsLoaded) RefreshSessions();
+        };
         Unloaded += async (_, _) => await StopDiscoveryAsync();
         SizeChanged += (_, _) => UpdateColumns();
         Telemetry.Updated += () =>
@@ -49,6 +53,21 @@ public partial class WatchPage : UserControl, IShellPage
 
     /// <summary>Tem um player aberto (conectando, assistindo ou tentando reconectar).</summary>
     public bool IsWatching => _player is not null;
+
+    /// <summary>Quem e o que você está assistindo, para a dica do ícone da bandeja. Vazio sem player.</summary>
+    public string WatchingSummary
+    {
+        get
+        {
+            if (_player is null) return string.Empty;
+            var session = _player.Session;
+            var name = session.HostName.Length > 0 ? session.HostName : _currentHost ?? string.Empty;
+            if (session.State != ConnectionState.Connected) return $"Conectando em {name}";
+            var config = session.Config;
+            var mode = config?.Mode ?? _player.ExpectedMode ?? StreamMode.Screen;
+            return $"{name}: {StreamModes.Summary(mode, config?.AudioEnabled ?? true, config?.CameraOverlay ?? false)}";
+        }
+    }
 
     private AppSettings Settings => AppServices.Settings.Current;
 
@@ -62,9 +81,13 @@ public partial class WatchPage : UserControl, IShellPage
 
     // ───────────────────────── Descoberta ─────────────────────────
 
+    /// <summary>
+    /// A sala da rede já escuta a porta de descoberta e guarda os anúncios das transmissões. Só quando ela não abriu
+    /// (porta ocupada) é que esta tela tenta escutar sozinha, como nas versões 1.0.
+    /// </summary>
     private void StartDiscovery()
     {
-        if (_discovery is null && !AppServices.DemoMode)
+        if (_discovery is null && !AppServices.DemoMode && !AppServices.Room.IsAvailable)
         {
             var discovery = new DiscoveryListener(Settings.DiscoveryPort);
             discovery.Changed += () => Dispatcher.BeginInvoke(RefreshSessions);
@@ -87,7 +110,7 @@ public partial class WatchPage : UserControl, IShellPage
     {
         IReadOnlyList<DiscoveryAnnouncement> found = AppServices.DemoMode
             ? DemoData.Sessions
-            : _discovery?.Hosts.Select(h => h.Announcement).ToList() ?? [];
+            : (AppServices.Room.IsAvailable ? AppServices.Room.Hosts : _discovery?.Hosts ?? []).Select(h => h.Announcement).ToList();
         foreach (var gone in _sessions.Where(s => found.All(f => f.Address != s.Address)).ToList()) _sessions.Remove(gone);
         foreach (var announcement in found)
         {
@@ -107,7 +130,7 @@ public partial class WatchPage : UserControl, IShellPage
         NoSessions.Visibility = any ? Visibility.Collapsed : Visibility.Visible;
         ScanText.Text = _sessions.Count switch
         {
-            0 => _discovery is null && !AppServices.DemoMode ? "Busca parada" : "Procurando…",
+            0 => _discovery is null && !AppServices.Room.IsAvailable && !AppServices.DemoMode ? "Busca parada" : "Procurando…",
             1 => "1 transmissão ao vivo",
             var n => $"{n} transmissões ao vivo",
         };
@@ -138,11 +161,11 @@ public partial class WatchPage : UserControl, IShellPage
 
     // ───────────────────────── Conectar ─────────────────────────
 
-    /// <summary>Usado pela Visão geral: conecta direto no IP digitado lá.</summary>
-    public void ConnectTo(string host)
+    /// <summary>Usado pela Visão geral e pelo chat da rede: conecta direto num IP.</summary>
+    public void ConnectTo(string host, StreamMode? expectedMode = null)
     {
         HostBox.Text = host.Trim();
-        _ = ConnectAsync(host);
+        _ = ConnectAsync(host, expectedMode);
     }
 
     private void Connect_Click(object sender, RoutedEventArgs e) => _ = ConnectAsync(HostBox.Text);
@@ -333,7 +356,7 @@ public partial class WatchPage : UserControl, IShellPage
         NowDetail.Text = session.State switch
         {
             ConnectionState.Connected when mode == StreamMode.AudioOnly => $"Festa de música · {_currentHost}",
-            ConnectionState.Connected when config is not null => $"{StreamModes.Label(mode)} · {config.Width} × {config.Height} · {Quality.CodecLabel(config.Codec)} · {_currentHost}",
+            ConnectionState.Connected when config is not null => $"{StreamModes.Label(mode, config.CameraOverlay)} · {config.Width} × {config.Height} · {Quality.CodecLabel(config.Codec)} · {_currentHost}",
             ConnectionState.Connected => $"{StreamModes.Label(mode)} · {_currentHost}",
             ConnectionState.WaitingApproval => "Esperando o anfitrião aprovar a entrada…",
             ConnectionState.Reconnecting => "A conexão caiu, reconectando…",
@@ -365,6 +388,7 @@ public partial class WatchPage : UserControl, IShellPage
         private StreamMode _mode;
         private int _viewers;
         private bool _pin;
+        private bool _camera;
         private bool _current;
 
         public string Address { get; } = address;
@@ -374,7 +398,7 @@ public partial class WatchPage : UserControl, IShellPage
         public bool IsScreen => Mode == StreamMode.Screen;
         public bool IsCamera => Mode == StreamMode.Camera;
         public bool IsParty => Mode == StreamMode.AudioOnly;
-        public string ModeLabel => StreamModes.Label(Mode);
+        public string ModeLabel => StreamModes.Label(Mode, _camera);
         public string ViewersText => _viewers switch { 0 => "ninguém ainda", 1 => "1 assistindo", var n => $"{n} assistindo" };
         public string ActionText => _current ? "Abrir o player" : Mode == StreamMode.AudioOnly ? "Entrar na festa" : "Assistir";
 
@@ -382,6 +406,7 @@ public partial class WatchPage : UserControl, IShellPage
         {
             Name = announcement.HostName;
             Mode = announcement.Mode;
+            Set(ref _camera, announcement.CameraOverlay, nameof(ModeLabel));
             PinRequired = announcement.PinRequired;
             Set(ref _viewers, announcement.Viewers, nameof(ViewersText));
             Set(ref _current, current, nameof(ActionText));

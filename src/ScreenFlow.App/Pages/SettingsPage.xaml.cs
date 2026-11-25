@@ -3,11 +3,13 @@ using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using ScreenFlow.App.Services;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Network;
+using ScreenFlow.Infrastructure.Room;
 
 namespace ScreenFlow.App.Pages;
 
@@ -15,6 +17,11 @@ namespace ScreenFlow.App.Pages;
 public partial class SettingsPage : UserControl, IShellPage
 {
     private readonly MainWindow _shell;
+    private readonly DispatcherTimer _micTimer = new() { Interval = TimeSpan.FromMilliseconds(60) };
+    private readonly VoiceGate _micGate = new();
+    private IVoiceInput? _micTest;
+    private double _micLevelDb = -100;
+    private double _shownLevel;
     private bool _loading;
 
     public SettingsPage(MainWindow shell)
@@ -29,6 +36,8 @@ public partial class SettingsPage : UserControl, IShellPage
         MusicCombo.Fill(AudioProfile.MusicBitrates.Select(k => new Choice<int>(k, OverviewPage.MusicLabel(k))));
         CameraQualityCombo.Fill(OverviewPage.CameraQualities);
         ThemeCombo.Fill([new Choice<AppTheme>(AppTheme.Dark, "Escuro"), new Choice<AppTheme>(AppTheme.Light, "Claro")]);
+        _micTimer.Tick += (_, _) => UpdateMicMeter();
+        Unloaded += (_, _) => StopMicTest();
     }
 
     private AppSettings Settings => AppServices.Settings.Current;
@@ -47,6 +56,7 @@ public partial class SettingsPage : UserControl, IShellPage
         CameraQualityCombo.SelectValue((Resolution.FromLabel(s.CameraResolution), s.CameraFps));
         AudioBitrateCombo.SelectValue(s.AudioBitrateKbps, k => k);
         MusicCombo.SelectValue(s.MusicBitrateKbps, k => k);
+        SeparateAudioToggle.IsChecked = s.SeparateAppAudio;
         GpuToggle.IsChecked = s.GpuVideoRenderer;
         StatsToggle.IsChecked = s.ShowStatsOverlay;
         MediaPortBox.Text = s.MediaPort.ToString();
@@ -57,7 +67,14 @@ public partial class SettingsPage : UserControl, IShellPage
         NameBox.Text = s.DeviceName;
         PinBox.Text = s.Pin ?? string.Empty;
         ApproveToggle.IsChecked = s.ApproveEachViewer;
+        TrayToggle.IsChecked = s.MinimizeToTray;
         ThemeCombo.SelectValue(ThemeManager.Current);
+        LoadMicrophones(s.MicrophoneId);
+        SensitivitySlider.Value = s.VoiceSensitivity;
+        VoiceVolumeSlider.Value = s.VoiceVolume;
+        VoiceSoundsToggle.IsChecked = s.VoiceSounds;
+        UpdateVoiceLabels();
+        if (AppServices.DemoMode) ShowDemoMeter();
         SavedText.Text = string.Empty;
         AutoResult.Text = s.LastAutoConfig is { } when
             ? $"Feita em {when.ToLocalTime():dd/MM/yyyy 'às' HH:mm}: {s.Resolution} a {s.Fps} FPS, encoder {s.PreferredEncoder ?? "automático"}."
@@ -104,6 +121,8 @@ public partial class SettingsPage : UserControl, IShellPage
         }
         if (AudioBitrateCombo.SelectedItem is Choice<int> audio) s.AudioBitrateKbps = audio.Value;
         if (MusicCombo.SelectedItem is Choice<int> music) s.MusicBitrateKbps = music.Value;
+        var separateChanged = s.SeparateAppAudio != (SeparateAudioToggle.IsChecked == true);
+        s.SeparateAppAudio = SeparateAudioToggle.IsChecked == true;
         s.GpuVideoRenderer = GpuToggle.IsChecked == true;
         s.ShowStatsOverlay = StatsToggle.IsChecked == true;
         s.MediaPort = int.TryParse(MediaPortBox.Text, out var mp) ? mp : s.MediaPort;
@@ -114,6 +133,11 @@ public partial class SettingsPage : UserControl, IShellPage
         s.DeviceName = NameBox.Text.Trim();
         s.Pin = pinText.Length == 0 ? null : pinText;
         s.ApproveEachViewer = ApproveToggle.IsChecked == true;
+        s.MinimizeToTray = TrayToggle.IsChecked == true;
+        s.MicrophoneId = MicrophoneCombo.Value<string?>();
+        s.VoiceSensitivity = SensitivitySlider.Value;
+        s.VoiceVolume = VoiceVolumeSlider.Value;
+        s.VoiceSounds = VoiceSoundsToggle.IsChecked == true;
         var theme = ThemeCombo.Value<AppTheme>();
         s.Theme = theme;
 
@@ -123,6 +147,7 @@ public partial class SettingsPage : UserControl, IShellPage
         s.PreferredCodec = encoder?.Codec;
 
         AppServices.Settings.Save();
+        if (separateChanged) _shell.TransmitPage.OnAudioSettingsChanged();
         if (theme != ThemeManager.Current) ThemeManager.Apply(theme);
         SavedText.Text = $"Salvo às {DateTime.Now:HH:mm}";
         _shell.Toast(_shell.IsTransmitting ? "Configurações salvas. As mudanças de qualidade valem na próxima transmissão." : "Configurações salvas.", ToastKind.Success);
@@ -158,6 +183,120 @@ public partial class SettingsPage : UserControl, IShellPage
             AutoResult.Text = $"Não foi possível configurar automaticamente: {exception.Message}";
         }
         finally { AutoButton.IsEnabled = true; }
+    }
+
+    // ───────────────────────── Voz da rede ─────────────────────────
+
+    private void LoadMicrophones(string? selected)
+    {
+        IReadOnlyList<MicrophoneInfo> microphones = AppServices.DemoMode
+            ? [new MicrophoneInfo("demo", "Microfone (HyperX Cloud II)")]
+            : Microphones.List();
+        var choices = new List<Choice<string?>> { new(null, "Padrão do Windows") };
+        choices.AddRange(microphones.Select(m => new Choice<string?>(m.Id, m.Name)));
+        if (selected is not null && microphones.All(m => m.Id != selected)) choices.Add(new Choice<string?>(selected, "Microfone desconectado"));
+        MicrophoneCombo.Fill(choices);
+        MicrophoneCombo.SelectValue(selected);
+    }
+
+    private void RefreshMicrophones_Click(object sender, RoutedEventArgs e) => LoadMicrophones(MicrophoneCombo.Value<string?>());
+
+    private void Sensitivity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        _micGate.Sensitivity = e.NewValue;
+        UpdateVoiceLabels();
+    }
+
+    private void VoiceVolume_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => UpdateVoiceLabels();
+
+    private void MicMeter_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateVoiceLabels();
+
+    /// <summary>A barra vai de −60 dB (vazia) a 0 dB (cheia); a marca fica no limiar do portão da voz.</summary>
+    private static double MeterFraction(double db) => Math.Clamp((db + 60) / 60, 0, 1);
+
+    private void UpdateVoiceLabels()
+    {
+        if (!IsInitialized) return;
+        var sensitivity = SensitivitySlider.Value;
+        SensitivityValue.Text = sensitivity switch { < 0.25 => "Só voz alta", < 0.5 => "Baixa", < 0.75 => "Média", < 0.9 => "Alta", _ => "Capta tudo" };
+        VoiceVolumeValue.Text = $"{VoiceVolumeSlider.Value * 100:0}%";
+        var threshold = -30 - Math.Clamp(sensitivity, 0, 1) * 30;
+        MicThreshold.Margin = new Thickness(Math.Max(0, MeterFraction(threshold) * MicMeter.ActualWidth - 1.5), -4, 0, -4);
+    }
+
+    private void MicTest_Click(object sender, RoutedEventArgs e)
+    {
+        if (_micTimer.IsEnabled) StopMicTest();
+        else _ = StartMicTestAsync();
+    }
+
+    private async Task StartMicTestAsync()
+    {
+        if (AppServices.DemoMode) return;
+        MicTestButton.IsEnabled = false;
+        try
+        {
+            // Já na voz: o microfone está aberto, mostra o volume dele mesmo. Fora da voz: abre só para o teste.
+            if (!AppServices.Room.InVoice)
+            {
+                var id = MicrophoneCombo.Value<string?>();
+                var input = await Task.Run(() => new MicrophoneInput(id));
+                input.FrameReady += frame =>
+                {
+                    _micGate.Process(frame);
+                    _micLevelDb = _micGate.LevelDb;
+                };
+                input.Start();
+                _micTest = input;
+            }
+            _micTimer.Start();
+            MicTestButton.Content = "Parar o teste";
+            MicTestText.Text = "Ouvindo o microfone… fale normalmente.";
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"Teste do microfone: {exception.Message}");
+            MicTestText.Text = RoomService.MicrophoneProblem(exception);
+        }
+        finally { MicTestButton.IsEnabled = true; }
+    }
+
+    private void StopMicTest()
+    {
+        _micTimer.Stop();
+        var input = _micTest;
+        _micTest = null;
+        if (input is not null) _ = Task.Run(input.Dispose);
+        _micLevelDb = -100;
+        _shownLevel = 0;
+        if (!IsInitialized) return;
+        MicLevel.Width = 0;
+        MicTestButton.Content = "Testar microfone";
+        MicTestText.Text = "Fale normalmente: a barra precisa passar da marca para a sua voz ir. Se não passar, puxe a sensibilidade para a direita.";
+    }
+
+    private void UpdateMicMeter()
+    {
+        var level = _micTest is not null ? _micLevelDb : AppServices.Room.VoiceInputLevelDb ?? -100;
+        // Sobe na hora e desce devagar, como um medidor de verdade.
+        var target = MeterFraction(level);
+        _shownLevel = target > _shownLevel ? target : Math.Max(target, _shownLevel - 0.04);
+        MicLevel.Width = _shownLevel * MicMeter.ActualWidth;
+        var threshold = -30 - Math.Clamp(SensitivitySlider.Value, 0, 1) * 30;
+        var passing = level >= threshold;
+        MicTestText.Text = passing ? "Passando da marca: é assim que a sua voz vai para os outros." : "Abaixo da marca: isso não vai pela rede (silêncio e ruído ficam de fora).";
+        MicTestText.SetResourceReference(TextBlock.ForegroundProperty, passing ? "Success" : "TextSubtle");
+    }
+
+    private void ShowDemoMeter()
+    {
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+        {
+            _shownLevel = MeterFraction(-22);
+            MicLevel.Width = _shownLevel * MicMeter.ActualWidth;
+            MicTestText.Text = "Passando da marca: é assim que a sua voz vai para os outros.";
+            MicTestText.SetResourceReference(TextBlock.ForegroundProperty, "Success");
+        });
     }
 
     // ───────────────────────── Firewall ─────────────────────────

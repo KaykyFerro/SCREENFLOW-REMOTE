@@ -151,9 +151,14 @@ internal sealed class OpusFramer : IDisposable
     public void Dispose() => _encoder.Dispose();
 }
 
+/// <summary>Como separar o som do PC: tirar a voz da rede e os sons do ScreenFlow, e quais apps tirar também.</summary>
+public sealed record SystemAudioOptions(bool SeparateApps = true, IReadOnlyList<MutedApp>? MutedApps = null);
+
 /// <summary>
-/// Captura o áudio do sistema por WASAPI loopback, converte para 48 kHz estéreo float com o swresample
-/// (reamostragem de qualidade e downmix correto de 5.1/7.1, mantendo o canal central) e codifica em Opus.
+/// Captura o som do PC, converte para 48 kHz estéreo float com o swresample (reamostragem de qualidade e downmix correto
+/// de 5.1/7.1, mantendo o canal central) e codifica em Opus. Com <see cref="SystemAudioOptions.SeparateApps"/>, usa o
+/// loopback de processo do Windows: sem apps escolhidos, uma captura "tudo menos o ScreenFlow"; com apps escolhidos, a
+/// mistura de <see cref="AppAudioMixer"/>. Se isso falhar, cai no loopback normal (todo o som do PC) e avisa.
 /// Se o dispositivo padrão de saída mudar (fone Bluetooth, por exemplo), a captura reinicia sozinha no novo.
 /// </summary>
 public sealed unsafe class SystemAudioCapture : IAudioSource
@@ -161,7 +166,8 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
     private readonly object _gate = new();
     private readonly OpusFramer _framer;
     private readonly DeviceWatcher _watcher;
-    private WasapiLoopbackCapture? _capture;
+    private SystemAudioOptions _options;
+    private IWaveIn? _capture;
     private SwrContext* _resampler;
     private int _sourceRate;
     private int _sourceChannels;
@@ -172,10 +178,11 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
     private bool _started;
     private bool _disposed;
 
-    public SystemAudioCapture(AudioProfile profile)
+    public SystemAudioCapture(AudioProfile profile, SystemAudioOptions? options = null)
     {
         if (!FFmpegLoader.EnsureLoaded()) throw new InvalidOperationException(FFmpegLoader.Error);
         Profile = profile;
+        _options = Clean(options ?? new SystemAudioOptions());
         Meter = new AudioMeter();
         _framer = new OpusFramer(profile, Meter);
         _framer.PacketReady += packet => PacketReady?.Invoke(packet);
@@ -187,6 +194,12 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
     public AudioMeter Meter { get; }
     public string Description { get; private set; } = "";
 
+    /// <summary>O que está indo: "todo o som do PC", "sem a voz da rede" ou "sem Spotify e a voz da rede".</summary>
+    public string Separation { get; private set; } = "";
+
+    /// <summary>O som está separado por app (a voz da rede fica fora). False: vai todo o som do PC.</summary>
+    public bool Separated { get; private set; }
+
     public bool Paused
     {
         get => _framer.Paused;
@@ -194,6 +207,12 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
     }
 
     public event Action<AudioPacket>? PacketReady;
+
+    /// <summary>Aviso para quem transmite (a separação por app não funcionou e foi todo o som do PC, por exemplo).</summary>
+    public event Action<string>? Notice;
+
+    /// <summary>O último aviso (o da abertura sai antes de alguém assinar o <see cref="Notice"/>).</summary>
+    public string? LastNotice { get; private set; }
 
     public void Start()
     {
@@ -204,9 +223,23 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         }
     }
 
+    /// <summary>Troca os apps que ficam fora (vale na hora, durante a transmissão).</summary>
+    public void Configure(SystemAudioOptions options)
+    {
+        options = Clean(options);
+        lock (_gate)
+        {
+            if (options.SeparateApps == _options.SeparateApps && options.MutedApps!.Select(a => a.Exe).SequenceEqual(_options.MutedApps!.Select(a => a.Exe))) return;
+            _options = options;
+        }
+        Restart("apps tirados do som mudaram", delayMs: 0);
+    }
+
+    private static SystemAudioOptions Clean(SystemAudioOptions options) => options with { MutedApps = MutedApp.Normalize(options.MutedApps) };
+
     private void OpenCapture()
     {
-        var capture = new WasapiLoopbackCapture();
+        var capture = CreateCapture(out var separation);
         var format = capture.WaveFormat;
         _sourceRate = format.SampleRate;
         _sourceChannels = Math.Max(1, format.Channels);
@@ -217,9 +250,54 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         capture.DataAvailable += OnData;
         capture.RecordingStopped += OnStopped;
         _capture = capture;
+        Separation = separation;
+        Separated = capture is not WasapiLoopbackCapture;
         Description = $"{_sourceRate} Hz, {_sourceChannels} canais, {_sourceBits} bits{(_sourceFloat ? " float" : string.Empty)} → Opus {Profile.BitrateKbps} kbps"
-                      + (Profile.Music ? " (música, 20 ms, VBR)" : " (baixa latência, 10 ms)");
+                      + (Profile.Music ? " (música, 20 ms, VBR)" : " (baixa latência, 10 ms)") + $" · {separation}";
         Log.Info($"Áudio do sistema: {Description}");
+    }
+
+    /// <summary>Escolhe a captura: mistura sem os apps escolhidos, tudo menos o ScreenFlow ou, se nada disso abrir, tudo.</summary>
+    private IWaveIn CreateCapture(out string separation)
+    {
+        var options = _options;
+        if (options.SeparateApps && ProcessLoopbackCapture.Supported)
+        {
+            if (options.MutedApps is { Count: > 0 } muted)
+            {
+                try
+                {
+                    var mixer = AppAudioMixer.Open(muted.Select(a => a.Exe));
+                    separation = $"sem {MutedApp.JoinNames([.. muted.Select(a => a.Name), "a voz da rede"])}";
+                    return mixer;
+                }
+                catch (Exception exception)
+                {
+                    Log.Warn($"Não deu para separar o som por app: {exception.Message}");
+                    Warn($"Não deu para tirar o som de {MutedApp.JoinNames(muted.Select(a => a.Name).ToList())} da transmissão ({exception.Message}).");
+                }
+            }
+            try
+            {
+                var capture = ProcessLoopbackCapture.ExcludingProcess(Environment.ProcessId);
+                separation = "sem a voz da rede";
+                return capture;
+            }
+            catch (Exception exception)
+            {
+                Log.Warn($"Não deu para tirar os sons do ScreenFlow do som do PC: {exception.Message}");
+                Warn($"O som do PC vai completo, com a voz da rede junto: o Windows não deixou separar ({exception.Message}).");
+            }
+        }
+        separation = "todo o som do PC";
+        return new WasapiLoopbackCapture();
+    }
+
+    private void Warn(string message)
+    {
+        if (message == LastNotice) return;
+        LastNotice = message;
+        Notice?.Invoke(message);
     }
 
     private void CreateResampler()
@@ -301,21 +379,31 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
 
     private void OnStopped(object? sender, StoppedEventArgs e)
     {
-        if (e.Exception is null || _disposed) return;
+        if (e.Exception is null || _disposed || !ReferenceEquals(sender, _capture)) return;
         Log.Warn($"Captura de áudio parou: {e.Exception.Message}");
         Restart("a captura parou");
     }
 
-    private void Restart(string reason)
+    /// <summary>
+    /// Fecha a captura atual e abre outra. A antiga é liberada fora da trava: a thread dela pode estar esperando a trava
+    /// dentro do OnData, e liberar segurando a trava travaria as duas.
+    /// </summary>
+    private void Restart(string reason, int delayMs = 400)
     {
         _ = Task.Run(() =>
         {
-            Thread.Sleep(400);
+            if (delayMs > 0) Thread.Sleep(delayMs);
+            IWaveIn? old;
             lock (_gate)
             {
                 if (_disposed) return;
                 Log.Info($"Reiniciando a captura de áudio ({reason}).");
-                CloseCapture();
+                old = DetachCapture();
+            }
+            Release(old);
+            lock (_gate)
+            {
+                if (_disposed || _capture is not null) return;
                 try
                 {
                     OpenCapture();
@@ -326,13 +414,19 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         });
     }
 
-    private void CloseCapture()
+    private IWaveIn? DetachCapture()
     {
         var capture = _capture;
         _capture = null;
-        if (capture is null) return;
+        if (capture is null) return null;
         capture.DataAvailable -= OnData;
         capture.RecordingStopped -= OnStopped;
+        return capture;
+    }
+
+    private static void Release(IWaveIn? capture)
+    {
+        if (capture is null) return;
         try { capture.StopRecording(); } catch { }
         try { capture.Dispose(); } catch { }
     }
@@ -340,11 +434,16 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
     public void Dispose()
     {
         _watcher.Dispose();
+        IWaveIn? capture;
         lock (_gate)
         {
             if (_disposed) return;
             _disposed = true;
-            CloseCapture();
+            capture = DetachCapture();
+        }
+        Release(capture);
+        lock (_gate)
+        {
             FreeResampler();
             _framer.Dispose();
         }

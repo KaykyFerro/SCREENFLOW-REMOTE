@@ -130,6 +130,10 @@
                             </Grid>
                             <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
                                        Text="O som é Opus estéreo 48 kHz. Na festa de música cada pacote vai duas vezes (cópia de segurança), então nada falha mesmo com perda na rede."/>
+                            <CheckBox x:Name="SeparateAudioToggle" Style="{StaticResource Switch}" Margin="0,18,0,6"
+                                      Content="Separar o som por app: a voz da rede e os apps escolhidos ficam fora da transmissão"/>
+                            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                       Text="Os apps são escolhidos no cartão Som do PC, na tela Transmissão. Desligue só se quem assiste não estiver ouvindo o som do PC: aí vai todo o som, como antes."/>
                         </StackPanel>
                     </Border>
 
@@ -147,6 +151,51 @@
                             </DockPanel>
                             <CheckBox x:Name="GpuToggle" Style="{StaticResource Switch}" Content="Desenhar o vídeo direto na GPU (mais leve e com menos atraso)" Margin="0,0,0,14"/>
                             <CheckBox x:Name="StatsToggle" Style="{StaticResource Switch}" Content="Mostrar as estatísticas no player (F3)"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Voz e chat da rede -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <DockPanel Margin="0,0,0,20">
+                                <Border Style="{StaticResource IconTile}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE720;"/>
+                                </Border>
+                                <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Style="{StaticResource Heading}" Text="Voz da rede"/>
+                                    <TextBlock Style="{StaticResource Caption}" Text="Microfone e som da conversa com quem está na rede."/>
+                                </StackPanel>
+                            </DockPanel>
+                            <TextBlock Style="{StaticResource Label}" Text="Microfone"/>
+                            <DockPanel Margin="{DynamicResource FieldGap}">
+                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar microfones de novo" Margin="8,0,0,0"
+                                        Click="RefreshMicrophones_Click"/>
+                                <ComboBox x:Name="MicrophoneCombo"/>
+                            </DockPanel>
+                            <DockPanel Margin="0,0,0,6">
+                                <TextBlock x:Name="SensitivityValue" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                <TextBlock Style="{StaticResource Label}" Text="Sensibilidade do microfone" Margin="0"/>
+                            </DockPanel>
+                            <Slider x:Name="SensitivitySlider" Minimum="0" Maximum="1" SmallChange="0.05" LargeChange="0.1" ValueChanged="Sensitivity_Changed"/>
+                            <!-- Medidor: o volume do microfone e a marca a partir da qual a voz vai pela rede -->
+                            <Grid x:Name="MicMeter" Height="10" Margin="0,10,0,10" SizeChanged="MicMeter_SizeChanged">
+                                <Border CornerRadius="5" Background="{DynamicResource SurfaceSunken}" BorderBrush="{DynamicResource Border}" BorderThickness="1"/>
+                                <Border x:Name="MicLevel" CornerRadius="5" HorizontalAlignment="Left" Width="0" Background="{DynamicResource AccentGradient}"/>
+                                <Border x:Name="MicThreshold" Width="3" CornerRadius="1.5" HorizontalAlignment="Left" Margin="0,-4" Background="{DynamicResource Text}"
+                                        ToolTip="A voz só vai pela rede quando passa desta marca."/>
+                            </Grid>
+                            <DockPanel Margin="{DynamicResource FieldGap}">
+                                <Button x:Name="MicTestButton" DockPanel.Dock="Right" Content="Testar microfone" MinHeight="34" Padding="14,0" Margin="12,0,0,0" Click="MicTest_Click"/>
+                                <TextBlock x:Name="MicTestText" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                           Text="Fale normalmente: a barra precisa passar da marca para a sua voz ir. Se não passar, puxe a sensibilidade para a direita."/>
+                            </DockPanel>
+                            <DockPanel Margin="0,0,0,6">
+                                <TextBlock x:Name="VoiceVolumeValue" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                <TextBlock Style="{StaticResource Label}" Text="Volume de quem fala" Margin="0"/>
+                            </DockPanel>
+                            <Slider x:Name="VoiceVolumeSlider" Minimum="0" Maximum="1.5" SmallChange="0.05" LargeChange="0.1" Margin="{DynamicResource FieldGap}"
+                                    ValueChanged="VoiceVolume_Changed"/>
+                            <CheckBox x:Name="VoiceSoundsToggle" Style="{StaticResource Switch}" Content="Sons ao entrar, sair e desligar o microfone (como no Discord)"/>
                         </StackPanel>
                     </Border>
                 </StackPanel>
@@ -239,7 +288,9 @@
                             </Grid>
                             <TextBlock Style="{StaticResource Label}" Text="PIN padrão (opcional)"/>
                             <TextBox x:Name="PinBox" MaxLength="32" Tag="Sem PIN" Margin="{DynamicResource FieldGap}"/>
-                            <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de mostrar a tela"/>
+                            <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de mostrar a tela" Margin="0,0,0,14"/>
+                            <CheckBox x:Name="TrayToggle" Style="{StaticResource Switch}"
+                                      Content="Fechar e minimizar levam o ScreenFlow para a bandeja, perto do relógio (a transmissão, a voz e o chat continuam)"/>
                         </StackPanel>
                     </Border>
 

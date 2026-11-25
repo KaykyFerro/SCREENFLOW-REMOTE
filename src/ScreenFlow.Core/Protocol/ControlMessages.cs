@@ -72,7 +72,8 @@ public sealed record StreamConfigMessage(
     string EncoderName,
     string Reason,
     bool VideoEnabled = true,
-    StreamMode Mode = StreamMode.Screen) : ControlMessage;
+    StreamMode Mode = StreamMode.Screen,
+    bool CameraOverlay = false) : ControlMessage;
 
 public sealed record PingMessage(long ViewerTimeUs) : ControlMessage;
 
@@ -85,9 +86,11 @@ public sealed record StatsMessage(
     double DecodeFps,
     double LatencyMs) : ControlMessage;
 
-public sealed record NackMessage(uint FrameId, ushort[] Missing) : ControlMessage;
+/// <param name="Track">Faixa de vídeo (<see cref="VideoTrack"/>): 0 é a tela, 1 é a câmera junto com a tela (1.1.0).</param>
+public sealed record NackMessage(uint FrameId, ushort[] Missing, int Track = VideoTrack.Main) : ControlMessage;
 
-public sealed record KeyframeRequestMessage(string Reason) : ControlMessage;
+/// <param name="Track">Faixa de vídeo (<see cref="VideoTrack"/>): 0 é a tela, 1 é a câmera junto com a tela (1.1.0).</param>
+public sealed record KeyframeRequestMessage(string Reason, int Track = VideoTrack.Main) : ControlMessage;
 
 public sealed record BandwidthTestRequestMessage(int Seconds, int TargetMbps) : ControlMessage;
 

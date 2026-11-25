@@ -4,11 +4,17 @@ namespace ScreenFlow.Core.Protocol;
 public sealed class RetransmitCache
 {
     private readonly int _capacityFrames;
+    private readonly MediaPacketType _dataType;
     private readonly Dictionary<uint, List<MediaChunk>> _frames = new();
     private readonly Queue<uint> _order = new();
     private readonly object _gate = new();
 
-    public RetransmitCache(int capacityFrames = 64) => _capacityFrames = capacityFrames;
+    /// <param name="dataType">Tipo dos pacotes de dados desta faixa (a tela ou a câmera que vai junto).</param>
+    public RetransmitCache(int capacityFrames = 64, MediaPacketType dataType = MediaPacketType.Video)
+    {
+        _capacityFrames = capacityFrames;
+        _dataType = dataType;
+    }
 
     public void Store(uint frameId, List<MediaChunk> chunks)
     {
@@ -27,7 +33,7 @@ public sealed class RetransmitCache
             if (!_frames.TryGetValue(frameId, out var chunks)) return result;
             foreach (var index in indices)
             {
-                var chunk = chunks.FirstOrDefault(c => c.Header.Type == MediaPacketType.Video && c.Header.Index == index);
+                var chunk = chunks.FirstOrDefault(c => c.Header.Type == _dataType && c.Header.Index == index);
                 if (chunk is not null) result.Add(chunk);
             }
         }

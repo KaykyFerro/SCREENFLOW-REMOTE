@@ -85,7 +85,7 @@ public class ModeTests
         header.Write(buffer);
         Assert.True(MediaHeader.TryRead(buffer, out var read));
         Assert.Equal(MediaPacketType.AudioPair, read.Type);
-        buffer[3] = 6;
+        buffer[3] = 8; // o primeiro tipo que ainda não existe (6 e 7 são a câmera junto com a tela, da 1.1.0)
         Assert.False(MediaHeader.TryRead(buffer, out _));
     }
 

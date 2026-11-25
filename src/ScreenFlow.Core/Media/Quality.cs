@@ -73,6 +73,26 @@ public static class Quality
     }
 
     /// <summary>
+    /// Bitrate da câmera que vai junto com a tela: rosto e fundo parado pedem bem menos que a tela de um jogo
+    /// (cerca de 2 Mbps em 720p a 30 FPS no HEVC).
+    /// </summary>
+    public static int CameraOverlayBitrateKbps(int width, int height, int fps, VideoCodec codec)
+    {
+        var kbps = width * (double)height * fps * 0.075 / 1000.0;
+        if (codec == VideoCodec.H264) kbps *= 1.4;
+        else if (codec == VideoCodec.Av1) kbps *= 0.9;
+        return (int)Math.Clamp(Math.Round(kbps / 100) * 100, 600, 6_000);
+    }
+
+    /// <summary>Encolhe (nunca aumenta) um tamanho para caber em <paramref name="maxWidth"/>×<paramref name="maxHeight"/>, sem distorcer e com lados pares.</summary>
+    public static (int Width, int Height) FitWithin(int width, int height, int maxWidth, int maxHeight)
+    {
+        if (width <= 0 || height <= 0) return (Math.Max(2, maxWidth & ~1), Math.Max(2, maxHeight & ~1));
+        var scale = Math.Min(1.0, Math.Min(maxWidth / (double)width, maxHeight / (double)height));
+        return (Math.Max(2, (int)Math.Round(width * scale) & ~1), Math.Max(2, (int)Math.Round(height * scale) & ~1));
+    }
+
+    /// <summary>
     /// Bitrate por viewer quando o host envia uma cópia para cada pessoa: divide 80% do upload pelo número de viewers.
     /// Retorna o próprio alvo quando o upload é desconhecido.
     /// </summary>

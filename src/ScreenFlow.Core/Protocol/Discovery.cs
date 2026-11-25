@@ -12,7 +12,8 @@ public sealed record DiscoveryAnnouncement(
     string Version,
     bool PinRequired,
     int Viewers,
-    ScreenFlow.Core.Media.StreamMode Mode = ScreenFlow.Core.Media.StreamMode.Screen)
+    ScreenFlow.Core.Media.StreamMode Mode = ScreenFlow.Core.Media.StreamMode.Screen,
+    bool CameraOverlay = false)
 {
     private static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 

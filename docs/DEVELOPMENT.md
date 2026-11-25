@@ -19,6 +19,16 @@ As DLLs do FFmpeg são copiadas para `ffmpeg\` ao lado do executável. A versão
 
 O projeto `ScreenFlow.Core` e os testes rodam em Linux/macOS; os outros compilam fora do Windows com `EnableWindowsTargeting` (já ligado em `Directory.Build.props`), mas só rodam no Windows.
 
+## Autoteste
+
+`ScreenFlow.exe --autoteste` grava um relatório em `%LOCALAPPDATA%\ScreenFlow\logs\autoteste-*.txt` e sai com código 0 quando tudo passa:
+
+1. **Festa de música** no 127.0.0.1: host com um tom de teste, viewer sem saída de som; confere que o som chega e é decodificado.
+2. **Sala da rede**: duas salas no mesmo PC trocam chat e voz (um tom no lugar do microfone).
+3. **Som do PC por app** (só com saída de som e Windows 10 2004+): o ScreenFlow toca 1000 Hz e confere, por Goertzel, que a captura normal ouve tudo, que a captura "sem o ScreenFlow" não ouve os 1000 Hz e que a mistura sem o `powershell.exe` não ouve os 1000 nem os 440 Hz que ele toca, mas ouve os 700 Hz do `pwsh.exe`.
+
+O runner do CI não tem placa de som, então o `windows-build.yml` instala a placa virtual [VB-CABLE](https://vb-audio.com/Cable/) (o driver antigo do pacote, que o Windows Server aceita, criado com o `devcon` que vem no pacote da [Scream](https://github.com/duncanthrax/scream); os dois zips têm o SHA-256 conferido) e deixa os dois tons tocando antes do autoteste. Se a placa não instalar, a parte do som é pulada, o resumo do CI mostra um aviso e o resto segue. Para rodar no seu PC com os tons, toque um som de 440 Hz no `powershell.exe` e um de 700 Hz no `pwsh.exe` (veja o passo do autoteste no workflow); sem eles, só a parte do som do ScreenFlow é conferida.
+
 ## Publicar
 
 ```powershell

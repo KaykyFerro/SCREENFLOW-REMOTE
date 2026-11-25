@@ -4,15 +4,22 @@ Compartilhe a tela, a câmera **e o áudio do sistema** do seu PC com várias pe
 
 Três jeitos de transmitir:
 
-- **Tela**: um monitor ou uma janela, até 4K a 165 FPS, com o som do PC.
+- **Tela**: um monitor ou uma janela, até 4K a 165 FPS, com o som do PC. Dá para mandar a **câmera junto**: quem assiste vê a sua webcam num quadrinho no canto, com tela, câmera e som ao mesmo tempo.
 - **Câmera**: webcam ou placa de captura, com o som do PC. A câmera só liga quando alguém entra.
 - **Festa de música**: só o som do PC, sem vídeo, em Opus estéreo de até 320 kbps com cópia de segurança de cada pacote. Quem entra vê um visualizador que dança com a música.
+
+E para quem está na mesma rede do Radmin:
+
+- **Voz da rede**, no estilo do Discord: o painel fica no menu lateral, logo acima do nome do PC. Entrar, sair, desligar o microfone ou o som de todo mundo com um clique.
+- **Chat da rede** com todo mundo que está com o ScreenFlow aberto na rede.
+- **Som do PC sem a voz da rede**: quem assiste a sua transmissão não ouve a conversa da voz nem os sons do ScreenFlow, e você escolhe outros apps para ficarem de fora (Spotify, Discord, o navegador...).
+- **Bandeja do Windows**: fechar ou minimizar leva o ScreenFlow para perto do relógio. Passando o mouse no ícone aparece se você está ao vivo e o que está indo (tela, som, câmera ou tudo junto).
 
 Por baixo:
 
 - Captura na GPU (Windows.Graphics.Capture, com DXGI Desktop Duplication de reserva), sem cópia para a CPU até o encoder.
 - Encoder por hardware detectado sozinho: NVENC (NVIDIA), AMF (AMD) ou Quick Sync (Intel), na ordem AV1 → HEVC → H.264.
-- Áudio do sistema por WASAPI loopback, em Opus 48 kHz estéreo.
+- Som do PC por WASAPI, em Opus 48 kHz estéreo. O loopback por processo do Windows deixa o próprio ScreenFlow e os apps escolhidos de fora.
 - Transporte UDP próprio com pacotes numerados, FEC, retransmissão seletiva e qualidade adaptativa.
 - Um PC transmitindo para 10, 20 ou mais pessoas: a tela é codificada uma vez só.
 - Player que desenha o vídeo direto na GPU (swapchain D3D11), com o caminho pela CPU de reserva.
@@ -49,10 +56,12 @@ Baixe `ScreenFlow-Setup-win-x64.exe` na página de [Releases](https://github.com
 
 1. Na **Visão geral**, escolha **Tela**, **Câmera** ou **Festa de música**, a qualidade, e clique em **Iniciar transmissão** (ou abra **Transmissão** no menu para todas as opções).
 2. O seu IP do Radmin aparece em destaque. Clique no ícone de copiar e mande para quem vai assistir.
-3. Na tela: o monitor ou a janela, a qualidade (720p, 1080p, 1440p, 4K), o FPS (30, 60, 120, 144, 165) e o som do PC. Na câmera: qual câmera e a qualidade. Na festa: a qualidade do som (128 a 320 kbps).
-4. Opcional: defina um **PIN** e/ou deixe ligado **Aprovar cada pessoa**. Qualquer pessoa na mesma rede Radmin alcança o seu IP.
-5. A captura e o encoder só ligam quando alguém entra. O visualizador do som já mexe antes, para você conferir o áudio.
-6. Em **Quem está assistindo** você vê ping, latência, perda e banda de cada pessoa, pode **Testar banda** e remover alguém. O **Monitoramento** mostra os gráficos dos últimos 90 segundos.
+3. Na tela: o monitor ou a janela, a qualidade (720p, 1080p, 1440p, 4K), o FPS (30, 60, 120, 144, 165), o som do PC e, se quiser, **Mandar a câmera junto**. Na câmera: qual câmera e a qualidade. Na festa: a qualidade do som (128 a 320 kbps).
+4. No cartão **Som do PC**, o botão **Escolher apps** mostra os apps abertos: marque os que quem assiste não deve ouvir. A voz da rede e os sons do ScreenFlow já ficam de fora. Vale na hora, até no meio da transmissão, e o app lembra a escolha.
+5. Opcional: defina um **PIN** e/ou deixe ligado **Aprovar cada pessoa**. Qualquer pessoa na mesma rede Radmin alcança o seu IP.
+6. A captura e o encoder só ligam quando alguém entra. O visualizador do som já mexe antes, para você conferir o áudio.
+7. Em **Quem está assistindo** você vê ping, latência, perda e banda de cada pessoa, pode **Testar banda** e remover alguém. O **Monitoramento** mostra os gráficos dos últimos 90 segundos.
+8. Pode fechar ou minimizar a janela: o ScreenFlow vai para a bandeja e a transmissão continua. Para fechar de vez, clique com o botão direito no ícone e escolha **Sair do ScreenFlow**.
 
 ### 4. Assistir
 
@@ -60,7 +69,16 @@ Baixe `ScreenFlow-Setup-win-x64.exe` na página de [Releases](https://github.com
 2. Clique numa transmissão em **Na sua rede** (mostra se é tela, câmera ou festa, quantas pessoas estão assistindo e se pede PIN), ou digite o IP do Radmin de quem transmite (o app lembra os últimos) e clique em **Conectar**.
 3. Se o host pedir PIN, o app pergunta. Se ele aprovar cada pessoa, você vê "Esperando aprovação".
 4. No player: **duplo clique**, **F** ou **F11** para tela cheia, **F3** para as estatísticas (FPS, bitrate, latência, perda, codec, resolução, GPU ou CPU), **M** para mudo e as setas para o volume.
-5. Se a conexão cair, o player reconecta sozinho.
+5. Se o host mandar a câmera junto, ela aparece num quadrinho no canto: clique nele para trocar de canto e **C** para esconder ou mostrar.
+6. Se a conexão cair, o player reconecta sozinho.
+
+### 5. Falar com a rede (voz e chat)
+
+1. Quem está com o ScreenFlow 1.1 ou mais novo aberto na mesma rede do Radmin aparece sozinho: o painel **Voz da rede**, no menu lateral, mostra quantos estão na rede e quem está na voz, e a tela **Chat da rede** lista todo mundo.
+2. Clique em **Entrar** no painel para entrar na voz. Os botões do microfone e do fone desligam o seu microfone e o som de todo mundo (sem som, o microfone também desliga, como no Discord). Quem está falando fica com um anel verde.
+3. O balão ao lado abre o **Chat da rede**: cada mensagem vai para todo mundo da rede, e quem acabou de abrir o app recebe as últimas mensagens dos outros. As mensagens ficam só enquanto o ScreenFlow está aberto.
+4. Microfone, sensibilidade, volume das vozes e o teste do microfone ficam em **Configurações › Voz da rede**.
+5. Não está vendo alguém? Adicione pelo IP do Radmin na tela do chat.
 
 ## Várias pessoas assistindo
 
@@ -81,7 +99,7 @@ O app divide 80% do upload medido entre quem está assistindo e baixa a qualidad
 |---|---|---|
 | 47800 | UDP | Vídeo, áudio, FEC e teste de banda (host → viewer) |
 | 47801 | TCP | Handshake, controle, NACK, estatísticas |
-| 47802 | UDP | Descoberta por broadcast na rede do Radmin |
+| 47802 | UDP | Descoberta das transmissões e sala da rede: presença, chat e voz |
 
 As portas podem ser trocadas em **Configurações › Rede e firewall** (os dois lados precisam usar as mesmas). O instalador cria as regras de entrada do Firewall do Windows para as portas padrão e para o ScreenFlow.exe.
 
@@ -90,12 +108,13 @@ As portas podem ser trocadas em **Configurações › Rede e firewall** (os dois
 - Troca de chaves ECDH P-256 a cada conexão e criptografia AES-GCM de todo pacote de mídia.
 - PIN opcional: a prova do PIN é derivada do segredo da conexão, então quem só escuta a rede não consegue testar PINs.
 - Modo **Aprovar cada pessoa** e limite de tentativas erradas (5 por minuto por IP).
+- A voz e o chat da rede **não** são criptografados pelo ScreenFlow: eles contam com o túnel do Radmin VPN, que já é criptografado entre os PCs. Quem está na mesma rede do Radmin e tem o ScreenFlow aberto ouve a voz e lê o chat, e o nome de quem fala ou escreve não é verificado. Use uma rede com senha, só com quem você conhece.
 
 ## Diagnóstico
 
 Em **Configurações › Diagnóstico** (ou `ScreenFlow.exe --diagnostico` no terminal) aparecem: IP do Radmin e adaptadores, portas e firewall, GPUs, encoders e decoders por hardware, câmeras, versão do FFmpeg e o perfil recomendado. O teste de banda até um viewer fica na tela Transmissão.
 
-`ScreenFlow.exe --autoteste` abre uma festa de música no 127.0.0.1 com um tom de teste, conecta um viewer nela e confere se o som chega e é decodificado (o CI roda isso a cada mudança).
+`ScreenFlow.exe --autoteste` confere, no próprio PC: uma festa de música no 127.0.0.1 (o som chega ao viewer e é decodificado); duas salas da rede conversando no chat e na voz; e, se o PC tiver saída de som, a separação do som do PC por app (o som do ScreenFlow e o do app tirado ficam fora, o resto vai). O CI roda isso a cada mudança, com uma placa de som virtual.
 
 Logs ficam em `%LOCALAPPDATA%\ScreenFlow\logs` (botão **Abrir logs**).
 
@@ -114,7 +133,10 @@ Para publicar uma versão, crie um release no GitHub com a tag nova `v1.1.0` na 
 | Host não aparece na lista | A descoberta usa broadcast; algumas redes bloqueiam. Digite o IP direto. |
 | Imagem trava ou pixeliza | Abra as estatísticas (F3). Perda acima de 2% indica rede saturada: baixe a qualidade ou o FPS, ou use **Testar banda**. Se o Radmin estiver passando pelo relay (ícone de conexão indireta no Radmin), a banda cai bastante. |
 | FPS abaixo do escolhido | Veja o encoder em Diagnóstico. Sem NVENC/AMF/QSV o app usa software. Notebooks: conecte na tomada e use a GPU dedicada. |
-| Sem áudio | Ligue **Compartilhar o som do PC** antes de começar (na festa de música ele já vem ligado). Confira o volume no player (M e setas). |
+| Sem áudio | Ligue **Compartilhar o som do PC** antes de começar (na festa de música ele já vem ligado). Confira o volume no player (M e setas). Se ainda assim não vier som, desligue **Separar o som por app** em Configurações. |
+| Um app tirado continua aparecendo no som | Alguns apps tocam por outro processo (no Steam, o som vem do `steamwebhelper`). Abra **Escolher apps** de novo com o app tocando e marque o que aparece tocando. |
+| Ninguém aparece na voz ou no chat | Todos precisam do ScreenFlow 1.1 ou mais novo, na mesma rede do Radmin, com a porta UDP 47802 liberada. Adicione pelo IP do Radmin na tela do chat. |
+| Ninguém me ouve na voz | Veja se o Windows deixa apps usarem o microfone (Configurações do Windows › Privacidade e segurança › Microfone) e use **Testar microfone** em Configurações › Voz da rede. |
 | Câmera não aparece | Feche outros apps que usam a câmera e clique em atualizar ao lado da lista. |
 | "Versões diferentes do ScreenFlow" | Atualize os dois PCs para a mesma versão. |
 

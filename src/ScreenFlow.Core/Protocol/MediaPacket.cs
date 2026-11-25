@@ -5,8 +5,31 @@ namespace ScreenFlow.Core.Protocol;
 /// <summary>
 /// Tipos de datagrama. <see cref="AudioPair"/> (1.0.1) leva o quadro de áudio atual e o anterior, para a festa de música;
 /// só é enviado quando todos os viewers anunciam suporte, então versões antigas nunca o recebem.
+/// <see cref="CameraVideo"/> e <see cref="CameraFec"/> (1.1.0) são a segunda faixa de vídeo: a câmera que vai junto com a
+/// tela. Só vão para quem anuncia "camera-overlay" (versões antigas descartam tipos que não conhecem).
 /// </summary>
-public enum MediaPacketType : byte { Video = 1, Audio = 2, VideoFec = 3, Probe = 4, AudioPair = 5 }
+public enum MediaPacketType : byte { Video = 1, Audio = 2, VideoFec = 3, Probe = 4, AudioPair = 5, CameraVideo = 6, CameraFec = 7 }
+
+/// <summary>
+/// As faixas de vídeo de uma transmissão: a principal (a tela, ou a câmera sozinha) e a câmera que vai junto com a tela.
+/// O número da faixa vai nos pedidos de NACK e de keyframe; hosts antigos ignoram o campo e tratam tudo como a principal.
+/// </summary>
+public static class VideoTrack
+{
+    public const int Main = 0;
+    public const int Camera = 1;
+
+    /// <summary>Tipo dos pacotes de dados de uma faixa.</summary>
+    public static MediaPacketType DataType(int track) => track == Camera ? MediaPacketType.CameraVideo : MediaPacketType.Video;
+
+    /// <summary>Tipo dos pacotes de paridade (FEC) de um tipo de dados de vídeo; null para tipos sem FEC.</summary>
+    public static MediaPacketType? FecType(MediaPacketType data) => data switch
+    {
+        MediaPacketType.Video => MediaPacketType.VideoFec,
+        MediaPacketType.CameraVideo => MediaPacketType.CameraFec,
+        _ => null,
+    };
+}
 
 [Flags]
 public enum MediaPacketFlags : byte { None = 0, Keyframe = 1, Retransmit = 2 }
@@ -58,7 +81,7 @@ public struct MediaHeader
         header.Flags = (MediaPacketFlags)source[21];
         header.TimestampUs = BinaryPrimitives.ReadInt64BigEndian(source[22..]);
         header.PayloadLength = BinaryPrimitives.ReadUInt16BigEndian(source[30..]);
-        return header.Type is >= MediaPacketType.Video and <= MediaPacketType.AudioPair;
+        return header.Type is >= MediaPacketType.Video and <= MediaPacketType.CameraFec;
     }
 }
 
@@ -128,7 +151,7 @@ public static class Packetizer
             });
         }
 
-        if (fecGroupSize > 1 && type == MediaPacketType.Video)
+        if (fecGroupSize > 1 && VideoTrack.FecType(type) is { } fecType)
         {
             var groups = (count + fecGroupSize - 1) / fecGroupSize;
             for (var g = 0; g < groups; g++)
@@ -139,7 +162,7 @@ public static class Packetizer
                 var parity = BuildParity(result, start, end);
                 result.Add(new MediaChunk
                 {
-                    Header = new MediaHeader { Type = MediaPacketType.VideoFec, FrameId = frameId, Index = (ushort)g, Count = (ushort)count, FecGroupSize = (byte)fecGroupSize, Flags = flags, TimestampUs = timestampUs, PayloadLength = (ushort)parity.Length },
+                    Header = new MediaHeader { Type = fecType, FrameId = frameId, Index = (ushort)g, Count = (ushort)count, FecGroupSize = (byte)fecGroupSize, Flags = flags, TimestampUs = timestampUs, PayloadLength = (ushort)parity.Length },
                     Payload = parity,
                 });
             }

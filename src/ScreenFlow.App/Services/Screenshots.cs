@@ -31,6 +31,10 @@ public static class Screenshots
         var saved = 0;
         var failed = 0;
 
+        // Sala da rede de exemplo: gente online, duas pessoas na voz e uma conversa no chat.
+        AppServices.Settings.Current.DeviceName = "PC da Sala";
+        AppServices.Room.LoadDemo(inVoice: false, unread: 2);
+
         var window = new MainWindow
         {
             WindowStartupLocation = WindowStartupLocation.Manual,
@@ -71,6 +75,13 @@ public static class Screenshots
             window.TransmitPage.ShowDemo();
             return Task.Delay(600);
         });
+        await Shot("19-tirar-som-de-apps.png", () =>
+        {
+            window.TransmitPage.ShowAppsDemo();
+            return Task.Delay(300);
+        }, () => (FrameworkElement)window.TransmitPage.AppsPopup.Child);
+        window.TransmitPage.AppsPopup.IsOpen = false;
+        await Shot("20-cartao-som-do-pc.png", () => Task.Delay(300), () => window.TransmitPage.AudioCard);
         await Shot("03-assistir.png", () => Go(window, window.WatchPage));
         await Shot("04-monitoramento.png", () =>
         {
@@ -93,10 +104,25 @@ public static class Screenshots
         });
         ThemeManager.Apply(AppTheme.Dark);
 
-        foreach (var (name, mode, state) in new[]
+        // Voz conectada no menu lateral e o chat da rede aberto.
+        await Shot("15-chat-da-rede.png", () =>
+        {
+            AppServices.Room.LoadDemo(inVoice: true, unread: 0);
+            return Go(window, window.ChatPage, 500);
+        });
+        await Shot("16-chat-tema-claro.png", async () =>
+        {
+            ThemeManager.Apply(AppTheme.Light);
+            window.Navigate(window.OverviewPage);
+            await Go(window, window.ChatPage, 500);
+        });
+        ThemeManager.Apply(AppTheme.Dark);
+
+        foreach (var (name, mode, state, camera) in new[]
                  {
-                     ("09-player-festa-de-musica.png", StreamMode.AudioOnly, ConnectionState.Connected),
-                     ("10-player-conectando.png", StreamMode.Screen, ConnectionState.WaitingApproval),
+                     ("09-player-festa-de-musica.png", StreamMode.AudioOnly, ConnectionState.Connected, false),
+                     ("10-player-conectando.png", StreamMode.Screen, ConnectionState.WaitingApproval, false),
+                     ("18-player-tela-e-camera.png", StreamMode.Screen, ConnectionState.Connected, true),
                  })
         {
             PlayerWindow? player = null;
@@ -116,7 +142,7 @@ public static class Screenshots
                 AllowAnySize(player);
                 player.Show();
                 Resize(player, new Size(1280, 720));
-                player.ShowDemo(mode, state);
+                player.ShowDemo(mode, state, camera);
                 return Task.Delay(700);
             }, () => WindowRoot(player!));
             if (player is not null) await player.ShutdownAsync();
@@ -140,6 +166,7 @@ public static class Screenshots
         await Shot("12-transmissao-janela-pequena.png", () => Go(window, window.TransmitPage, 600));
         await Shot("13-configuracoes-janela-pequena.png", () => Go(window, window.SettingsPage, 600));
         await Shot("14-atualizacoes-janela-pequena.png", () => Go(window, window.UpdatesPage));
+        await Shot("17-chat-janela-pequena.png", () => Go(window, window.ChatPage, 500));
 
         Telemetry.EndHost();
         await window.StopAllAsync(); // a janela fecha junto com o app
@@ -166,12 +193,14 @@ public static class Screenshots
 
     /// <summary>
     /// Salva exatamente a área do elemento (sem a margem dele e sem a moldura da janela), em escala 2x, sobre um fundo
-    /// opaco. O VisualBrush ignora o deslocamento do elemento dentro do pai, que o RenderTargetBitmap aplicaria.
+    /// opaco. O conteúdo do VisualBrush vem com o deslocamento do elemento dentro do pai (a margem, ou a posição de um
+    /// cartão na coluna), então a área lida começa nesse deslocamento.
     /// </summary>
     private static void Save(FrameworkElement element, string path, Brush? background)
     {
         element.UpdateLayout();
         var area = new Rect(0, 0, element.ActualWidth, element.ActualHeight);
+        var offset = VisualTreeHelper.GetOffset(element);
         var width = Math.Max(1, (int)Math.Ceiling(area.Width * Scale));
         var height = Math.Max(1, (int)Math.Ceiling(area.Height * Scale));
         var visual = new DrawingVisual();
@@ -180,7 +209,7 @@ public static class Screenshots
             if (background is not null) context.DrawRectangle(background, null, area);
             context.DrawRectangle(new VisualBrush(element)
             {
-                Viewbox = area,
+                Viewbox = new Rect(offset.X, offset.Y, area.Width, area.Height),
                 ViewboxUnits = BrushMappingMode.Absolute,
                 Stretch = Stretch.Fill,
             }, null, area);

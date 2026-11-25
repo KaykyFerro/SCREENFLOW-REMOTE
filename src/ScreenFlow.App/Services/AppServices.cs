@@ -20,6 +20,11 @@ public static class AppServices
     public static SettingsStore Settings { get; private set; } = null!;
     public static UpdateService Updates { get; } = new();
 
+    private static RoomService? _room;
+
+    /// <summary>Sala da rede: quem está com o ScreenFlow aberto na rede, a voz e o chat. Criada na thread da interface.</summary>
+    public static RoomService Room => _room ??= new RoomService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+
     /// <summary>Modo das capturas de tela do CI: telas com dados de exemplo, sem tocar em rede nem em hardware.</summary>
     public static bool DemoMode { get; set; }
 

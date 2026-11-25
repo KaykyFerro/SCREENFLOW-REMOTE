@@ -4,6 +4,8 @@ using System.Runtime.CompilerServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using ScreenFlow.App.Services;
 using ScreenFlow.Core;
@@ -11,6 +13,7 @@ using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Capture;
+using ScreenFlow.Infrastructure.Media;
 using ScreenFlow.Infrastructure.Network;
 using ScreenFlow.Infrastructure.Session;
 
@@ -22,11 +25,15 @@ public partial class TransmitPage : UserControl, IShellPage
     private readonly MainWindow _shell;
     private readonly ObservableCollection<PendingApproval> _approvals = [];
     private readonly ObservableCollection<ViewerRow> _viewerRows = [];
+    private readonly ObservableCollection<AppChoice> _apps = [];
+    private int _appsVersion;
     private HostSession? _session;
+    private System.Net.IPAddress? _liveAddress;
     private IReadOnlyList<DisplayMonitor> _monitors = [];
     private bool _loaded;
     private bool _starting;
-    private bool _camerasLoaded;
+    private Task? _camerasLoading;
+    private bool _camerasFound;
 
     public TransmitPage(MainWindow shell)
     {
@@ -34,6 +41,7 @@ public partial class TransmitPage : UserControl, IShellPage
         InitializeComponent();
         ApprovalList.ItemsSource = _approvals;
         ViewerList.ItemsSource = _viewerRows;
+        AppsList.ItemsSource = _apps;
         QualityCombo.Fill(Resolution.All.Select(r => new Choice<Resolution>(r, $"{r.Label} · {r.Width} × {r.Height}")));
         FpsCombo.Fill(Quality.FrameRates.Select(f => new Choice<int>(f, $"{f} FPS")));
         CameraQualityCombo.Fill(OverviewPage.CameraQualities);
@@ -61,6 +69,23 @@ public partial class TransmitPage : UserControl, IShellPage
     /// <summary>Pessoas assistindo agora.</summary>
     public int Viewers => _viewerRows.Count;
 
+    /// <summary>O que está indo para quem assiste agora ("tela, câmera e áudio"). Vazio quando parado.</summary>
+    public string LiveSummary => _session?.Summary ?? string.Empty;
+
+    /// <summary>Modo da transmissão no ar (null quando parado).</summary>
+    public StreamMode? LiveMode => _session?.Mode;
+
+    /// <summary>O som do PC vai junto (sempre, na festa de música).</summary>
+    public bool LiveAudio => _session?.AudioEnabled == true;
+
+    /// <summary>A câmera vai junto com a tela.</summary>
+    public bool LiveCamera => _session?.HasCameraOverlay == true;
+
+    public bool LivePinRequired => _session is not null && Settings.Pin is not null;
+
+    /// <summary>IP em que a transmissão está (o do adaptador escolhido), para a sala da rede.</summary>
+    public System.Net.IPAddress? LiveAddress => _session is null ? null : _liveAddress;
+
     private AppSettings Settings => AppServices.Settings.Current;
 
     private StreamMode SelectedMode => ModeCamera.IsChecked == true ? StreamMode.Camera : ModeParty.IsChecked == true ? StreamMode.AudioOnly : StreamMode.Screen;
@@ -79,6 +104,7 @@ public partial class TransmitPage : UserControl, IShellPage
         CameraQualityCombo.SelectValue((Resolution.FromLabel(Settings.CameraResolution), Settings.CameraFps));
         MusicCombo.SelectValue(Settings.MusicBitrateKbps, k => k);
         AudioToggle.IsChecked = Settings.AudioEnabled;
+        CameraWithScreenToggle.IsChecked = Settings.CameraWithScreen;
         ApproveToggle.IsChecked = Settings.ApproveEachViewer;
         PinBox.Text = Settings.Pin ?? string.Empty;
         (Settings.Mode switch
@@ -88,6 +114,7 @@ public partial class TransmitPage : UserControl, IShellPage
             _ => ModeScreen,
         }).IsChecked = true;
         ApplyMode(Settings.Mode);
+        UpdateMutedApps();
         RefreshNetwork();
         RefreshSources();
     }
@@ -110,6 +137,16 @@ public partial class TransmitPage : UserControl, IShellPage
         StartGlyph.Text = mode switch { StreamMode.Camera => "", StreamMode.AudioOnly => "", _ => "" };
         if (mode == StreamMode.Camera) _ = LoadCamerasAsync();
         UpdateAudioCard();
+        UpdateProfileHint();
+    }
+
+    /// <summary>"Mandar a câmera junto": mostra a escolha da câmera e já procura as câmeras do PC.</summary>
+    private void CameraWithScreen_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsInitialized) return;
+        var on = CameraWithScreenToggle.IsChecked == true;
+        OverlayCameraPanel.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        if (on) _ = LoadCamerasAsync();
         UpdateProfileHint();
     }
 
@@ -139,6 +176,8 @@ public partial class TransmitPage : UserControl, IShellPage
                 var screenCodec = Settings.PreferredCodec ?? VideoCodec.Hevc;
                 var target = Settings.BitrateKbps > 0 ? Settings.BitrateKbps : Quality.TargetBitrateKbps(resolution, fps.Value, screenCodec);
                 var text = $"Perfil {Quality.TierLabel(resolution, fps.Value)}: cerca de {target / 1000.0:0} Mbps por pessoa em {Quality.CodecLabel(screenCodec)}.";
+                if (CameraWithScreenToggle.IsChecked == true)
+                    text += $" A câmera junto usa mais uns {Quality.CameraOverlayBitrateKbps(1280, 720, 30, screenCodec) / 1000.0:0.#} Mbps por pessoa.";
                 if (Settings.UploadMbps > 0)
                 {
                     var people = Math.Max(1, (int)(Settings.UploadMbps * 0.8 * 1000 / target));
@@ -203,20 +242,34 @@ public partial class TransmitPage : UserControl, IShellPage
             tile.Margin = new Thickness(0, 0, 12, columns == 4 ? 0 : 12);
     }
 
-    private async Task LoadCamerasAsync(bool force = false)
+    /// <summary>
+    /// Procura as câmeras do PC uma vez. Quem pedir enquanto a busca está andando espera a mesma busca (iniciar pela
+    /// Visão geral não pode começar com a lista ainda vazia); sem câmera nenhuma, a próxima chamada procura de novo.
+    /// </summary>
+    private Task LoadCamerasAsync(bool force = false)
     {
-        if (_camerasLoaded && !force) return;
-        _camerasLoaded = true;
+        if (!force && _camerasLoading is { } loading && (!loading.IsCompleted || _camerasFound)) return loading;
+        return _camerasLoading = FillCamerasAsync();
+    }
+
+    private async Task FillCamerasAsync()
+    {
         IReadOnlyList<CameraDevice> cameras = AppServices.DemoMode ? [new CameraDevice("demo", "Logitech C920 HD Pro")] : await CameraDiscovery.GetCamerasAsync();
-        CameraCombo.Items.Clear();
-        foreach (var camera in cameras) CameraCombo.Items.Add(camera);
-        CameraCombo.SelectedItem = cameras.FirstOrDefault(c => c.Id == Settings.CameraId) ?? cameras.FirstOrDefault();
-        if (cameras.Count == 0)
+        // A mesma lista serve para o modo câmera e para a câmera que vai junto com a tela.
+        var preferred = cameras.FirstOrDefault(c => c.Id == Settings.CameraId) ?? cameras.FirstOrDefault();
+        foreach (var combo in new[] { CameraCombo, OverlayCameraCombo })
         {
-            CameraCombo.Items.Add("Nenhuma câmera encontrada");
-            CameraCombo.SelectedIndex = 0;
-            _camerasLoaded = false;
+            var previous = combo.SelectedItem as CameraDevice;
+            combo.Items.Clear();
+            foreach (var camera in cameras) combo.Items.Add(camera);
+            combo.SelectedItem = cameras.FirstOrDefault(c => c.Id == previous?.Id) ?? preferred;
+            if (cameras.Count == 0)
+            {
+                combo.Items.Add("Nenhuma câmera encontrada");
+                combo.SelectedIndex = 0;
+            }
         }
+        _camerasFound = cameras.Count > 0;
     }
 
     private async void RefreshCameras_Click(object sender, RoutedEventArgs e) => await LoadCamerasAsync(force: true);
@@ -239,7 +292,7 @@ public partial class TransmitPage : UserControl, IShellPage
     {
         if (_session is not null) return;
         LoadFromSettings();
-        if (Settings.Mode == StreamMode.Camera) await LoadCamerasAsync();
+        if (Settings.Mode == StreamMode.Camera || Settings.CameraWithScreen) await LoadCamerasAsync();
         await StartAsync();
     }
 
@@ -256,6 +309,7 @@ public partial class TransmitPage : UserControl, IShellPage
         var mode = SelectedMode;
         CaptureTarget target;
         DisplayMonitor? monitor = null;
+        CameraOverlay? overlay = null;
         Resolution resolution;
         int fps;
         switch (mode)
@@ -290,6 +344,17 @@ public partial class TransmitPage : UserControl, IShellPage
                 monitor = source.Kind == CaptureKind.Monitor ? _monitors.FirstOrDefault(m => m.DeviceName == source.Id) : null;
                 resolution = QualityCombo.Value<Resolution>() ?? Resolution.P1080;
                 fps = FpsCombo.SelectedItem is Choice<int> f ? f.Value : 60;
+                if (CameraWithScreenToggle.IsChecked == true)
+                {
+                    if (OverlayCameraCombo.SelectedItem is not CameraDevice overlayCamera)
+                    {
+                        ShowError("Nenhuma câmera encontrada para mandar junto. Conecte uma webcam e clique em atualizar, ou desligue “Mandar a câmera junto”.");
+                        return;
+                    }
+                    // A câmera vai num quadrinho: 720p a 30 FPS sobra (e pesa pouco no upload).
+                    overlay = new CameraOverlay(overlayCamera.Id, overlayCamera.Name, 1280, 720, 30);
+                    Settings.CameraId = overlayCamera.Id;
+                }
                 Settings.Resolution = resolution.Label;
                 Settings.Fps = fps;
                 break;
@@ -303,6 +368,7 @@ public partial class TransmitPage : UserControl, IShellPage
 
         Settings.Mode = mode;
         Settings.AudioEnabled = AudioToggle.IsChecked == true;
+        Settings.CameraWithScreen = CameraWithScreenToggle.IsChecked == true;
         Settings.ApproveEachViewer = ApproveToggle.IsChecked == true;
         Settings.Pin = pin.Length == 0 ? null : pin;
         AppServices.Settings.Save();
@@ -324,7 +390,8 @@ public partial class TransmitPage : UserControl, IShellPage
                 target, monitor, resolution, fps, mode == StreamMode.Screen ? Settings.BitrateKbps : 0,
                 Settings.PreferredCodec, Settings.PreferredEncoder, hardware.Encoders,
                 mode == StreamMode.AudioOnly || Settings.AudioEnabled, Settings.AudioBitrateKbps, Settings.AdaptiveQuality, Settings.FecGroupSize, Settings.UploadMbps,
-                mode, Settings.MusicBitrateKbps);
+                mode, Settings.MusicBitrateKbps, OverlayCamera: overlay,
+                AudioSeparation: new SystemAudioOptions(Settings.SeparateAppAudio, Settings.MutedApps));
 
             var session = new HostSession(options) { ApprovalHandler = RequestApprovalAsync };
             session.StatusChanged += message => Dispatcher.BeginInvoke(() => StateText.Text = message);
@@ -332,6 +399,7 @@ public partial class TransmitPage : UserControl, IShellPage
             session.StatisticsUpdated += stats => Dispatcher.BeginInvoke(() => ShowStatistics(stats));
             session.BandwidthMeasured += (name, mbps) => Dispatcher.BeginInvoke(() => OnBandwidthMeasured(name, mbps));
             await Task.Run(session.Start);
+            _liveAddress = adapter.Address;
             _session = session;
 
             ModeGrid.IsEnabled = OptionsPanel.IsEnabled = AccessPanel.IsEnabled = false;
@@ -340,11 +408,12 @@ public partial class TransmitPage : UserControl, IShellPage
             SetBadge("Ao vivo", "Pink", "PinkSoft");
             StateText.Text = mode == StreamMode.AudioOnly
                 ? $"Festa no ar em {adapter.Address}. Quem quiser ouvir só precisa digitar esse IP."
-                : $"Transmitindo em {adapter.Address}. Quem quiser assistir só precisa digitar esse IP.";
+                : $"Transmitindo {session.Summary} em {adapter.Address}. Quem quiser assistir só precisa digitar esse IP.";
             StatFpsLabel.Text = mode == StreamMode.AudioOnly ? "Opus" : "FPS";
             StatBitrateLabel.Text = mode == StreamMode.AudioOnly ? "Áudio enviado" : "Vídeo";
             AudioDescription.Text = session.AudioDescription ?? (session.AudioEnabled ? "Som do PC" : "Som desligado");
             UpdateAudioCard();
+            UpdateMutedApps();
             _shell.NotifyLiveStateChanged();
             _shell.Toast(mode == StreamMode.AudioOnly ? "A festa começou. Toque uma música no PC!" : "Transmissão no ar.", ToastKind.Success);
         }
@@ -385,6 +454,7 @@ public partial class TransmitPage : UserControl, IShellPage
         StatFps.Text = StatBitrate.Text = StatUpload.Text = "—";
         StatDetails.Text = "Os números aparecem quando alguém entra.";
         AudioState.Text = "Sem som";
+        UpdateMutedApps();
         SetBadge("Parado", "TextSubtle", "SurfaceRaised");
         if (session is not null) StateText.Text = "Transmissão encerrada.";
         Telemetry.EndHost();
@@ -477,8 +547,11 @@ public partial class TransmitPage : UserControl, IShellPage
             : audioOnly
                 ? $"{stats.Encoder} · {_session.AudioDescription} · upload em Mbps"
                 : $"{stats.Encoder} · {stats.Capture} · alvo {stats.Target} · {stats.Reason} · vídeo e upload em Mbps";
+        if (stats.Camera.Length > 0) StatDetails.Text += "\n" + stats.Camera;
         var level = _session.AudioMeter?.Level ?? 0;
         AudioState.Text = !_session.AudioEnabled ? "Desligado" : level > 0.05 ? "Tocando" : "Silêncio";
+        if (_session.AudioDescription is { } description) AudioDescription.Text = description;
+        UpdateMutedApps();
         Telemetry.Record(stats, _session.Viewers.Where(v => v.State == ViewerState.Streaming).ToList());
     }
 
@@ -505,6 +578,134 @@ public partial class TransmitPage : UserControl, IShellPage
         UpdateProfileHint();
     }
 
+    // ───────────────────────── Apps cujo som fica fora ─────────────────────────
+
+    private void ChooseApps_Click(object sender, RoutedEventArgs e)
+    {
+        // Alinha a borda direita da janelinha (380 + margens de 14) com a do botão.
+        AppsPopup.HorizontalOffset = ChooseAppsButton.ActualWidth - 408 + 14;
+        AppsPopup.IsOpen = true;
+        _ = LoadAppsAsync();
+    }
+
+    private void RefreshApps_Click(object sender, RoutedEventArgs e) => _ = LoadAppsAsync();
+
+    private void AppsDone_Click(object sender, RoutedEventArgs e) => AppsPopup.IsOpen = false;
+
+    private void AppsPopup_Closed(object? sender, EventArgs e) => ApplyMutedApps();
+
+    /// <summary>Lista os apps abertos (os que estão tocando som primeiro) com os já tirados marcados.</summary>
+    private async Task LoadAppsAsync()
+    {
+        var version = ++_appsVersion;
+        var muted = (_apps.Count > 0 ? _apps.Where(a => a.Muted).Select(a => new MutedApp(a.Exe, a.Name)) : Settings.MutedApps).ToList();
+        AppsStatus.Text = "Procurando os apps abertos…";
+        AppsStatus.Visibility = Visibility.Visible;
+        IReadOnlyList<RunningApp> running;
+        try { running = await Task.Run(AppAudioCatalog.List); }
+        catch (Exception exception)
+        {
+            Log.Warn($"Não deu para listar os apps abertos: {exception.Message}");
+            running = [];
+        }
+        if (version != _appsVersion) return;
+
+        var mutedExes = muted.Select(a => a.Exe).ToHashSet();
+        var rows = running.Select(app => new AppChoice(app.Exe, app.Name, app.PlayingSound ? "Tocando som agora" : "Aberto", ToImage(app.IconPng), mutedExes.Contains(app.Exe)))
+            .Concat(muted.Where(m => running.All(r => r.Exe != m.Exe)).Select(m => new AppChoice(m.Exe, m.Name, "Fechado agora", null, true)))
+            .OrderByDescending(a => a.Muted)
+            .ToList();
+        _apps.Clear();
+        foreach (var row in rows) _apps.Add(row);
+        AppsStatus.Text = "Nenhum app com janela ou som aberto agora. Abra o app e clique em atualizar.";
+        AppsStatus.Visibility = _apps.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        AppsHint.Text = ProcessLoopbackSupported ? "Vale na hora, até no meio da transmissão." : "Precisa do Windows 10 versão 2004 ou mais novo.";
+    }
+
+    private static bool ProcessLoopbackSupported => ProcessLoopbackCapture.Supported;
+
+    /// <summary>Salva os apps marcados e, se estiver ao vivo, troca o som na hora.</summary>
+    private void ApplyMutedApps()
+    {
+        if (_apps.Count == 0 || AppServices.DemoMode) return;
+        var muted = MutedApp.Normalize(_apps.Where(a => a.Muted).Select(a => new MutedApp(a.Exe, a.Name)));
+        if (muted.Select(a => a.Exe).SequenceEqual(Settings.MutedApps.Select(a => a.Exe))) return;
+        Settings.MutedApps = muted;
+        AppServices.Settings.Save();
+        OnAudioSettingsChanged();
+        var names = muted.Select(a => a.Name).ToList();
+        _shell.Toast(names.Count == 0
+            ? "Os outros apps voltam a ir no som da transmissão."
+            : $"O som de {MutedApp.JoinNames(names)} fica fora da transmissão.", ToastKind.Success);
+    }
+
+    /// <summary>As opções do som do PC mudaram (aqui ou nas Configurações): vale na hora para a transmissão no ar.</summary>
+    public void OnAudioSettingsChanged()
+    {
+        _session?.ConfigureAudio(new SystemAudioOptions(Settings.SeparateAppAudio, Settings.MutedApps));
+        UpdateMutedApps();
+    }
+
+    /// <summary>"Fica fora da transmissão": o que foi pedido ou, ao vivo, o que está acontecendo de fato.</summary>
+    private void UpdateMutedApps()
+    {
+        var names = Settings.MutedApps.Select(a => a.Name).ToList();
+        var live = _session?.AudioSeparated;
+        if (live == true)
+            MutedAppsText.Text = $"Agora vai o som do PC {_session!.AudioSeparation}.";
+        else if (live == false)
+            MutedAppsText.Text = Settings.SeparateAppAudio
+                ? "Agora vai todo o som do PC, com a voz da rede junto: o Windows não deixou separar o som por app."
+                : "Agora vai todo o som do PC, com a voz da rede junto (separar o som por app está desligado nas Configurações).";
+        else if (!Settings.SeparateAppAudio)
+            MutedAppsText.Text = "Nada: separar o som por app está desligado nas Configurações, então vai todo o som do PC, até a voz da rede.";
+        else
+            MutedAppsText.Text = names.Count == 0
+                ? "A voz da rede e os sons do ScreenFlow. Dá para tirar outros apps também."
+                : $"A voz da rede, os sons do ScreenFlow, {MutedApp.JoinNames(names)}.";
+    }
+
+    private static ImageSource? ToImage(byte[]? png)
+    {
+        if (png is null) return null;
+        try
+        {
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = new System.IO.MemoryStream(png);
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch (Exception exception) when (exception is NotSupportedException or InvalidOperationException or System.IO.IOException) { return null; }
+    }
+
+    /// <summary>Um app na lista de "Tirar o som de apps".</summary>
+    public sealed class AppChoice(string exe, string name, string detail, ImageSource? icon, bool muted) : INotifyPropertyChanged
+    {
+        private bool _muted = muted;
+
+        public string Exe { get; } = exe;
+        public string Name { get; } = name;
+        public string Detail { get; } = detail;
+        public ImageSource? Icon { get; } = icon;
+        public string Initial => Name.Length > 0 ? char.ToUpperInvariant(Name[0]).ToString() : "?";
+
+        public bool Muted
+        {
+            get => _muted;
+            set
+            {
+                if (_muted == value) return;
+                _muted = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Muted)));
+            }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+    }
+
     // ───────────────────────── Capturas de tela (CI) ─────────────────────────
 
     /// <summary>Mostra a tela "ao vivo" com dados de exemplo, sem abrir portas nem capturar nada.</summary>
@@ -512,20 +713,23 @@ public partial class TransmitPage : UserControl, IShellPage
     {
         LoadFromSettings();
         ModeScreen.IsChecked = true;
+        CameraWithScreenToggle.IsChecked = true;
         var meter = DemoData.LiveMeter();
         Spectrum.Source = () => meter;
         ModeGrid.IsEnabled = OptionsPanel.IsEnabled = AccessPanel.IsEnabled = false;
         StartButton.Visibility = Visibility.Collapsed;
         StopButton.Visibility = Visibility.Visible;
         SetBadge("Ao vivo", "Pink", "PinkSoft");
-        StateText.Text = $"Transmitindo em {DemoData.Radmin.Address}. Quem quiser assistir só precisa digitar esse IP.";
+        StateText.Text = $"Transmitindo tela, câmera e áudio em {DemoData.Radmin.Address}. Quem quiser assistir só precisa digitar esse IP.";
         StatViewers.Text = "3";
         StatFps.Text = "165";
         StatBitrate.Text = "38.5";
         StatUpload.Text = "117";
-        StatDetails.Text = "HEVC · hevc_nvenc · Windows.Graphics.Capture · alvo 1440p 165 FPS 40 Mbps · rede estável · vídeo e upload em Mbps";
-        AudioDescription.Text = "Alto-falantes (Realtek) · Opus 160 kbps";
+        StatDetails.Text = "HEVC · hevc_nvenc · Windows.Graphics.Capture · alvo 1440p 165 FPS 40 Mbps · rede estável · vídeo e upload em Mbps"
+                           + "\nCâmera junto: 1280×720 · 30 FPS · 2.1 Mbps";
+        AudioDescription.Text = "Alto-falantes (Realtek) · Opus 160 kbps · sem Spotify, Discord e a voz da rede";
         AudioState.Text = "Tocando";
+        MutedAppsText.Text = "Agora vai o som do PC sem Spotify, Discord e a voz da rede.";
         _viewerRows.Clear();
         foreach (var info in DemoData.Audience())
         {
@@ -536,6 +740,23 @@ public partial class TransmitPage : UserControl, IShellPage
         NoViewers.Visibility = Visibility.Collapsed;
         ViewerCount.Text = "3 pessoas";
         UpdateAudioCard();
+    }
+
+    /// <summary>Abre "Tirar o som de apps" com apps de exemplo (para a captura de tela).</summary>
+    internal void ShowAppsDemo()
+    {
+        _apps.Clear();
+        foreach (var app in new[]
+                 {
+                     new AppChoice("spotify.exe", "Spotify", "Tocando som agora", null, true),
+                     new AppChoice("discord.exe", "Discord", "Aberto", null, true),
+                     new AppChoice("forzahorizon5.exe", "Forza Horizon 5", "Tocando som agora", null, false),
+                     new AppChoice("chrome.exe", "Google Chrome", "Tocando som agora", null, false),
+                     new AppChoice("steamwebhelper.exe", "Steam", "Aberto", null, false),
+                 })
+            _apps.Add(app);
+        AppsStatus.Visibility = Visibility.Collapsed;
+        AppsPopup.IsOpen = true;
     }
 
     public sealed class PendingApproval(Guid id, string name, string address)
