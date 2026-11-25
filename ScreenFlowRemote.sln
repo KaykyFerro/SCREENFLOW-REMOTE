@@ -8,7 +8,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScreenFlow.Core", "src\Scre
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScreenFlow.Infrastructure", "src\ScreenFlow.Infrastructure\ScreenFlow.Infrastructure.csproj", "{B8C8E9A1-2A90-4E4D-9E31-1A2B3C4D5E03}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF-4B-00C04F79EFBC}") = "ScreenFlow.Tests", "tests\ScreenFlow.Tests\ScreenFlow.Tests.csproj", "{B8C8E9A1-2A90-4E4D-9E31-1A2B3C4D5E04}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ScreenFlow.Tests", "tests\ScreenFlow.Tests\ScreenFlow.Tests.csproj", "{B8C8E9A1-2A90-4E4D-9E31-1A2B3C4D5E04}"
 EndProject
 Global
  GlobalSection(SolutionConfigurationPlatforms) = preSolution
