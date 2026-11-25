@@ -38,6 +38,8 @@ public sealed class AppSettings
     public int CameraFps { get; set; } = 30;
     /// <summary>Bitrate do Opus no modo festa de música (só áudio, qualidade de música).</summary>
     public int MusicBitrateKbps { get; set; } = 256;
+    /// <summary>No modo tela, manda a câmera junto (quem assiste vê num quadrinho por cima da tela).</summary>
+    public bool CameraWithScreen { get; set; }
 
     // Segurança
     public string? Pin { get; set; }
@@ -53,6 +55,24 @@ public sealed class AppSettings
     public bool ShowStatsOverlay { get; set; }
     /// <summary>Desenha o vídeo direto na GPU (D3D11). Desligado, usa o caminho antigo pela CPU.</summary>
     public bool GpuVideoRenderer { get; set; } = true;
+
+    // Bandeja
+    /// <summary>Fechar e minimizar levam o app para a bandeja (perto do relógio) em vez de fechar.</summary>
+    public bool MinimizeToTray { get; set; } = true;
+    public bool TrayHintShown { get; set; }
+
+    // Sala da rede: voz e chat com todo mundo que está na mesma rede
+    /// <summary>Identifica este PC na sala da rede. Gerado na primeira vez que o app abre.</summary>
+    public string? InstanceId { get; set; }
+    /// <summary>Microfone da voz (id do Windows). Null usa o microfone padrão.</summary>
+    public string? MicrophoneId { get; set; }
+    public double VoiceVolume { get; set; } = 1.0;
+    public bool VoiceMuted { get; set; }
+    public bool VoiceSounds { get; set; } = true;
+    /// <summary>Sensibilidade do microfone: 0 capta só voz alta, 1 capta tudo.</summary>
+    public double VoiceSensitivity { get; set; } = 0.6;
+    /// <summary>IPs adicionados à mão na sala (para redes em que o aviso automático não chega).</summary>
+    public List<string> RoomPeers { get; set; } = [];
 
     // Configuração automática e atualização
     public bool AutoConfigured { get; set; }
@@ -91,6 +111,11 @@ public sealed class AppSettings
         if (!Security.SessionCrypto.IsValidPin(Pin)) Pin = null;
         if (string.IsNullOrWhiteSpace(DeviceName)) DeviceName = Environment.MachineName;
         RecentHosts ??= [];
+        if (InstanceId is null || !Guid.TryParseExact(InstanceId, "N", out _)) InstanceId = Guid.NewGuid().ToString("N");
+        if (string.IsNullOrWhiteSpace(MicrophoneId)) MicrophoneId = null;
+        VoiceVolume = Math.Clamp(VoiceVolume, 0, 1.5);
+        VoiceSensitivity = Math.Clamp(VoiceSensitivity, 0, 1);
+        RoomPeers = (RoomPeers ?? []).Select(p => p.Trim()).Where(p => p.Length is > 0 and <= 64).Distinct(StringComparer.OrdinalIgnoreCase).Take(16).ToList();
     }
 
     private static int ValidPort(int port, int fallback) => port is >= 1024 and <= 65535 ? port : fallback;

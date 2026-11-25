@@ -26,4 +26,23 @@ public static class StreamModes
     };
 
     public static bool HasVideo(StreamMode mode) => mode != StreamMode.AudioOnly;
+
+    /// <summary>
+    /// O que está indo para quem assiste, em uma frase curta: "tela, câmera e áudio", "câmera e áudio", "só o áudio
+    /// (festa de música)". Usado na dica do ícone da bandeja e na lista de pessoas da rede.
+    /// </summary>
+    public static string Summary(StreamMode mode, bool audio, bool cameraWithScreen = false)
+    {
+        if (mode == StreamMode.AudioOnly) return "só o áudio (festa de música)";
+        var parts = new List<string>(3);
+        if (mode == StreamMode.Screen) parts.Add("tela");
+        if (mode == StreamMode.Camera || cameraWithScreen) parts.Add("câmera");
+        if (audio) parts.Add("áudio");
+        return parts.Count switch
+        {
+            1 => $"só a {parts[0]}",
+            2 => $"{parts[0]} e {parts[1]}",
+            _ => $"{parts[0]}, {parts[1]} e {parts[2]}",
+        };
+    }
 }

@@ -61,6 +61,12 @@ public partial class TransmitPage : UserControl, IShellPage
     /// <summary>Pessoas assistindo agora.</summary>
     public int Viewers => _viewerRows.Count;
 
+    /// <summary>O que está indo para quem assiste agora ("tela, câmera e áudio"). Vazio quando parado.</summary>
+    public string LiveSummary => _session is null ? string.Empty : StreamModes.Summary(_session.Mode, _session.AudioEnabled, _session.HasCameraOverlay);
+
+    /// <summary>Modo da transmissão no ar (null quando parado).</summary>
+    public StreamMode? LiveMode => _session?.Mode;
+
     private AppSettings Settings => AppServices.Settings.Current;
 
     private StreamMode SelectedMode => ModeCamera.IsChecked == true ? StreamMode.Camera : ModeParty.IsChecked == true ? StreamMode.AudioOnly : StreamMode.Screen;

@@ -239,7 +239,9 @@
                             </Grid>
                             <TextBlock Style="{StaticResource Label}" Text="PIN padrão (opcional)"/>
                             <TextBox x:Name="PinBox" MaxLength="32" Tag="Sem PIN" Margin="{DynamicResource FieldGap}"/>
-                            <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de mostrar a tela"/>
+                            <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de mostrar a tela" Margin="0,0,0,14"/>
+                            <CheckBox x:Name="TrayToggle" Style="{StaticResource Switch}"
+                                      Content="Fechar e minimizar levam o ScreenFlow para a bandeja, perto do relógio (a transmissão, a voz e o chat continuam)"/>
                         </StackPanel>
                     </Border>
 

@@ -39,6 +39,10 @@ public partial class MainWindow : Window
     private bool _compact;
     private bool? _narrow;
     private bool _cleanedUp;
+    private TrayIcon? _tray;
+    private bool _exitRequested;
+    private WindowState _restoreState = WindowState.Normal;
+    private Action? _balloonAction;
 
     public MainWindow()
     {
@@ -74,6 +78,11 @@ public partial class MainWindow : Window
             SetCompact(narrow);
         };
         Loaded += async (_, _) => await OnLoadedAsync();
+        Closed += (_, _) =>
+        {
+            _tray?.Dispose();
+            _tray = null;
+        };
         Navigate(OverviewPage);
     }
 
@@ -264,6 +273,7 @@ public partial class MainWindow : Window
         RefreshNetworkStatus();
         _networkTimer.Start();
         if (AppServices.DemoMode) return;
+        SetupTray();
 
         var settings = AppServices.Settings.Current;
         _ = CheckFirewallAsync();
@@ -406,6 +416,7 @@ public partial class MainWindow : Window
         StatusDot.SetResourceReference(Shape.FillProperty, foreground);
         StatusGlow.Color = glow;
         SetNavBadge(NavTransmit, IsTransmitting);
+        UpdateTray();
     }
 
     // ───────────────────────── Janela ─────────────────────────
@@ -436,7 +447,11 @@ public partial class MainWindow : Window
 
     private void UpdateThemeButton() => ThemeButton.Content = ThemeManager.Current == AppTheme.Dark ? "" : "";
 
-    private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
+    private void Minimize_Click(object sender, RoutedEventArgs e)
+    {
+        if (TrayEnabled) HideToTray();
+        else WindowState = WindowState.Minimized;
+    }
 
     private void Maximize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
 
@@ -448,6 +463,169 @@ public partial class MainWindow : Window
         Root.Margin = WindowState == WindowState.Maximized ? SystemParameters.WindowResizeBorderThickness : new Thickness(0);
         MaximizeButton.Content = WindowState == WindowState.Maximized ? "" : "";
         MaximizeButton.ToolTip = WindowState == WindowState.Maximized ? "Restaurar" : "Maximizar";
+        // Minimizada pela barra de tarefas (ou Win+↓): vai para a bandeja em vez de ficar na barra.
+        if (WindowState == WindowState.Minimized && TrayEnabled && IsVisible) HideToTray();
+    }
+
+    // ───────────────────────── Bandeja ─────────────────────────
+
+    /// <summary>Fechar e minimizar mandam para a bandeja (configurável), desde que o ícone esteja lá.</summary>
+    private bool TrayEnabled => _tray is { IsVisible: true } && AppServices.Settings.Current.MinimizeToTray;
+
+    private void SetupTray()
+    {
+        try
+        {
+            _tray = new TrayIcon();
+            _tray.Activated += () => ShowFromTray();
+            _tray.MenuRequested += () => _tray?.ShowMenu(BuildTrayMenu());
+            _tray.BalloonClicked += () =>
+            {
+                var action = _balloonAction;
+                _balloonAction = null;
+                ShowFromTray();
+                action?.Invoke();
+            };
+            UpdateTray();
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"Ícone da bandeja indisponível: {exception.Message}");
+            _tray?.Dispose();
+            _tray = null;
+        }
+    }
+
+    /// <summary>Some da tela e da barra de tarefas; o app continua rodando no ícone perto do relógio.</summary>
+    public void HideToTray()
+    {
+        if (_tray is null)
+        {
+            WindowState = WindowState.Minimized;
+            return;
+        }
+        if (WindowState != WindowState.Minimized) _restoreState = WindowState;
+        NotificationsPopup.IsOpen = false;
+        Hide();
+        var settings = AppServices.Settings.Current;
+        if (!settings.TrayHintShown)
+        {
+            settings.TrayHintShown = true;
+            AppServices.Settings.Save();
+            _tray.ShowBalloon("O ScreenFlow continua aberto aqui",
+                "Clique no ícone para voltar. Para fechar de vez, clique com o botão direito no ícone e escolha Sair do ScreenFlow.", quiet: true);
+        }
+    }
+
+    /// <summary>Volta da bandeja (ou traz para a frente), opcionalmente já numa página.</summary>
+    public void ShowFromTray(UserControl? page = null)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => ShowFromTray(page));
+            return;
+        }
+        if (_cleanedUp) return;
+        Show();
+        if (WindowState == WindowState.Minimized) WindowState = _restoreState;
+        Activate();
+        // Garante que a janela venha para a frente mesmo quando outro app está em primeiro plano.
+        Topmost = true;
+        Topmost = false;
+        Focus();
+        if (page is not null) Navigate(page);
+    }
+
+    /// <summary>Notificação do Windows pelo ícone da bandeja; o clique nela abre o app e roda a ação.</summary>
+    public void TrayNotify(string title, string message, Action? onClick = null, bool quiet = false)
+    {
+        if (_tray is null) return;
+        _balloonAction = onClick;
+        _tray.ShowBalloon(title, message, quiet);
+    }
+
+    /// <summary>true quando a janela está escondida na bandeja ou minimizada (quem usa decide se avisa pelo Windows).</summary>
+    public bool IsInBackground => !IsVisible || WindowState == WindowState.Minimized || !IsActive;
+
+    /// <summary>Fecha de verdade: para tudo e sai (menu da bandeja ou fechar com a bandeja desligada).</summary>
+    public void ExitApplication()
+    {
+        _exitRequested = true;
+        Close();
+    }
+
+    /// <summary>O Windows está desligando ou o usuário está saindo da conta: não esconde na bandeja.</summary>
+    public void PrepareForSessionEnd() => _exitRequested = true;
+
+    /// <summary>Dica e bolinha do ícone: ao vivo (o que está indo), assistindo, voz da rede.</summary>
+    public void UpdateTray()
+    {
+        if (_tray is null) return;
+        var lines = new List<string>(4);
+        TrayBadge badge;
+        if (IsTransmitting)
+        {
+            badge = TrayBadge.Live;
+            lines.Add("ScreenFlow · AO VIVO");
+            lines.Add($"Transmitindo {TransmitPage.LiveSummary}");
+            lines.Add(TransmitPage.Viewers switch { 0 => "Ninguém assistindo ainda", 1 => "1 pessoa assistindo", var n => $"{n} pessoas assistindo" });
+        }
+        else if (IsWatching)
+        {
+            badge = TrayBadge.Watching;
+            lines.Add("ScreenFlow · assistindo");
+            if (WatchPage.WatchingSummary is { Length: > 0 } watching) lines.Add(watching);
+        }
+        else
+        {
+            badge = TrayBadge.None;
+            lines.Add(_radmin is null ? "ScreenFlow · sem Radmin" : "ScreenFlow · disponível");
+            lines.Add("Não está transmitindo");
+        }
+        if (VoiceTrayLine() is { } voice)
+        {
+            lines.Add(voice);
+            if (badge == TrayBadge.None) badge = TrayBadge.Voice;
+        }
+        _tray.Set(string.Join("\n", lines), badge);
+    }
+
+    private ContextMenu BuildTrayMenu()
+    {
+        var menu = new ContextMenu();
+        var header = new StackPanel();
+        header.Children.Add(new TextBlock { Text = "ScreenFlow", FontWeight = FontWeights.Bold, FontSize = 14.5 });
+        var status = IsTransmitting
+            ? $"Ao vivo: {TransmitPage.LiveSummary}"
+            : IsWatching ? "Assistindo uma transmissão" : "Não está transmitindo";
+        var line = new TextBlock { Text = status, FontSize = 12.5, Margin = new Thickness(0, 2, 0, 0) };
+        line.SetResourceReference(TextBlock.ForegroundProperty, IsTransmitting ? "Pink" : "TextMuted");
+        header.Children.Add(line);
+        menu.Items.Add(new MenuItem { Header = header, Style = (Style)FindResource("MenuHeader") });
+        menu.Items.Add(new Separator());
+
+        menu.Items.Add(TrayItem("Abrir o ScreenFlow", "\uE8A7", () => ShowFromTray()));
+        if (IsTransmitting) menu.Items.Add(TrayItem("Encerrar a transmissão", "\uE71A", () => _ = TransmitPage.StopAsync()));
+        else menu.Items.Add(TrayItem("Transmitir…", "\uE714", () => ShowFromTray(TransmitPage)));
+        AddVoiceTrayItems(menu);
+        menu.Items.Add(new Separator());
+        var exit = TrayItem("Sair do ScreenFlow", "\uE7E8", ExitApplication);
+        exit.SetResourceReference(ForegroundProperty, "Danger");
+        menu.Items.Add(exit);
+        return menu;
+    }
+
+    /// <summary>Linha da voz da rede na dica da bandeja (null fora da voz).</summary>
+    private string? VoiceTrayLine() => null;
+
+    private void AddVoiceTrayItems(ContextMenu menu) { }
+
+    private static MenuItem TrayItem(string text, string glyph, Action action, bool? isChecked = null)
+    {
+        var item = new MenuItem { Header = text, Tag = glyph };
+        if (isChecked is not null) item.IsChecked = isChecked.Value;
+        item.Click += (_, _) => action();
+        return item;
     }
 
     public async Task StopAllAsync()
@@ -461,6 +639,12 @@ public partial class MainWindow : Window
     {
         if (_cleanedUp) return;
         e.Cancel = true;
+        if (!_exitRequested && TrayEnabled)
+        {
+            // Fechar pelo X (ou Alt+F4) só esconde: a transmissão, a voz e o chat continuam.
+            HideToTray();
+            return;
+        }
         IsEnabled = false;
         _networkTimer.Stop();
         _updateTimer.Stop();

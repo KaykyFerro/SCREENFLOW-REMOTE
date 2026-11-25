@@ -40,7 +40,11 @@ public sealed record HostOptions(
     double UploadMbps,
     StreamMode Mode = StreamMode.Screen,
     int MusicBitrateKbps = 256,
-    Func<AudioProfile, IAudioSource>? AudioSourceFactory = null);
+    Func<AudioProfile, IAudioSource>? AudioSourceFactory = null,
+    CameraOverlay? OverlayCamera = null);
+
+/// <summary>Câmera junto com a tela: vai numa segunda faixa de vídeo e aparece num quadrinho por cima da tela.</summary>
+public sealed record CameraOverlay(string DeviceId, string Name, int Width, int Height, int Fps);
 
 public enum ViewerState { Authenticating, WaitingApproval, Streaming }
 
@@ -102,6 +106,9 @@ public sealed class HostSession : IAsyncDisposable
     public StreamMode Mode => _options.Mode;
     public bool HasVideo => StreamModes.HasVideo(_options.Mode);
     public bool AudioEnabled => _options.AudioEnabled || _options.Mode == StreamMode.AudioOnly;
+
+    /// <summary>A câmera vai junto com a tela (modo tela com "câmera junto" ligado).</summary>
+    public bool HasCameraOverlay => _options.Mode == StreamMode.Screen && _options.OverlayCamera is not null;
     public AudioProfile AudioProfile => _audioProfile;
 
     /// <summary>Nível e espectro do áudio capturado (null sem áudio).</summary>

@@ -72,7 +72,8 @@ public sealed record StreamConfigMessage(
     string EncoderName,
     string Reason,
     bool VideoEnabled = true,
-    StreamMode Mode = StreamMode.Screen) : ControlMessage;
+    StreamMode Mode = StreamMode.Screen,
+    bool CameraOverlay = false) : ControlMessage;
 
 public sealed record PingMessage(long ViewerTimeUs) : ControlMessage;
 

@@ -57,6 +57,7 @@ public partial class SettingsPage : UserControl, IShellPage
         NameBox.Text = s.DeviceName;
         PinBox.Text = s.Pin ?? string.Empty;
         ApproveToggle.IsChecked = s.ApproveEachViewer;
+        TrayToggle.IsChecked = s.MinimizeToTray;
         ThemeCombo.SelectValue(ThemeManager.Current);
         SavedText.Text = string.Empty;
         AutoResult.Text = s.LastAutoConfig is { } when
@@ -114,6 +115,7 @@ public partial class SettingsPage : UserControl, IShellPage
         s.DeviceName = NameBox.Text.Trim();
         s.Pin = pinText.Length == 0 ? null : pinText;
         s.ApproveEachViewer = ApproveToggle.IsChecked == true;
+        s.MinimizeToTray = TrayToggle.IsChecked == true;
         var theme = ThemeCombo.Value<AppTheme>();
         s.Theme = theme;
 

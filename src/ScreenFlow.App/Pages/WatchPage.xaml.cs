@@ -50,6 +50,21 @@ public partial class WatchPage : UserControl, IShellPage
     /// <summary>Tem um player aberto (conectando, assistindo ou tentando reconectar).</summary>
     public bool IsWatching => _player is not null;
 
+    /// <summary>Quem e o que você está assistindo, para a dica do ícone da bandeja. Vazio sem player.</summary>
+    public string WatchingSummary
+    {
+        get
+        {
+            if (_player is null) return string.Empty;
+            var session = _player.Session;
+            var name = session.HostName.Length > 0 ? session.HostName : _currentHost ?? string.Empty;
+            if (session.State != ConnectionState.Connected) return $"Conectando em {name}";
+            var config = session.Config;
+            var mode = config?.Mode ?? _player.ExpectedMode ?? StreamMode.Screen;
+            return $"{name}: {StreamModes.Summary(mode, config?.AudioEnabled ?? true, config?.CameraOverlay ?? false)}";
+        }
+    }
+
     private AppSettings Settings => AppServices.Settings.Current;
 
     public void OnShown()
