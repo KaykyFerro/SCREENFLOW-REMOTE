@@ -115,6 +115,7 @@ public partial class MainWindow : Window
             _client = new LanScreenClient();
             _client.FrameReceived += OnFrameReceived;
             _client.StatusChanged += SetStatus;
+            _client.Disconnected += OnClientDisconnected;
             ConnectButton.IsEnabled = false;
             SetStatus("Conectando e autenticando...");
             await _client.ConnectAsync(HostIpBox.Text, SessionCodeBox.Text);
@@ -129,6 +130,12 @@ public partial class MainWindow : Window
             DisconnectButton.IsEnabled = false;
             MessageBox.Show(this, exception.Message, "Falha na conexão", MessageBoxButton.OK, MessageBoxImage.Error);
         }
+    }
+
+    private void OnClientDisconnected()
+    {
+        if (Dispatcher.HasShutdownStarted) return;
+        _ = Dispatcher.BeginInvoke(new Action(async () => await DisconnectClientAsync()));
     }
 
     private void OnFrameReceived(byte[] jpeg)
@@ -165,11 +172,9 @@ public partial class MainWindow : Window
 
     private async Task DisconnectClientAsync()
     {
-        if (_client is not null)
-        {
-            await _client.DisposeAsync();
-            _client = null;
-        }
+        var client = _client;
+        _client = null;
+        if (client is not null) await client.DisposeAsync();
         RemoteImage.Source = null;
         ViewerPlaceholder.Visibility = Visibility.Visible;
         ViewerResolutionText.Text = string.Empty;
