@@ -446,7 +446,11 @@ public enum VoiceCue { Join, Leave, Mute, Unmute }
 internal sealed class VoiceOutput : IDisposable
 {
     private readonly object _gate = new();
+    // As vozes passam por um ganho próprio (zerado ao ensurdecer); os avisos entram direto no mix final, então o som de
+    // ensurdecer ainda toca.
+    private readonly MixingSampleProvider _voices = new(WaveFormat.CreateIeeeFloatWaveFormat(VoiceFormat.SampleRate, AudioProfile.Channels)) { ReadFully = true };
     private readonly MixingSampleProvider _mixer = new(WaveFormat.CreateIeeeFloatWaveFormat(VoiceFormat.SampleRate, AudioProfile.Channels)) { ReadFully = true };
+    private readonly VolumeSampleProvider _voiceGain;
     private readonly VolumeSampleProvider _volume;
     private readonly DeviceWatcher _watcher;
     private WasapiOut? _output;
@@ -456,6 +460,8 @@ internal sealed class VoiceOutput : IDisposable
 
     public VoiceOutput(float volume)
     {
+        _voiceGain = new VolumeSampleProvider(_voices);
+        _mixer.AddMixerInput(_voiceGain);
         _volume = new VolumeSampleProvider(_mixer);
         Volume = volume;
         Open();
@@ -481,7 +487,7 @@ internal sealed class VoiceOutput : IDisposable
         }
     }
 
-    /// <summary>Fones desligados (ensurdecer): não toca nada, nem os avisos.</summary>
+    /// <summary>Fones desligados (ensurdecer): as vozes param de tocar; só os avisos continuam.</summary>
     public bool Deafened
     {
         get => _deafened;
@@ -492,7 +498,11 @@ internal sealed class VoiceOutput : IDisposable
         }
     }
 
-    private void Apply() => _volume.Volume = _deafened ? 0f : _level;
+    private void Apply()
+    {
+        _voiceGain.Volume = _deafened ? 0f : 1f;
+        _volume.Volume = _level;
+    }
 
     private void Open()
     {
@@ -514,17 +524,13 @@ internal sealed class VoiceOutput : IDisposable
     public JitterBuffer AddStream()
     {
         var buffer = new JitterBuffer(60, 240);
-        _mixer.AddMixerInput(buffer);
+        _voices.AddMixerInput(buffer);
         return buffer;
     }
 
-    public void RemoveStream(JitterBuffer buffer) => _mixer.RemoveMixerInput(buffer);
+    public void RemoveStream(JitterBuffer buffer) => _voices.RemoveMixerInput(buffer);
 
-    public void Play(VoiceCue cue)
-    {
-        if (_deafened) return;
-        _mixer.AddMixerInput(new CueSampleProvider(cue));
-    }
+    public void Play(VoiceCue cue) => _mixer.AddMixerInput(new CueSampleProvider(cue));
 
     public void Dispose()
     {
@@ -535,6 +541,7 @@ internal sealed class VoiceOutput : IDisposable
             _disposed = true;
             Close();
         }
+        _voices.RemoveAllMixerInputs();
         _mixer.RemoveAllMixerInputs();
     }
 }

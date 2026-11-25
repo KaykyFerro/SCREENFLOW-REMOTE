@@ -1,0 +1,248 @@
+<UserControl x:Class="ScreenFlow.App.Pages.ChatPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- O chat ocupa a altura toda da janela: só a conversa rola, a caixa de escrever fica sempre embaixo. -->
+    <Grid Margin="{DynamicResource PagePadding}" MaxWidth="{DynamicResource ContentMaxWidth}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+        <StackPanel>
+            <TextBlock Style="{StaticResource PageTitle}" Text="Chat da rede" Margin="0,22,0,6"/>
+            <TextBlock Style="{StaticResource Subtitle}" Margin="0,0,0,22"
+                       Text="Converse com todo mundo que está com o ScreenFlow aberto na sua rede do Radmin. Para falar por voz, use o painel da voz no menu ao lado."/>
+        </StackPanel>
+
+        <Grid x:Name="ContentGrid" Grid.Row="1">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="20"/>
+                <ColumnDefinition x:Name="PeopleColumn" Width="320"/>
+            </Grid.ColumnDefinitions>
+
+            <!-- Conversa -->
+            <Border Style="{StaticResource Card}" Margin="0" Padding="0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <DockPanel Margin="22,16,18,14">
+                        <Border Style="{StaticResource IconTileCyan}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8BD;"/>
+                        </Border>
+                        <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                            <TextBlock Text="Todo mundo da rede" FontSize="16" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="ConversationInfo" Style="{StaticResource Caption}" Margin="0,2,0,0" Text="As mensagens ficam só enquanto o ScreenFlow está aberto."/>
+                        </StackPanel>
+                    </DockPanel>
+                    <Border Style="{StaticResource DividerLine}" VerticalAlignment="Bottom"/>
+
+                    <ScrollViewer x:Name="MessageScroll" Grid.Row="1" Style="{StaticResource PageScroll}" PreviewMouseWheel="MessageScroll_PreviewMouseWheel"
+                                  ScrollChanged="MessageScroll_ScrollChanged">
+                        <ItemsControl x:Name="MessageList" Margin="0,8,0,10" Focusable="False">
+                            <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid x:Name="Row" Margin="0,0,0,0">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="70"/>
+                                            <ColumnDefinition Width="*"/>
+                                        </Grid.ColumnDefinitions>
+                                        <Border x:Name="Hover" Grid.ColumnSpan="2" Background="Transparent"/>
+                                        <!-- Foto (só na primeira de um grupo); nas seguintes, a hora aparece ao passar o mouse -->
+                                        <Grid x:Name="AvatarBox" Width="38" Height="38" VerticalAlignment="Top" HorizontalAlignment="Right" Margin="0,2,14,0">
+                                            <Ellipse Fill="{Binding Avatar.Background}"/>
+                                            <TextBlock Text="{Binding Initial}" Foreground="{Binding Avatar.Foreground}" FontSize="15" FontWeight="Bold"
+                                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                        </Grid>
+                                        <TextBlock x:Name="SideTime" Text="{Binding TimeText}" Style="{StaticResource Caption}" FontSize="11" HorizontalAlignment="Right"
+                                                   VerticalAlignment="Top" Margin="0,3,14,0" Visibility="Hidden"/>
+                                        <StackPanel Grid.Column="1" Margin="0,0,24,0">
+                                            <StackPanel x:Name="Header" Orientation="Horizontal" Margin="0,0,0,1">
+                                                <TextBlock x:Name="AuthorName" Text="{Binding AuthorText}" FontWeight="SemiBold" FontSize="14"/>
+                                                <TextBlock Text="{Binding TimeText}" ToolTip="{Binding FullTimeText}" Style="{StaticResource Caption}" Margin="9,1,0,0" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                            <TextBox Style="{StaticResource SelectableText}" Text="{Binding Text, Mode=OneWay}" Margin="0,0,0,2"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <DataTemplate.Triggers>
+                                        <DataTrigger Binding="{Binding ShowHeader}" Value="True">
+                                            <Setter TargetName="Row" Property="Margin" Value="0,14,0,0"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding ShowHeader}" Value="False">
+                                            <Setter TargetName="AvatarBox" Property="Visibility" Value="Collapsed"/>
+                                            <Setter TargetName="Header" Property="Visibility" Value="Collapsed"/>
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding IsMine}" Value="True">
+                                            <Setter TargetName="AuthorName" Property="Foreground" Value="{DynamicResource AccentText}"/>
+                                        </DataTrigger>
+                                        <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
+                                            <Setter TargetName="Hover" Property="Background" Value="{DynamicResource SurfaceHover}"/>
+                                        </Trigger>
+                                        <MultiDataTrigger>
+                                            <MultiDataTrigger.Conditions>
+                                                <Condition Binding="{Binding ShowHeader}" Value="False"/>
+                                                <Condition Binding="{Binding IsMouseOver, ElementName=Row}" Value="True"/>
+                                            </MultiDataTrigger.Conditions>
+                                            <Setter TargetName="SideTime" Property="Visibility" Value="Visible"/>
+                                        </MultiDataTrigger>
+                                    </DataTemplate.Triggers>
+                                </DataTemplate>
+                            </ItemsControl.ItemTemplate>
+                        </ItemsControl>
+                    </ScrollViewer>
+
+                    <!-- Conversa vazia -->
+                    <StackPanel x:Name="NoMessages" Grid.Row="1" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24">
+                        <Border Style="{StaticResource IconTileCyan}" HorizontalAlignment="Center" Width="56" Height="56" CornerRadius="16" TextElement.FontSize="24">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8F2;"/>
+                        </Border>
+                        <TextBlock x:Name="EmptyTitle" Text="Ninguém escreveu nada ainda" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,16,0,4"/>
+                        <TextBlock x:Name="EmptyText" Style="{StaticResource Muted}" TextAlignment="Center" MaxWidth="380" HorizontalAlignment="Center"
+                                   Text="Mande um oi: a mensagem vai para todo mundo que está com o ScreenFlow aberto na sua rede."/>
+                    </StackPanel>
+
+                    <!-- Novas mensagens abaixo (quando você rolou para cima) -->
+                    <Button x:Name="JumpButton" Grid.Row="1" Style="{StaticResource ChipButton}" HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,12"
+                            Visibility="Collapsed" Click="Jump_Click" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource AccentBorder}">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE74B;" FontSize="11" Margin="0,0,8,0"/>
+                            <TextBlock Text="Mensagens novas"/>
+                        </StackPanel>
+                    </Button>
+
+                    <!-- Escrever -->
+                    <Border Grid.Row="2" BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Padding="18,14,18,12">
+                        <StackPanel>
+                            <DockPanel>
+                                <Button x:Name="SendButton" DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Width="48" MinHeight="46" Height="46" Padding="0"
+                                        Margin="10,0,0,0" VerticalAlignment="Bottom" ToolTip="Enviar (Enter)" Click="Send_Click">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE724;" FontSize="16"/>
+                                </Button>
+                                <TextBox x:Name="Composer" Tag="Escreva para todo mundo da rede…" MinHeight="46" MaxHeight="132" Padding="14,12" AcceptsReturn="True"
+                                         TextWrapping="Wrap" VerticalContentAlignment="Top" MaxLength="500" VerticalScrollBarVisibility="Auto"
+                                         PreviewKeyDown="Composer_PreviewKeyDown" TextChanged="Composer_TextChanged"/>
+                            </DockPanel>
+                            <DockPanel Margin="2,8,2,0">
+                                <TextBlock x:Name="CounterText" DockPanel.Dock="Right" Style="{StaticResource Caption}"/>
+                                <TextBlock x:Name="ComposerHint" Style="{StaticResource Caption}" Text="Enter envia · Shift+Enter pula linha"/>
+                            </DockPanel>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <!-- Quem está na rede -->
+            <Border Grid.Column="2" Style="{StaticResource Card}" Margin="0" Padding="0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <DockPanel Margin="20,18,18,14">
+                        <Border x:Name="OnlinePill" DockPanel.Dock="Right" Style="{StaticResource Pill}">
+                            <StackPanel Orientation="Horizontal">
+                                <Ellipse Width="7" Height="7" Fill="{DynamicResource Success}" Margin="0,0,7,0" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="OnlineText" Text="0 online"/>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock Text="Na rede" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                    </DockPanel>
+                    <Border Style="{StaticResource DividerLine}" VerticalAlignment="Bottom"/>
+
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}">
+                        <StackPanel Margin="10,10,10,6">
+                            <!-- Você -->
+                            <DockPanel Margin="8,6,8,10">
+                                <Grid Width="36" Height="36">
+                                    <Ellipse x:Name="SelfAvatar"/>
+                                    <TextBlock x:Name="SelfInitial" FontSize="14" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Grid>
+                                <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock x:Name="SelfName" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock x:Name="SelfStatus" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                                </StackPanel>
+                            </DockPanel>
+
+                            <ItemsControl x:Name="PeopleList" Focusable="False">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border x:Name="Row" CornerRadius="12" Padding="8,7" Margin="0,0,0,2" Background="Transparent">
+                                            <DockPanel>
+                                                <Grid Width="36" Height="36">
+                                                    <Ellipse Fill="{Binding Avatar.Background}"/>
+                                                    <TextBlock Text="{Binding Initial}" Foreground="{Binding Avatar.Foreground}" FontSize="14" FontWeight="Bold"
+                                                               HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    <!-- Bolinha de ao vivo / na voz -->
+                                                    <Border x:Name="StateDot" Width="13" Height="13" CornerRadius="6.5" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                                            Margin="0,0,-2,-2" BorderThickness="2.5" BorderBrush="{DynamicResource Surface}" Background="{DynamicResource Success}"/>
+                                                </Grid>
+                                                <Button x:Name="WatchButton" DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" MinHeight="32" Height="32" Padding="12,0"
+                                                        FontSize="12.5" Margin="8,0,0,0" VerticalAlignment="Center" Tag="{Binding}" Click="Watch_Click"
+                                                        Visibility="{Binding IsLive, Converter={StaticResource BoolToVisibility}}">
+                                                    <StackPanel Orientation="Horizontal">
+                                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE768;" FontSize="11" Margin="0,0,7,0"/>
+                                                        <TextBlock Text="{Binding ActionText}"/>
+                                                    </StackPanel>
+                                                </Button>
+                                                <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                                                    <TextBlock x:Name="Status" Text="{Binding StatusText}" ToolTip="{Binding StatusText}" Style="{StaticResource Caption}"
+                                                               TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                                                </StackPanel>
+                                            </DockPanel>
+                                        </Border>
+                                        <DataTemplate.Triggers>
+                                            <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="{DynamicResource SurfaceHover}"/>
+                                                <Setter TargetName="StateDot" Property="BorderBrush" Value="{DynamicResource SurfaceHover}"/>
+                                            </Trigger>
+                                            <DataTrigger Binding="{Binding IsLive}" Value="True">
+                                                <Setter TargetName="StateDot" Property="Background" Value="{DynamicResource Live}"/>
+                                                <Setter TargetName="Status" Property="Foreground" Value="{DynamicResource Pink}"/>
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <StackPanel x:Name="NoPeople" Margin="8,4,8,10">
+                                <TextBlock Style="{StaticResource Muted}" FontSize="13" LineHeight="19"
+                                           Text="Ninguém da rede apareceu ainda. Quem abrir o ScreenFlow 1.1 ou mais novo na mesma rede do Radmin aparece aqui sozinho."/>
+                            </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <!-- Adicionar pelo IP -->
+                    <Border Grid.Row="2" BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Padding="18,14,18,16">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource Caption}" Text="Não está vendo alguém? Adicione pelo IP do Radmin." Margin="0,0,0,8"/>
+                            <DockPanel>
+                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE8FA;" ToolTip="Adicionar" Margin="8,0,0,0"
+                                        BorderBrush="{DynamicResource BorderStrong}" Background="{DynamicResource SurfaceRaised}" Click="AddPeer_Click"/>
+                                <TextBox x:Name="PeerBox" Tag="26.x.x.x" FontFamily="{DynamicResource FontMono}" MinHeight="38" KeyDown="PeerBox_KeyDown"/>
+                            </DockPanel>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+        </Grid>
+
+        <!-- Sala desligada (porta ocupada) -->
+        <Border x:Name="ErrorPanel" Grid.Row="1" Style="{StaticResource Card}" Margin="0" Padding="28" VerticalAlignment="Top" Visibility="Collapsed"
+                BorderBrush="{DynamicResource AmberSoft}">
+            <DockPanel>
+                <Border Style="{StaticResource IconTileAmber}">
+                    <TextBlock Style="{StaticResource Icon}" Text="&#xE7BA;"/>
+                </Border>
+                <StackPanel Margin="18,0,0,0">
+                    <TextBlock Style="{StaticResource Heading}" Text="O chat da rede está desligado"/>
+                    <TextBlock x:Name="ErrorText" Style="{StaticResource Muted}" Margin="0,6,0,0"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+    </Grid>
+</UserControl>

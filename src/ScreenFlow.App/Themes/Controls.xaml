@@ -839,7 +839,7 @@
                             <RepeatButton Style="{StaticResource SliderFill}" Background="{DynamicResource AccentGradient}" Command="Slider.DecreaseLarge"/>
                         </Track.DecreaseRepeatButton>
                         <Track.IncreaseRepeatButton>
-                            <RepeatButton Style="{StaticResource SliderFill}" Background="#33FFFFFF" Command="Slider.IncreaseLarge"/>
+                            <RepeatButton Style="{StaticResource SliderFill}" Background="{DynamicResource BorderStrong}" Command="Slider.IncreaseLarge"/>
                         </Track.IncreaseRepeatButton>
                         <Track.Thumb>
                             <Thumb>
@@ -1012,6 +1012,181 @@
             <Setter.Value>
                 <ControlTemplate TargetType="ListBoxItem">
                     <ContentPresenter/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- ───────────────────────── Voz e chat da rede ───────────────────────── -->
+    <!-- Botão do painel da voz no menu lateral (entrar, chat) -->
+    <Style x:Key="VoiceButton" TargetType="Button">
+        <Setter Property="Foreground" Value="{DynamicResource TextMuted}"/>
+        <Setter Property="Background" Value="{DynamicResource SurfaceRaised}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource Border}"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Height" Value="36"/>
+        <Setter Property="Margin" Value="3,0"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Root" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="8,0">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource SurfaceHover}"/>
+                            <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.85"/>
+                        </Trigger>
+                        <Trigger Property="IsKeyboardFocused" Value="True">
+                            <Setter TargetName="Root" Property="BorderBrush" Value="{DynamicResource Accent}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.45"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Entrar na voz: verde, como o botão de entrar num canal -->
+    <Style x:Key="VoiceJoinButton" TargetType="Button" BasedOn="{StaticResource VoiceButton}">
+        <Setter Property="Foreground" Value="{DynamicResource OnAccent}"/>
+        <Setter Property="Background" Value="{DynamicResource AccentGradient}"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Root" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="10" Padding="8,0">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource AccentGradientHover}"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.85"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.45"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Sair da voz (telefone): fica vermelho ao passar o mouse -->
+    <Style x:Key="VoiceHangUpButton" TargetType="Button" BasedOn="{StaticResource VoiceButton}">
+        <Setter Property="FontFamily" Value="{DynamicResource FontIcons}"/>
+        <Setter Property="FontSize" Value="15"/>
+        <Setter Property="FontWeight" Value="Normal"/>
+        <Setter Property="Width" Value="34"/>
+        <Setter Property="Height" Value="34"/>
+        <Setter Property="Margin" Value="0"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderBrush" Value="Transparent"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Button">
+                    <Border x:Name="Root" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="10">
+                        <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource DangerSoft}"/>
+                            <Setter Property="Foreground" Value="{DynamicResource Danger}"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.85"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Microfone e fone: marcado = cortado (fica vermelho e ganha um risco por cima do ícone) -->
+    <Style x:Key="VoiceToggle" TargetType="ToggleButton">
+        <Setter Property="Foreground" Value="{DynamicResource TextMuted}"/>
+        <Setter Property="Background" Value="{DynamicResource SurfaceRaised}"/>
+        <Setter Property="BorderBrush" Value="{DynamicResource Border}"/>
+        <Setter Property="FontFamily" Value="{DynamicResource FontIcons}"/>
+        <Setter Property="FontSize" Value="16"/>
+        <Setter Property="Height" Value="36"/>
+        <Setter Property="Margin" Value="3,0"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ToggleButton">
+                    <Border x:Name="Root" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="1" CornerRadius="10">
+                        <Grid HorizontalAlignment="Center" VerticalAlignment="Center">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            <Path x:Name="Slash" Data="M2.5,2.5 L15.5,15.5" Width="18" Height="18" Stroke="{DynamicResource Danger}" StrokeThickness="2.2"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed"/>
+                        </Grid>
+                    </Border>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsMouseOver" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource SurfaceHover}"/>
+                            <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+                        </Trigger>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="Root" Property="Background" Value="{DynamicResource DangerSoft}"/>
+                            <Setter TargetName="Root" Property="BorderBrush" Value="{DynamicResource DangerSoft}"/>
+                            <Setter Property="Foreground" Value="{DynamicResource Danger}"/>
+                            <Setter TargetName="Slash" Property="Visibility" Value="Visible"/>
+                        </Trigger>
+                        <Trigger Property="IsPressed" Value="True">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.85"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter TargetName="Root" Property="Opacity" Value="0.45"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Contador de mensagens não lidas (bolinha rosa com número) -->
+    <Style x:Key="CountBadge" TargetType="Border">
+        <Setter Property="MinWidth" Value="18"/>
+        <Setter Property="Height" Value="18"/>
+        <Setter Property="CornerRadius" Value="9"/>
+        <Setter Property="Padding" Value="5,0"/>
+        <Setter Property="Background" Value="{DynamicResource LiveGradient}"/>
+        <Setter Property="IsHitTestVisible" Value="False"/>
+        <Setter Property="TextElement.Foreground" Value="#FFFFFF"/>
+        <Setter Property="TextElement.FontSize" Value="10.5"/>
+        <Setter Property="TextElement.FontWeight" Value="Bold"/>
+    </Style>
+
+    <!-- Texto de mensagem que dá para selecionar e copiar, sem cara de campo -->
+    <Style x:Key="SelectableText" TargetType="TextBox">
+        <Setter Property="IsReadOnly" Value="True"/>
+        <Setter Property="IsUndoEnabled" Value="False"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Padding" Value="0"/>
+        <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+        <Setter Property="FontSize" Value="14"/>
+        <Setter Property="TextWrapping" Value="Wrap"/>
+        <Setter Property="SelectionBrush" Value="{DynamicResource Accent}"/>
+        <Setter Property="CaretBrush" Value="Transparent"/>
+        <Setter Property="IsTabStop" Value="False"/>
+        <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="TextBox">
+                    <ScrollViewer x:Name="PART_ContentHost" Focusable="False" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled"/>
                 </ControlTemplate>
             </Setter.Value>
         </Setter>

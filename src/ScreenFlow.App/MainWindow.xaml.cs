@@ -17,6 +17,7 @@ using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Core.Updates;
 using ScreenFlow.Infrastructure.Network;
+using ScreenFlow.Infrastructure.Room;
 
 namespace ScreenFlow.App;
 
@@ -33,6 +34,7 @@ public partial class MainWindow : Window
     private MonitorPage? _monitor;
     private SettingsPage? _settings;
     private UpdatesPage? _updates;
+    private ChatPage? _chat;
     private NetworkAdapterInfo? _radmin;
     private bool _radminInstalled = true;
     private bool _navigating;
@@ -43,6 +45,8 @@ public partial class MainWindow : Window
     private bool _exitRequested;
     private WindowState _restoreState = WindowState.Normal;
     private Action? _balloonAction;
+    private DateTimeOffset _lastChatToast;
+    private DateTimeOffset _lastChatBalloon;
 
     public MainWindow()
     {
@@ -55,6 +59,21 @@ public partial class MainWindow : Window
         NoticeList.ItemsSource = Notifications.Items;
         Notifications.Changed += UpdateBell;
         UpdateBell();
+
+        // Voz e chat da rede
+        var room = AppServices.Room;
+        VoiceList.ItemsSource = room.VoiceMembers;
+        room.Changed += UpdateVoicePanel;
+        room.UnreadChanged += UpdateChatBadge;
+        room.MessageArrived += OnRoomMessage;
+        room.PersonWentLive += OnPersonWentLive;
+        room.IsChatInFront = () => Host.Content is Pages.ChatPage && IsVisible && IsActive && WindowState != WindowState.Minimized;
+        Activated += (_, _) =>
+        {
+            if (Host.Content is Pages.ChatPage) AppServices.Room.MarkRead();
+        };
+        UpdateVoicePanel();
+        UpdateChatBadge();
 
         AppServices.Updates.Found += OnUpdateFound;
         _updateTimer.Tick += (_, _) =>
@@ -94,6 +113,7 @@ public partial class MainWindow : Window
     public MonitorPage MonitorPage => _monitor ??= new MonitorPage(this);
     public SettingsPage SettingsPage => _settings ??= new SettingsPage(this);
     public UpdatesPage UpdatesPage => _updates ??= new UpdatesPage(this);
+    public ChatPage ChatPage => _chat ??= new ChatPage(this);
 
     public bool IsTransmitting => _transmit?.IsRunning == true;
     public bool IsWatching => _watch?.IsWatching == true;
@@ -115,6 +135,7 @@ public partial class MainWindow : Window
             return;
         }
         RefreshStatus();
+        PushRoomState();
         LiveStateChanged?.Invoke();
     }
 
@@ -126,6 +147,7 @@ public partial class MainWindow : Window
         {
             Pages.TransmitPage => (NavTransmit, "Transmissão"),
             Pages.WatchPage => (NavWatch, "Assistir"),
+            Pages.ChatPage => (NavChat, "Chat da rede"),
             Pages.MonitorPage => (NavMonitor, "Monitoramento"),
             Pages.SettingsPage => (NavSettings, "Configurações"),
             Pages.UpdatesPage => (NavUpdates, "Atualizações"),
@@ -152,6 +174,7 @@ public partial class MainWindow : Window
         {
             RadioButton r when r == NavTransmit => TransmitPage,
             RadioButton r when r == NavWatch => WatchPage,
+            RadioButton r when r == NavChat => ChatPage,
             RadioButton r when r == NavMonitor => MonitorPage,
             RadioButton r when r == NavSettings => SettingsPage,
             RadioButton r when r == NavUpdates => UpdatesPage,
@@ -274,6 +297,16 @@ public partial class MainWindow : Window
         _networkTimer.Start();
         if (AppServices.DemoMode) return;
         SetupTray();
+        try
+        {
+            AppServices.Room.Start();
+            PushRoomState();
+        }
+        catch (Exception exception)
+        {
+            Log.Error("A sala da rede não abriu", exception);
+        }
+        UpdateVoicePanel();
 
         var settings = AppServices.Settings.Current;
         _ = CheckFirewallAsync();
@@ -434,6 +467,14 @@ public partial class MainWindow : Window
             item.Content = _compact ? null : label;
             item.ToolTip = _compact ? label : null;
         }
+        // Painel da voz recolhido: só os botões, um embaixo do outro.
+        VoiceHeader.Visibility = _compact ? Visibility.Collapsed : Visibility.Visible;
+        VoicePanel.Padding = new Thickness(_compact ? 5 : 10);
+        VoiceButtons.Rows = _compact ? 0 : 1;
+        VoiceButtons.Columns = _compact ? 1 : 0;
+        VoiceButtons.Margin = _compact ? new Thickness(0, -3, 0, -3) : new Thickness(-3, 10, -3, 0);
+        foreach (FrameworkElement child in VoiceButtons.Children) child.Margin = _compact ? new Thickness(0, 3, 0, 3) : new Thickness(3, 0, 3, 0);
+        UpdateVoicePanel();
     }
 
     private void Theme_Click(object sender, RoutedEventArgs e)
@@ -585,7 +626,7 @@ public partial class MainWindow : Window
         if (VoiceTrayLine() is { } voice)
         {
             lines.Add(voice);
-            if (badge == TrayBadge.None) badge = TrayBadge.Voice;
+            if (badge == TrayBadge.None && AppServices.Room.InVoice) badge = TrayBadge.Voice;
         }
         _tray.Set(string.Join("\n", lines), badge);
     }
@@ -615,10 +656,160 @@ public partial class MainWindow : Window
         return menu;
     }
 
-    /// <summary>Linha da voz da rede na dica da bandeja (null fora da voz).</summary>
-    private string? VoiceTrayLine() => null;
+    /// <summary>Linha da voz (ou das mensagens novas do chat) na dica da bandeja. Null quando não tem nada.</summary>
+    private static string? VoiceTrayLine()
+    {
+        var room = AppServices.Room;
+        if (!room.InVoice)
+            return room.Unread switch { 0 => null, 1 => "1 mensagem nova no chat", var n => $"{n} mensagens novas no chat" };
+        var others = Math.Max(0, room.VoiceMembers.Count - 1);
+        var line = others switch { 0 => "Na voz da rede (só você)", 1 => "Na voz com 1 pessoa", var n => $"Na voz com {n} pessoas" };
+        return room.Deafened ? line + " · sem som" : room.MicrophoneOff ? line + " · mudo" : line;
+    }
 
-    private void AddVoiceTrayItems(ContextMenu menu) { }
+    private void AddVoiceTrayItems(ContextMenu menu)
+    {
+        var room = AppServices.Room;
+        if (!room.IsAvailable) return;
+        menu.Items.Add(new Separator());
+        if (room.InVoice)
+        {
+            menu.Items.Add(TrayItem("Microfone desligado", "\uE720", room.ToggleMute, room.MicrophoneOff));
+            menu.Items.Add(TrayItem("Som desligado", "\uE7F6", room.ToggleDeafen, room.Deafened));
+            menu.Items.Add(TrayItem("Sair da voz", "\uE778", () => _ = room.LeaveVoiceAsync()));
+        }
+        else menu.Items.Add(TrayItem("Entrar na voz da rede", "\uE7F6", () => _ = JoinVoiceAsync()));
+        var chat = room.Unread switch { 0 => "Abrir o chat da rede", 1 => "Abrir o chat da rede (1 nova)", var n => $"Abrir o chat da rede ({n} novas)" };
+        menu.Items.Add(TrayItem(chat, "\uE8BD", () => ShowFromTray(ChatPage)));
+    }
+
+    // ───────────────────────── Voz e chat da rede ─────────────────────────
+
+    /// <summary>Painel da voz no menu lateral: quem está na voz, entrar e sair, microfone, fone e o chat.</summary>
+    private void UpdateVoicePanel()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(UpdateVoicePanel);
+            return;
+        }
+        var room = AppServices.Room;
+        var inVoice = room.InVoice;
+        var talking = room.VoiceMembers.Count;
+        var others = room.People.Count;
+        VoiceTitle.Text = inVoice ? "Voz conectada" : "Voz da rede";
+        VoiceTitle.SetResourceReference(TextBlock.ForegroundProperty, inVoice ? "Success" : "Text");
+        foreach (var bar in VoiceSignal.Children.OfType<Rectangle>()) bar.SetResourceReference(Shape.FillProperty, inVoice ? "Success" : "TextSubtle");
+        VoiceSubtitle.Text = !room.IsAvailable ? "Sala da rede desligada"
+            : room.IsJoining ? "Ligando o microfone…"
+            : inVoice ? (talking <= 1 ? "Só você por enquanto" : $"{talking} pessoas conversando")
+            : talking > 0 ? (talking == 1 ? "1 pessoa na voz" : $"{talking} pessoas na voz")
+            : others switch { 0 => "Ninguém da rede ainda", 1 => "1 pessoa na rede", var n => $"{n} pessoas na rede" };
+        VoiceSubtitle.ToolTip = room.Error;
+        VoiceList.Visibility = talking > 0 && !_compact ? Visibility.Visible : Visibility.Collapsed;
+        LeaveVoiceButton.Visibility = inVoice ? Visibility.Visible : Visibility.Collapsed;
+        JoinVoiceButton.Visibility = inVoice ? Visibility.Collapsed : Visibility.Visible;
+        JoinVoiceButton.IsEnabled = room.IsAvailable && !room.IsJoining;
+        JoinVoiceButton.ToolTip = talking > 0 ? $"Entrar na voz da rede ({VoiceSubtitle.Text})" : "Entrar na voz da rede";
+        MuteToggle.Visibility = DeafenToggle.Visibility = inVoice ? Visibility.Visible : Visibility.Collapsed;
+        CompactLeaveButton.Visibility = inVoice && _compact ? Visibility.Visible : Visibility.Collapsed;
+        MuteToggle.IsChecked = room.MicrophoneOff;
+        MuteToggle.ToolTip = room.MicrophoneOff ? "Ligar o microfone" : "Desligar o microfone";
+        DeafenToggle.IsChecked = room.Deafened;
+        DeafenToggle.ToolTip = room.Deafened ? "Ligar o som" : "Desligar o som de todo mundo";
+        JoinVoiceLabel.Visibility = _compact ? Visibility.Collapsed : Visibility.Visible;
+        ChatLabel.Visibility = inVoice || _compact ? Visibility.Collapsed : Visibility.Visible;
+        UpdateTray();
+    }
+
+    private void UpdateChatBadge()
+    {
+        var unread = AppServices.Room.Unread;
+        ChatBadge.Visibility = unread > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ChatCount.Text = unread > 9 ? "9+" : unread.ToString();
+        SetNavBadge(NavChat, unread > 0);
+        UpdateTray();
+    }
+
+    private async void JoinVoice_Click(object sender, RoutedEventArgs e) => await JoinVoiceAsync();
+
+    private async Task JoinVoiceAsync()
+    {
+        if (await AppServices.Room.JoinVoiceAsync() is not { } error) return;
+        if (IsInBackground) TrayNotify("Não deu para entrar na voz", error, () => Navigate(SettingsPage));
+        else Toast(error, ToastKind.Warning, "Escolher o microfone", () => Navigate(SettingsPage));
+    }
+
+    private async void LeaveVoice_Click(object sender, RoutedEventArgs e) => await AppServices.Room.LeaveVoiceAsync();
+
+    private void Mute_Click(object sender, RoutedEventArgs e) => AppServices.Room.ToggleMute();
+
+    private void Deafen_Click(object sender, RoutedEventArgs e) => AppServices.Room.ToggleDeafen();
+
+    private void OpenChat_Click(object sender, RoutedEventArgs e) => Navigate(ChatPage);
+
+    /// <summary>Mensagem nova com o chat fechado: aviso rápido na janela, ou notificação do Windows com o app escondido.</summary>
+    private void OnRoomMessage(ChatRow row)
+    {
+        if (AppServices.Room.IsChatInFront?.Invoke() == true) return;
+        var now = DateTimeOffset.UtcNow;
+        var preview = Preview(row.Text, 110);
+        if (IsInBackground)
+        {
+            if (now - _lastChatBalloon < TimeSpan.FromSeconds(20)) return;
+            _lastChatBalloon = now;
+            TrayNotify($"{row.Author} no chat da rede", preview, () => Navigate(ChatPage));
+            return;
+        }
+        if (now - _lastChatToast < TimeSpan.FromSeconds(4)) return;
+        _lastChatToast = now;
+        Toast($"{row.Author}: {preview}", ToastKind.Info, "Responder", () => Navigate(ChatPage));
+    }
+
+    private void OnPersonWentLive(RoomPersonRow person)
+    {
+        var what = person.StatusText.StartsWith("Ao vivo · ", StringComparison.Ordinal) ? person.StatusText["Ao vivo · ".Length..] : "agora";
+        if (IsInBackground) TrayNotify($"{person.Name} está ao vivo", $"Transmitindo {what}. Clique para {person.ActionText.ToLowerInvariant()}.", () => WatchPerson(person));
+        else Toast($"{person.Name} começou a transmitir: {what}.", ToastKind.Info, person.ActionText, () => WatchPerson(person));
+    }
+
+    /// <summary>Abre o player na transmissão de alguém da sala.</summary>
+    public void WatchPerson(RoomPersonRow person)
+    {
+        if (person.WatchAddress is not { } address) return;
+        ShowFromTray(WatchPage);
+        WatchPage.ConnectTo(address, person.LiveMode);
+    }
+
+    /// <summary>Corta o texto num limite sem partir um emoji no meio.</summary>
+    private static string Preview(string text, int max)
+    {
+        text = text.ReplaceLineEndings(" ");
+        if (text.Length <= max) return text;
+        var cut = max;
+        if (char.IsHighSurrogate(text[cut - 1])) cut--;
+        return text[..cut].TrimEnd() + "…";
+    }
+
+    /// <summary>Conta para a sala o que este PC está fazendo (transmitindo o quê, assistindo).</summary>
+    private void PushRoomState()
+    {
+        if (AppServices.DemoMode) return;
+        var transmit = _transmit;
+        var live = transmit?.IsRunning == true;
+        var settings = AppServices.Settings.Current;
+        AppServices.Room.UpdateLocal(new RoomLocalState(
+            settings.DeviceName,
+            Live: live,
+            LiveMode: transmit?.LiveMode ?? StreamMode.Screen,
+            LiveAudio: live && transmit!.LiveAudio,
+            LiveCamera: live && transmit!.LiveCamera,
+            Viewers: live ? transmit!.Viewers : 0,
+            PinRequired: live && transmit!.LivePinRequired,
+            LiveAddress: live ? transmit!.LiveAddress : null,
+            Watching: IsWatching,
+            ControlPort: settings.ControlPort));
+    }
 
     private static MenuItem TrayItem(string text, string glyph, Action action, bool? isChecked = null)
     {
@@ -632,6 +823,7 @@ public partial class MainWindow : Window
     {
         if (_transmit is not null) await _transmit.StopAsync();
         if (_watch is not null) await _watch.ShutdownAsync();
+        await AppServices.Room.StopAsync();
     }
 
     /// <summary>Encerramento limpo: para captura, encoder, sockets e áudio antes de fechar.</summary>

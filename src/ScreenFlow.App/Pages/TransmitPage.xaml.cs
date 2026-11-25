@@ -23,6 +23,7 @@ public partial class TransmitPage : UserControl, IShellPage
     private readonly ObservableCollection<PendingApproval> _approvals = [];
     private readonly ObservableCollection<ViewerRow> _viewerRows = [];
     private HostSession? _session;
+    private System.Net.IPAddress? _liveAddress;
     private IReadOnlyList<DisplayMonitor> _monitors = [];
     private bool _loaded;
     private bool _starting;
@@ -66,6 +67,17 @@ public partial class TransmitPage : UserControl, IShellPage
 
     /// <summary>Modo da transmissão no ar (null quando parado).</summary>
     public StreamMode? LiveMode => _session?.Mode;
+
+    /// <summary>O som do PC vai junto (sempre, na festa de música).</summary>
+    public bool LiveAudio => _session?.AudioEnabled == true;
+
+    /// <summary>A câmera vai junto com a tela.</summary>
+    public bool LiveCamera => _session?.HasCameraOverlay == true;
+
+    public bool LivePinRequired => _session is not null && Settings.Pin is not null;
+
+    /// <summary>IP em que a transmissão está (o do adaptador escolhido), para a sala da rede.</summary>
+    public System.Net.IPAddress? LiveAddress => _session is null ? null : _liveAddress;
 
     private AppSettings Settings => AppServices.Settings.Current;
 
@@ -338,6 +350,7 @@ public partial class TransmitPage : UserControl, IShellPage
             session.StatisticsUpdated += stats => Dispatcher.BeginInvoke(() => ShowStatistics(stats));
             session.BandwidthMeasured += (name, mbps) => Dispatcher.BeginInvoke(() => OnBandwidthMeasured(name, mbps));
             await Task.Run(session.Start);
+            _liveAddress = adapter.Address;
             _session = session;
 
             ModeGrid.IsEnabled = OptionsPanel.IsEnabled = AccessPanel.IsEnabled = false;

@@ -31,6 +31,10 @@ public static class Screenshots
         var saved = 0;
         var failed = 0;
 
+        // Sala da rede de exemplo: gente online, duas pessoas na voz e uma conversa no chat.
+        AppServices.Settings.Current.DeviceName = "PC da Sala";
+        AppServices.Room.LoadDemo(inVoice: false, unread: 2);
+
         var window = new MainWindow
         {
             WindowStartupLocation = WindowStartupLocation.Manual,
@@ -93,6 +97,20 @@ public static class Screenshots
         });
         ThemeManager.Apply(AppTheme.Dark);
 
+        // Voz conectada no menu lateral e o chat da rede aberto.
+        await Shot("15-chat-da-rede.png", () =>
+        {
+            AppServices.Room.LoadDemo(inVoice: true, unread: 0);
+            return Go(window, window.ChatPage, 500);
+        });
+        await Shot("16-chat-tema-claro.png", async () =>
+        {
+            ThemeManager.Apply(AppTheme.Light);
+            window.Navigate(window.OverviewPage);
+            await Go(window, window.ChatPage, 500);
+        });
+        ThemeManager.Apply(AppTheme.Dark);
+
         foreach (var (name, mode, state) in new[]
                  {
                      ("09-player-festa-de-musica.png", StreamMode.AudioOnly, ConnectionState.Connected),
@@ -140,6 +158,7 @@ public static class Screenshots
         await Shot("12-transmissao-janela-pequena.png", () => Go(window, window.TransmitPage, 600));
         await Shot("13-configuracoes-janela-pequena.png", () => Go(window, window.SettingsPage, 600));
         await Shot("14-atualizacoes-janela-pequena.png", () => Go(window, window.UpdatesPage));
+        await Shot("17-chat-janela-pequena.png", () => Go(window, window.ChatPage, 500));
 
         Telemetry.EndHost();
         await window.StopAllAsync(); // a janela fecha junto com o app

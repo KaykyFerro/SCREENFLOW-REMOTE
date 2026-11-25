@@ -149,6 +149,51 @@
                             <CheckBox x:Name="StatsToggle" Style="{StaticResource Switch}" Content="Mostrar as estatísticas no player (F3)"/>
                         </StackPanel>
                     </Border>
+
+                    <!-- Voz e chat da rede -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <DockPanel Margin="0,0,0,20">
+                                <Border Style="{StaticResource IconTile}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE720;"/>
+                                </Border>
+                                <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Style="{StaticResource Heading}" Text="Voz da rede"/>
+                                    <TextBlock Style="{StaticResource Caption}" Text="Microfone e som da conversa com quem está na rede."/>
+                                </StackPanel>
+                            </DockPanel>
+                            <TextBlock Style="{StaticResource Label}" Text="Microfone"/>
+                            <DockPanel Margin="{DynamicResource FieldGap}">
+                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar microfones de novo" Margin="8,0,0,0"
+                                        Click="RefreshMicrophones_Click"/>
+                                <ComboBox x:Name="MicrophoneCombo"/>
+                            </DockPanel>
+                            <DockPanel Margin="0,0,0,6">
+                                <TextBlock x:Name="SensitivityValue" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                <TextBlock Style="{StaticResource Label}" Text="Sensibilidade do microfone" Margin="0"/>
+                            </DockPanel>
+                            <Slider x:Name="SensitivitySlider" Minimum="0" Maximum="1" SmallChange="0.05" LargeChange="0.1" ValueChanged="Sensitivity_Changed"/>
+                            <!-- Medidor: o volume do microfone e a marca a partir da qual a voz vai pela rede -->
+                            <Grid x:Name="MicMeter" Height="10" Margin="0,10,0,10" SizeChanged="MicMeter_SizeChanged">
+                                <Border CornerRadius="5" Background="{DynamicResource SurfaceSunken}" BorderBrush="{DynamicResource Border}" BorderThickness="1"/>
+                                <Border x:Name="MicLevel" CornerRadius="5" HorizontalAlignment="Left" Width="0" Background="{DynamicResource AccentGradient}"/>
+                                <Border x:Name="MicThreshold" Width="3" CornerRadius="1.5" HorizontalAlignment="Left" Margin="0,-4" Background="{DynamicResource Text}"
+                                        ToolTip="A voz só vai pela rede quando passa desta marca."/>
+                            </Grid>
+                            <DockPanel Margin="{DynamicResource FieldGap}">
+                                <Button x:Name="MicTestButton" DockPanel.Dock="Right" Content="Testar microfone" MinHeight="34" Padding="14,0" Margin="12,0,0,0" Click="MicTest_Click"/>
+                                <TextBlock x:Name="MicTestText" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                           Text="Fale normalmente: a barra precisa passar da marca para a sua voz ir. Se não passar, puxe a sensibilidade para a direita."/>
+                            </DockPanel>
+                            <DockPanel Margin="0,0,0,6">
+                                <TextBlock x:Name="VoiceVolumeValue" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                                <TextBlock Style="{StaticResource Label}" Text="Volume de quem fala" Margin="0"/>
+                            </DockPanel>
+                            <Slider x:Name="VoiceVolumeSlider" Minimum="0" Maximum="1.5" SmallChange="0.05" LargeChange="0.1" Margin="{DynamicResource FieldGap}"
+                                    ValueChanged="VoiceVolume_Changed"/>
+                            <CheckBox x:Name="VoiceSoundsToggle" Style="{StaticResource Switch}" Content="Sons ao entrar, sair e desligar o microfone (como no Discord)"/>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
 
                 <StackPanel Grid.Column="2">

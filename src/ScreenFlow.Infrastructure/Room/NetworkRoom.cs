@@ -84,6 +84,9 @@ public sealed class NetworkRoom : IAsyncDisposable
     /// <summary>Microfone escolhido nas configurações (null = padrão do Windows).</summary>
     public string? MicrophoneId { get; set; }
 
+    /// <summary>Sons de entrar, sair e mudo na voz (como no Discord).</summary>
+    public bool SoundsEnabled { get; set; } = true;
+
     /// <summary>Por que a sala não abriu (porta ocupada, por exemplo). Null quando está funcionando.</summary>
     public string? Error { get; private set; }
 
@@ -283,7 +286,7 @@ public sealed class NetworkRoom : IAsyncDisposable
             _voice = engine;
             _inVoice = true;
         }
-        engine.Play(VoiceCue.Join);
+        if (SoundsEnabled) engine.Play(VoiceCue.Join);
         Log.Info($"Entrou na voz da rede ({engine.InputDescription}).");
         _announceSoon = true;
         VoiceChanged?.Invoke();
@@ -301,7 +304,7 @@ public sealed class NetworkRoom : IAsyncDisposable
         }
         if (engine is null) return;
         engine.Muted = true;
-        engine.Play(VoiceCue.Leave);
+        if (SoundsEnabled) engine.Play(VoiceCue.Leave);
         _announceSoon = true;
         VoiceChanged?.Invoke();
         PeersChanged?.Invoke();
@@ -310,34 +313,31 @@ public sealed class NetworkRoom : IAsyncDisposable
         Log.Info("Saiu da voz da rede.");
     }
 
-    public void SetMuted(bool muted)
+    public void SetMuted(bool muted) => SetVoiceState(muted, _deafened);
+
+    /// <summary>Ensurdecer: não ouve ninguém e também fica mudo (como no Discord).</summary>
+    public void SetDeafened(bool deafened) => SetVoiceState(_muted, deafened);
+
+    /// <summary>Muda o mudo e o ensurdecer de uma vez, com um som só.</summary>
+    public void SetVoiceState(bool muted, bool deafened)
     {
-        if (_muted == muted) return;
+        if (_muted == muted && _deafened == deafened) return;
         _muted = muted;
+        _deafened = deafened;
         if (_voice is { } voice)
         {
-            voice.Muted = muted || _deafened;
-            voice.Play(muted ? VoiceCue.Mute : VoiceCue.Unmute);
+            voice.Deafened = deafened;
+            voice.Muted = muted || deafened;
+            PlayCue(muted || deafened ? VoiceCue.Mute : VoiceCue.Unmute);
         }
         _announceSoon = true;
         VoiceChanged?.Invoke();
         PeersChanged?.Invoke();
     }
 
-    /// <summary>Ensurdecer: não ouve ninguém e também fica mudo (como no Discord).</summary>
-    public void SetDeafened(bool deafened)
+    private void PlayCue(VoiceCue cue)
     {
-        if (_deafened == deafened) return;
-        _deafened = deafened;
-        if (_voice is { } voice)
-        {
-            voice.Deafened = deafened;
-            voice.Muted = _muted || deafened;
-            if (!deafened) voice.Play(VoiceCue.Unmute);
-        }
-        _announceSoon = true;
-        VoiceChanged?.Invoke();
-        PeersChanged?.Invoke();
+        if (SoundsEnabled) _voice?.Play(cue);
     }
 
     private void SendVoice(uint sequence, byte level, byte[] current, byte[] previous)
@@ -536,8 +536,8 @@ public sealed class NetworkRoom : IAsyncDisposable
                 _voice?.RemovePeer(sender);
                 if (previous is not null) PeerLeftVoice?.Invoke(peer);
             }
-            if (_inVoice && previous is not null) _voice?.Play(presence.InVoice ? VoiceCue.Join : VoiceCue.Leave);
-            else if (_inVoice && update.IsNew && presence.InVoice) _voice?.Play(VoiceCue.Join);
+            if (_inVoice && previous is not null) PlayCue(presence.InVoice ? VoiceCue.Join : VoiceCue.Leave);
+            else if (_inVoice && update.IsNew && presence.InVoice) PlayCue(VoiceCue.Join);
         }
         if (presence.Live && previous is { Live: false }) PeerWentLive?.Invoke(peer);
 
@@ -552,7 +552,7 @@ public sealed class NetworkRoom : IAsyncDisposable
         if (peer.Presence.InVoice)
         {
             _voice?.RemovePeer(peer.Id);
-            if (_inVoice) _voice?.Play(VoiceCue.Leave);
+            if (_inVoice) PlayCue(VoiceCue.Leave);
             PeerLeftVoice?.Invoke(peer);
         }
         PeerLeft?.Invoke(peer);
