@@ -36,7 +36,11 @@ public sealed record HelloMessage(
     int MaxHeight,
     int MaxFps,
     int UdpPort,
-    string PublicKey) : ControlMessage;
+    string PublicKey,
+    string[]? Features = null) : ControlMessage
+{
+    public bool Supports(string feature) => Features is not null && Features.Contains(feature, StringComparer.OrdinalIgnoreCase);
+}
 
 public sealed record ChallengeMessage(string HostName, string PublicKey, string Nonce, bool PinRequired) : ControlMessage;
 
@@ -66,7 +70,9 @@ public sealed record StreamConfigMessage(
     int AudioSampleRate,
     int AudioChannels,
     string EncoderName,
-    string Reason) : ControlMessage;
+    string Reason,
+    bool VideoEnabled = true,
+    StreamMode Mode = StreamMode.Screen) : ControlMessage;
 
 public sealed record PingMessage(long ViewerTimeUs) : ControlMessage;
 

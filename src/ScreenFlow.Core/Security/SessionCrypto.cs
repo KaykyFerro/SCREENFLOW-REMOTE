@@ -68,6 +68,8 @@ public sealed class PacketCipher : IDisposable
     public const int TagSize = 16;
     private readonly AesGcm _aes;
     private readonly byte[] _salt;
+    // AesGcm não garante uso simultâneo por várias threads (vídeo, áudio e retransmissão cifram para o mesmo viewer).
+    private readonly object _encryptGate = new();
 
     public PacketCipher(byte[] key, byte[] salt)
     {
@@ -82,7 +84,7 @@ public sealed class PacketCipher : IDisposable
         Span<byte> nonce = stackalloc byte[12];
         _salt.CopyTo(nonce);
         BinaryPrimitives.WriteUInt64BigEndian(nonce[4..], packetNumber);
-        _aes.Encrypt(nonce, plain, cipherAndTag[..plain.Length], cipherAndTag.Slice(plain.Length, TagSize), header);
+        lock (_encryptGate) _aes.Encrypt(nonce, plain, cipherAndTag[..plain.Length], cipherAndTag.Slice(plain.Length, TagSize), header);
     }
 
     public bool TryDecrypt(ulong packetNumber, ReadOnlySpan<byte> header, ReadOnlySpan<byte> cipherAndTag, Span<byte> plain)

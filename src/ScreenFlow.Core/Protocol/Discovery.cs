@@ -11,7 +11,8 @@ public sealed record DiscoveryAnnouncement(
     int ControlPort,
     string Version,
     bool PinRequired,
-    int Viewers)
+    int Viewers,
+    ScreenFlow.Core.Media.StreamMode Mode = ScreenFlow.Core.Media.StreamMode.Screen)
 {
     private static readonly JsonSerializerOptions Options = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 

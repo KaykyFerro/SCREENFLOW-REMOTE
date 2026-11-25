@@ -20,6 +20,8 @@ public sealed class AppSettings
     public bool AllowNonRadminFallback { get; set; }
 
     // Transmissão
+    /// <summary>O que transmitir: tela (monitor ou janela), câmera ou só o áudio (festa de música).</summary>
+    public StreamMode Mode { get; set; } = StreamMode.Screen;
     public string Resolution { get; set; } = Media.Resolution.P1080.Label;
     public int Fps { get; set; } = 60;
     public int BitrateKbps { get; set; } // 0 = automático pela tabela de perfis
@@ -29,6 +31,13 @@ public sealed class AppSettings
     public int AudioBitrateKbps { get; set; } = 160;
     public bool AdaptiveQuality { get; set; } = true;
     public int FecGroupSize { get; set; } = 10;
+
+    // Câmera e festa de música
+    public string? CameraId { get; set; }
+    public string CameraResolution { get; set; } = Media.Resolution.P1080.Label;
+    public int CameraFps { get; set; } = 30;
+    /// <summary>Bitrate do Opus no modo festa de música (só áudio, qualidade de música).</summary>
+    public int MusicBitrateKbps { get; set; } = 256;
 
     // Segurança
     public string? Pin { get; set; }
@@ -42,12 +51,15 @@ public sealed class AppSettings
     public List<string> RecentHosts { get; set; } = [];
     public double Volume { get; set; } = 0.8;
     public bool ShowStatsOverlay { get; set; }
+    /// <summary>Desenha o vídeo direto na GPU (D3D11). Desligado, usa o caminho antigo pela CPU.</summary>
+    public bool GpuVideoRenderer { get; set; } = true;
 
     // Configuração automática e atualização
     public bool AutoConfigured { get; set; }
     public DateTimeOffset? LastAutoConfig { get; set; }
     public bool CheckUpdatesOnStart { get; set; } = true;
     public string? SkippedVersion { get; set; }
+    public DateTimeOffset? LastUpdateCheck { get; set; }
 
     public void RememberHost(string host)
     {
@@ -64,7 +76,12 @@ public sealed class AppSettings
         ControlPort = ValidPort(ControlPort, AppInfo.DefaultControlPort);
         DiscoveryPort = ValidPort(DiscoveryPort, AppInfo.DefaultDiscoveryPort);
         if (!Quality.FrameRates.Contains(Fps)) Fps = 60;
+        if (!Enum.IsDefined(Mode)) Mode = StreamMode.Screen;
         Resolution = Media.Resolution.FromLabel(Resolution).Label;
+        CameraResolution = Media.Resolution.FromLabel(CameraResolution).Label;
+        if (!Quality.CameraFrameRates.Contains(CameraFps)) CameraFps = 30;
+        MusicBitrateKbps = Math.Clamp(MusicBitrateKbps, AudioProfile.MinMusicKbps, AudioProfile.MaxMusicKbps);
+        if (string.IsNullOrWhiteSpace(CameraId)) CameraId = null;
         BitrateKbps = BitrateKbps <= 0 ? 0 : Math.Clamp(BitrateKbps, 1_000, 200_000);
         AudioBitrateKbps = Math.Clamp(AudioBitrateKbps, 64, 256);
         FecGroupSize = Math.Clamp(FecGroupSize, 0, 32);
