@@ -50,7 +50,7 @@ public sealed class LanScreenHost : IAsyncDisposable
         _cancellation = new CancellationTokenSource();
         _listener.Start(4);
         StatusChanged?.Invoke($"Aguardando conexão na porta {Port}.");
-        _worker = AcceptLoopAsync(_cancellation.Token);
+        _worker = Task.Run(() => AcceptLoopAsync(_cancellation.Token));
     }
 
     private async Task AcceptLoopAsync(CancellationToken cancellationToken)
