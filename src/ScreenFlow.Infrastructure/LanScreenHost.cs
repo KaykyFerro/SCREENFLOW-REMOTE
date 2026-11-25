@@ -20,7 +20,6 @@ public sealed class LanScreenHost : IAsyncDisposable
     private readonly DisplayMonitor _monitor;
     private readonly int _maximumWidth;
     private readonly int _framesPerSecond;
-    private readonly byte[] _authenticationKey;
     private readonly TcpListener _listener;
     private readonly ConcurrentDictionary<string, AuthFailureWindow> _failedAttempts = new();
     private CancellationTokenSource? _cancellation;
@@ -41,8 +40,7 @@ public sealed class LanScreenHost : IAsyncDisposable
         _maximumWidth = maximumWidth;
         _framesPerSecond = framesPerSecond;
         Port = port;
-        SessionCode = Convert.ToHexString(RandomNumberGenerator.GetBytes(16));
-        _authenticationKey = SHA256.HashData(Encoding.ASCII.GetBytes(SessionCode));
+        SessionCode = SessionSecurity.CreateSessionCode();
         _listener = new TcpListener(IPAddress.Any, Port);
     }
 
@@ -101,7 +99,7 @@ public sealed class LanScreenHost : IAsyncDisposable
 
         var proof = new byte[32];
         await stream.ReadExactlyAsync(proof, cancellationToken);
-        var expectedProof = DeriveKey("screenflow-auth-v1", challenge);
+        var expectedProof = SessionSecurity.CreateAuthenticationProof(SessionCode, challenge);
         var authenticated = CryptographicOperations.FixedTimeEquals(proof, expectedProof);
         CryptographicOperations.ZeroMemory(proof);
         CryptographicOperations.ZeroMemory(expectedProof);
@@ -114,7 +112,7 @@ public sealed class LanScreenHost : IAsyncDisposable
         }
         _failedAttempts.TryRemove(remoteIp, out _);
 
-        var mediaKey = DeriveKey("screenflow-media-v1", challenge);
+        var mediaKey = SessionSecurity.DeriveMediaKey(SessionCode, challenge);
         var remote = client.Client.RemoteEndPoint?.ToString() ?? "cliente desconhecido";
         var approved = ConnectionApproval is not null && await ConnectionApproval(remote);
         await stream.WriteAsync(new[] { approved ? (byte)1 : (byte)0 }, cancellationToken);
@@ -184,15 +182,6 @@ public sealed class LanScreenHost : IAsyncDisposable
 
     private sealed record AuthFailureWindow(DateTimeOffset WindowStartedAt, int Count);
 
-    private byte[] DeriveKey(string purpose, byte[] challenge)
-    {
-        var label = Encoding.ASCII.GetBytes(purpose);
-        var material = new byte[label.Length + challenge.Length];
-        label.CopyTo(material, 0);
-        challenge.CopyTo(material, label.Length);
-        return HMACSHA256.HashData(_authenticationKey, material);
-    }
-
     public async Task StopAsync()
     {
         if (_cancellation is null) return;
@@ -205,7 +194,6 @@ public sealed class LanScreenHost : IAsyncDisposable
         }
         _cancellation.Dispose();
         _cancellation = null;
-        CryptographicOperations.ZeroMemory(_authenticationKey);
         _worker = null;
         StatusChanged?.Invoke("Compartilhamento encerrado.");
     }
