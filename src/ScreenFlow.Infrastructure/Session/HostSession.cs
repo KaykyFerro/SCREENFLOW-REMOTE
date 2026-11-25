@@ -37,19 +37,24 @@ public sealed record HostOptions(
     int AudioBitrateKbps,
     bool Adaptive,
     int FecGroupSize,
-    double UploadMbps);
+    double UploadMbps,
+    StreamMode Mode = StreamMode.Screen,
+    int MusicBitrateKbps = 256,
+    Func<AudioProfile, IAudioSource>? AudioSourceFactory = null);
 
 public enum ViewerState { Authenticating, WaitingApproval, Streaming }
 
 public sealed record ViewerInfo(Guid Id, string Name, string Address, ViewerState State, double RoundTripMs, double LossRate, double ReceivedMbps, double LatencyMs);
 
-public sealed record HostStatistics(int Viewers, double EncodeFps, double BitrateMbps, double UploadMbps, string Encoder, string Capture, StreamTarget Target, string Reason);
+public sealed record HostStatistics(int Viewers, double EncodeFps, double BitrateMbps, double UploadMbps, string Encoder, string Capture, StreamTarget Target, string Reason,
+    StreamMode Mode = StreamMode.Screen, double AudioKbps = 0);
 
 public sealed record ApprovalRequest(Guid Id, string Name, string Address);
 
 /// <summary>
-/// Sessão de transmissão: aceita viewers no canal TCP, captura e codifica a tela uma vez só e envia o mesmo
-/// vídeo (criptografado por viewer) para todos via UDP. Suporta dezenas de viewers; o limite prático é o upload.
+/// Sessão de transmissão: aceita viewers no canal TCP, captura e codifica a tela (ou a câmera) uma vez só e envia o
+/// mesmo vídeo (criptografado por viewer) para todos via UDP. Suporta dezenas de viewers; o limite prático é o upload.
+/// No modo festa de música não há vídeo: só o áudio do PC em qualidade de música, com redundância.
 /// </summary>
 public sealed class HostSession : IAsyncDisposable
 {
@@ -61,6 +66,8 @@ public sealed class HostSession : IAsyncDisposable
     private readonly AutoResetEvent _wake = new(false);
     private readonly RateMeter _encodedFrames = new();
     private readonly RateMeter _encodedBytes = new();
+    private readonly RateMeter _audioBytes = new();
+    private readonly AudioProfile _audioProfile;
     private TcpListener? _listener;
     private Socket? _udp;
     private MediaSender? _sender;
@@ -68,8 +75,9 @@ public sealed class HostSession : IAsyncDisposable
     private Thread? _pipeline;
     private Task? _acceptLoop;
     private Task? _udpDrain;
-    private SystemAudioCapture? _audio;
+    private IAudioSource? _audio;
     private uint _audioSequence;
+    private byte[] _previousAudio = [];
     private volatile bool _keyframeRequested;
     private StreamTarget _profile;
     private volatile StreamTarget _target;
@@ -79,6 +87,7 @@ public sealed class HostSession : IAsyncDisposable
     private string _reason = "perfil escolhido";
     private string _captureBackend = "";
     private long _lastKeyframeUs;
+    private (int Width, int Height) _sourceSize;
 
     public HostSession(HostOptions options)
     {
@@ -86,7 +95,18 @@ public sealed class HostSession : IAsyncDisposable
         var bitrate = options.BitrateKbps > 0 ? options.BitrateKbps : Quality.TargetBitrateKbps(options.Resolution, options.Fps, options.PreferredCodec ?? VideoCodec.Hevc);
         _profile = new StreamTarget(bitrate, options.Fps, options.Resolution);
         _target = _profile;
+        _audioProfile = AudioProfile.ForMode(options.Mode, options.AudioBitrateKbps, options.MusicBitrateKbps);
+        _sourceSize = (options.Target.Width, options.Target.Height);
     }
+
+    public StreamMode Mode => _options.Mode;
+    public bool HasVideo => StreamModes.HasVideo(_options.Mode);
+    public bool AudioEnabled => _options.AudioEnabled || _options.Mode == StreamMode.AudioOnly;
+    public AudioProfile AudioProfile => _audioProfile;
+
+    /// <summary>Nível e espectro do áudio capturado (null sem áudio).</summary>
+    public AudioMeter? AudioMeter => _audio?.Meter;
+    public string? AudioDescription => _audio?.Description;
 
     public event Action<string>? StatusChanged;
     public event Action? ViewersChanged;
@@ -104,14 +124,20 @@ public sealed class HostSession : IAsyncDisposable
         _listener = new TcpListener(_options.BindAddress, _options.ControlPort);
         _listener.Start(32);
         _announcer = new DiscoveryAnnouncer(_options.BindAddress, _options.BroadcastAddress, _options.DiscoveryPort, () =>
-            new DiscoveryAnnouncement(AppInfo.Name, AppInfo.ProtocolVersion, _options.DeviceName, _options.BindAddress.ToString(), _options.ControlPort, AppInfo.DisplayVersion, !string.IsNullOrEmpty(_options.Pin), _viewers.Count));
+            new DiscoveryAnnouncement(AppInfo.Name, AppInfo.ProtocolVersion, _options.DeviceName, _options.BindAddress.ToString(), _options.ControlPort, AppInfo.DisplayVersion,
+                !string.IsNullOrEmpty(_options.Pin), _viewers.Values.Count(v => v.State == ViewerState.Streaming), _options.Mode));
         _announcer.Start();
         _acceptLoop = Task.Run(AcceptLoopAsync);
         _udpDrain = Task.Run(DrainUdpAsync);
-        _pipeline = new Thread(PipelineLoop) { IsBackground = true, Name = "ScreenFlow pipeline", Priority = ThreadPriority.AboveNormal };
-        _pipeline.Start();
+        if (HasVideo)
+        {
+            _pipeline = new Thread(PipelineLoop) { IsBackground = true, Name = "ScreenFlow pipeline", Priority = ThreadPriority.AboveNormal };
+            _pipeline.Start();
+        }
+        StartAudio();
         _ = Task.Run(StatsLoopAsync);
-        Log.Info($"Host iniciado em {_options.BindAddress} (controle TCP {_options.ControlPort}, mídia UDP {_options.MediaPort}), perfil {_profile}");
+        Log.Info($"Host iniciado em {_options.BindAddress} (controle TCP {_options.ControlPort}, mídia UDP {_options.MediaPort}), modo {_options.Mode}, "
+                 + (HasVideo ? $"perfil {_profile}" : $"áudio {_audioProfile.BitrateKbps} kbps"));
         StatusChanged?.Invoke($"Transmitindo em {_options.BindAddress}. Aguardando viewers.");
     }
 
@@ -155,6 +181,12 @@ public sealed class HostSession : IAsyncDisposable
                 await ControlFraming.WriteAsync(stream, new RejectedMessage(RejectedMessage.VersionMismatch, $"Versões diferentes do ScreenFlow (host {AppInfo.DisplayVersion}, viewer {hello.AppVersion}). Atualize os dois."), token);
                 return;
             }
+            if (_options.Mode == StreamMode.AudioOnly && !hello.Supports(StreamModes.FeatureAudioOnly))
+            {
+                await ControlFraming.WriteAsync(stream, new RejectedMessage(RejectedMessage.VersionMismatch,
+                    $"{_options.DeviceName} está numa festa de música (só áudio). Atualize o ScreenFlow para a versão {AppInfo.DisplayVersion} para ouvir."), token);
+                return;
+            }
             if (_viewers.Count >= _options.MaxViewers)
             {
                 await ControlFraming.WriteAsync(stream, new RejectedMessage(RejectedMessage.Busy, $"O host já tem {_options.MaxViewers} pessoas assistindo."), token);
@@ -182,7 +214,7 @@ public sealed class HostSession : IAsyncDisposable
             CryptographicOperations.ZeroMemory(secret);
             var salt = RandomNumberGenerator.GetBytes(4);
             var name = string.IsNullOrWhiteSpace(hello.ViewerName) ? ip : hello.ViewerName.Trim()[..Math.Min(40, hello.ViewerName.Trim().Length)];
-            viewer = new RemoteViewer(Guid.NewGuid(), name, client, stream, new IPEndPoint(remote.Address, hello.UdpPort), key, salt, hello);
+            viewer = new RemoteViewer(Guid.NewGuid(), name, client, stream, new IPEndPoint(remote.Address, hello.UdpPort), key, salt, hello, ip);
             CryptographicOperations.ZeroMemory(key);
             _viewers[viewer.Id] = viewer;
             ViewersChanged?.Invoke();
@@ -220,8 +252,8 @@ public sealed class HostSession : IAsyncDisposable
             _wake.Set();
             ViewersChanged?.Invoke();
             Log.Info($"Viewer {name} ({ip}) conectado. Total: {_viewers.Count}");
-            StatusChanged?.Invoke($"{name} começou a assistir.");
-            EnsureAudio();
+            StatusChanged?.Invoke(_options.Mode == StreamMode.AudioOnly ? $"{name} entrou na festa." : $"{name} começou a assistir.");
+            UpdateAudioPause();
 
             await ControlLoopAsync(viewer, token);
         }
@@ -242,6 +274,7 @@ public sealed class HostSession : IAsyncDisposable
                 ViewersChanged?.Invoke();
                 if (viewer.State == ViewerState.Streaming) StatusChanged?.Invoke($"{viewer.Name} saiu.");
                 Renegotiate(null);
+                UpdateAudioPause();
             }
             client.Dispose();
         }
@@ -263,7 +296,7 @@ public sealed class HostSession : IAsyncDisposable
                     break;
                 case NackMessage nack:
                     foreach (var chunk in _retransmit.Lookup(nack.FrameId, nack.Missing.Take(256)))
-                        _sender!.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaEndpoint, retransmit: true);
+                        _sender!.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress, retransmit: true);
                     break;
                 case KeyframeRequestMessage:
                     _keyframeRequested = true;
@@ -304,7 +337,7 @@ public sealed class HostSession : IAsyncDisposable
                 while (sent < watch.Elapsed.TotalMilliseconds * bytesPerMs)
                 {
                     var chunk = new MediaChunk { Header = new MediaHeader { Type = MediaPacketType.Probe, FrameId = index++, Count = 1 }, Payload = payload };
-                    _sender.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaEndpoint);
+                    _sender.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress);
                     sent += payload.Length + MediaHeader.Size;
                 }
                 Thread.Sleep(1);
@@ -345,7 +378,7 @@ public sealed class HostSession : IAsyncDisposable
         lock (_configGate)
         {
             var audience = _viewers.Values.Where(v => v.State == ViewerState.Streaming || v == joining).ToList();
-            if (audience.Count == 0) return true;
+            if (audience.Count == 0 || !HasVideo) return true;
             IEnumerable<VideoCodec> common = [VideoCodec.Av1, VideoCodec.Hevc, VideoCodec.H264];
             foreach (var v in audience) common = common.Intersect(v.Hello.Decoders);
             var hostCodecs = _options.Encoders.Select(e => e.Codec).Distinct().ToList();
@@ -395,8 +428,12 @@ public sealed class HostSession : IAsyncDisposable
 
     private StreamConfigMessage CurrentConfig(string reason)
     {
-        var (w, h) = _target.Resolution.FitTo(_options.Target.Width, _options.Target.Height);
-        return new StreamConfigMessage(_codec, w, h, _target.Fps, _target.BitrateKbps, _options.AudioEnabled, SystemAudioCapture.SampleRate, SystemAudioCapture.Channels, _encoderName, reason);
+        if (!HasVideo)
+            return new StreamConfigMessage(VideoCodec.H264, 0, 0, 0, 0, true, AudioProfile.SampleRate, AudioProfile.Channels, string.Empty, reason,
+                VideoEnabled: false, Mode: _options.Mode);
+        var (w, h) = _target.Resolution.FitTo(_sourceSize.Width, _sourceSize.Height);
+        return new StreamConfigMessage(_codec, w, h, _target.Fps, _target.BitrateKbps, AudioEnabled, AudioProfile.SampleRate, AudioProfile.Channels, _encoderName, reason,
+            VideoEnabled: true, Mode: _options.Mode);
     }
 
     private async Task StatsLoopAsync()
@@ -426,8 +463,9 @@ public sealed class HostSession : IAsyncDisposable
                 var total = Interlocked.Exchange(ref _sender.BytesSent, 0);
                 sentMbps = total * 8 / 1_000_000.0;
             }
+            var encoder = !HasVideo ? $"Opus {_audioProfile.BitrateKbps} kbps" : string.IsNullOrEmpty(_encoderName) ? "—" : $"{Quality.CodecLabel(_codec)} · {_encoderName}";
             StatisticsUpdated?.Invoke(new HostStatistics(streaming.Count, _encodedFrames.PerSecond(now), _encodedBytes.PerSecond(now) * 8 / 1_000_000.0, sentMbps,
-                string.IsNullOrEmpty(_encoderName) ? "—" : $"{Quality.CodecLabel(_codec)} · {_encoderName}", _captureBackend, _target, _reason));
+                encoder, HasVideo ? _captureBackend : "WASAPI loopback", _target, HasVideo ? _reason : "festa de música", _options.Mode, _audioBytes.PerSecond(now) * 8 / 1000.0));
             ViewersChanged?.Invoke();
         }
     }
@@ -475,6 +513,7 @@ public sealed class HostSession : IAsyncDisposable
                         gpu = GpuDevice.Create(_options.Monitor?.DeviceName);
                         capture = CaptureFactory.Create(gpu, _options.Target, _options.Monitor, target.Fps);
                         _captureBackend = capture.Backend;
+                        _sourceSize = (capture.Width, capture.Height);
                     }
                     if (capture!.SizeChanged)
                     {
@@ -531,7 +570,7 @@ public sealed class HostSession : IAsyncDisposable
                         _encodedBytes.Add(packet.Data.Length, now);
                         foreach (var viewer in audience)
                             foreach (var chunk in chunks)
-                                _sender!.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaEndpoint);
+                                _sender!.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress);
                     }
                 }
                 catch (Exception exception) when (!_cancellation.IsCancellationRequested)
@@ -584,12 +623,17 @@ public sealed class HostSession : IAsyncDisposable
             _ = viewer.SendAsync(config, CancellationToken.None);
     }
 
-    private void EnsureAudio()
+    /// <summary>
+    /// Liga a captura de áudio já no início (pausada até alguém entrar): o medidor do host funciona antes de
+    /// ter viewers e não há atraso para começar quando a primeira pessoa chega.
+    /// </summary>
+    private void StartAudio()
     {
-        if (!_options.AudioEnabled || _audio is not null) return;
+        if (!AudioEnabled || _audio is not null) return;
         try
         {
-            _audio = new SystemAudioCapture(_options.AudioBitrateKbps);
+            _audio = _options.AudioSourceFactory?.Invoke(_audioProfile) ?? new SystemAudioCapture(_audioProfile);
+            _audio.Paused = true;
             _audio.PacketReady += OnAudioPacket;
             _audio.Start();
         }
@@ -600,17 +644,40 @@ public sealed class HostSession : IAsyncDisposable
         }
     }
 
+    private void UpdateAudioPause()
+    {
+        if (_audio is not null) _audio.Paused = !_viewers.Values.Any(v => v.State == ViewerState.Streaming);
+    }
+
     private void OnAudioPacket(AudioPacket packet)
     {
         if (_sender is null) return;
-        var chunk = new MediaChunk
+        MediaChunk chunk;
+        if (_audioProfile.Redundant)
         {
-            Header = new MediaHeader { Type = MediaPacketType.Audio, FrameId = _audioSequence++, Count = 1, TimestampUs = packet.TimestampUs },
-            Payload = packet.Data,
-        };
+            // Festa de música: cada datagrama leva o quadro atual e o anterior.
+            chunk = new MediaChunk
+            {
+                Header = new MediaHeader { Type = MediaPacketType.AudioPair, FrameId = _audioSequence++, Count = 1, TimestampUs = packet.TimestampUs },
+                Payload = AudioPair.Pack(packet.Data, _previousAudio),
+            };
+            _previousAudio = packet.Data;
+        }
+        else
+        {
+            chunk = new MediaChunk
+            {
+                Header = new MediaHeader { Type = MediaPacketType.Audio, FrameId = _audioSequence++, Count = 1, TimestampUs = packet.TimestampUs },
+                Payload = packet.Data,
+            };
+        }
+        var now = MediaClock.NowUs;
         foreach (var viewer in _viewers.Values)
-            if (viewer.State == ViewerState.Streaming)
-                _sender.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaEndpoint);
+        {
+            if (viewer.State != ViewerState.Streaming) continue;
+            _sender.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress);
+            _audioBytes.Add(chunk.Payload.Length + MediaHeader.Size + PacketCipher.TagSize, now);
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -639,13 +706,15 @@ public sealed class HostSession : IAsyncDisposable
     {
         private readonly SemaphoreSlim _writeLock = new(1, 1);
 
-        public RemoteViewer(Guid id, string name, TcpClient client, NetworkStream stream, IPEndPoint mediaEndpoint, byte[] key, byte[] salt, HelloMessage hello)
+        public RemoteViewer(Guid id, string name, TcpClient client, NetworkStream stream, IPEndPoint mediaEndpoint, byte[] key, byte[] salt, HelloMessage hello, string address)
         {
             Id = id;
             Name = name;
             Client = client;
             Stream = stream;
             MediaEndpoint = mediaEndpoint;
+            MediaAddress = mediaEndpoint.Serialize();
+            Address = address;
             Cipher = new PacketCipher(key, salt);
             Hello = hello;
         }
@@ -655,6 +724,8 @@ public sealed class HostSession : IAsyncDisposable
         public TcpClient Client { get; }
         public NetworkStream Stream { get; }
         public IPEndPoint MediaEndpoint { get; }
+        public SocketAddress MediaAddress { get; }
+        public string Address { get; }
         public PacketCipher Cipher { get; }
         public HelloMessage Hello { get; }
         public ulong PacketCounter;
@@ -662,7 +733,7 @@ public sealed class HostSession : IAsyncDisposable
         public StatsMessage? LastStats { get; set; }
         public CancellationTokenSource Kicked { get; } = new();
 
-        public ViewerInfo Info => new(Id, Name, MediaEndpoint.Address.ToString(), State,
+        public ViewerInfo Info => new(Id, Name, Address, State,
             LastStats?.RoundTripMs ?? 0, LastStats?.LossRate ?? 0, (LastStats?.ReceivedKbps ?? 0) / 1000, LastStats?.LatencyMs ?? 0);
 
         public async Task SendAsync(ControlMessage message, CancellationToken token)

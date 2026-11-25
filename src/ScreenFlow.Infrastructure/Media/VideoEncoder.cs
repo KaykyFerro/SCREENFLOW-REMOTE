@@ -95,7 +95,7 @@ public sealed unsafe class VideoEncoder : IDisposable
             frames->sw_format = AVPixelFormat.AV_PIX_FMT_NV12;
             frames->width = s.Width;
             frames->height = s.Height;
-            frames->initial_pool_size = 4;
+            frames->initial_pool_size = 6; // folga para o encoder segurar frames em voo sem esgotar o pool
             FFmpegLoader.Check(ffmpeg.av_hwframe_ctx_init(_hwFrames), "av_hwframe_ctx_init");
             _context->pix_fmt = AVPixelFormat.AV_PIX_FMT_D3D11;
             _context->hw_frames_ctx = ffmpeg.av_buffer_ref(_hwFrames);

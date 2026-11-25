@@ -9,12 +9,14 @@ using ScreenFlow.Core.Protocol;
 using ScreenFlow.Core.Security;
 using ScreenFlow.Infrastructure.Media;
 using ScreenFlow.Infrastructure.Network;
+using ScreenFlow.Infrastructure.Rendering;
 
 namespace ScreenFlow.Infrastructure.Session;
 
 public enum ConnectionState { Idle, Connecting, WaitingApproval, Connected, Reconnecting, Error, Closed }
 
-public sealed record ViewerOptions(string Host, int ControlPort, string DeviceName, string? Pin, float Volume, VideoCodec[] Decoders, int MaxWidth, int MaxHeight, int MaxFps);
+public sealed record ViewerOptions(string Host, int ControlPort, string DeviceName, string? Pin, float Volume, VideoCodec[] Decoders, int MaxWidth, int MaxHeight, int MaxFps,
+    bool AudioOutput = true);
 
 public sealed class ConnectionRejectedException(string code, string message) : Exception(message)
 {
@@ -23,7 +25,7 @@ public sealed class ConnectionRejectedException(string code, string message) : E
 
 /// <summary>
 /// Conecta num host pelo IP, faz o handshake, recebe vídeo e áudio por UDP, decodifica e reconecta sozinho
-/// com backoff se a conexão cair.
+/// com backoff se a conexão cair. Com um <see cref="Presenter"/>, o vídeo é desenhado direto na GPU.
 /// </summary>
 public sealed class ViewerSession : IAsyncDisposable
 {
@@ -35,6 +37,9 @@ public sealed class ViewerSession : IAsyncDisposable
     private float _volume;
     private AudioPlayer? _audio;
     private ViewerStatistics? _lastStats;
+    private volatile StreamConfigMessage? _config;
+    private volatile D3D11VideoPresenter? _presenter;
+    private bool? _gpuRendering;
 
     public ViewerSession(ViewerOptions options)
     {
@@ -47,9 +52,26 @@ public sealed class ViewerSession : IAsyncDisposable
     public string HostName { get; private set; } = "";
     public ViewerStatistics? LastStatistics => _lastStats;
 
+    /// <summary>Configuração atual do host (modo, codec, resolução). Null antes de conectar.</summary>
+    public StreamConfigMessage? Config => _config;
+
+    /// <summary>Nível e espectro do áudio que está tocando (para o visualizador da festa de música).</summary>
+    public AudioMeter? AudioMeter => _audio?.Meter;
+
+    /// <summary>Player na GPU. Definido pela janela do player; null usa a CPU (<see cref="FrameReady"/>).</summary>
+    public D3D11VideoPresenter? Presenter
+    {
+        get => _presenter;
+        set => _presenter = value;
+    }
+
     public event Action<ConnectionState, string>? StateChanged;
     public event Action<DecodedFrame>? FrameReady;
     public event Action<ViewerStatistics>? StatisticsUpdated;
+    public event Action<StreamConfigMessage>? ConfigChanged;
+
+    /// <summary>true quando os frames passam a ser desenhados na GPU; false quando vêm pela CPU.</summary>
+    public event Action<bool>? RenderPathChanged;
 
     /// <summary>Chamado quando o host exige PIN e nenhum foi informado (ou o informado estava errado).</summary>
     public Func<bool, Task<string?>>? PinProvider { get; set; }
@@ -65,6 +87,20 @@ public sealed class ViewerSession : IAsyncDisposable
     }
 
     public void Start() => _runner = Task.Run(RunAsync);
+
+    private void SetConfig(StreamConfigMessage config)
+    {
+        _config = config;
+        ConfigChanged?.Invoke(config);
+    }
+
+    private void SetRenderPath(bool gpu)
+    {
+        if (_gpuRendering == gpu) return;
+        _gpuRendering = gpu;
+        Log.Info(gpu ? "Vídeo desenhado direto na GPU." : "Vídeo desenhado pela CPU.");
+        RenderPathChanged?.Invoke(gpu);
+    }
 
     private void SetState(ConnectionState state, string message)
     {
@@ -139,7 +175,7 @@ public sealed class ViewerSession : IAsyncDisposable
 
         using var exchange = new KeyExchange();
         await ControlFraming.WriteAsync(stream, new HelloMessage(AppInfo.ProtocolVersion, AppInfo.DisplayVersion, _options.DeviceName,
-            _options.Decoders, _options.MaxWidth, _options.MaxHeight, _options.MaxFps, udpPort, exchange.PublicKey), token);
+            _options.Decoders, _options.MaxWidth, _options.MaxHeight, _options.MaxFps, udpPort, exchange.PublicKey, [.. StreamModes.ViewerFeatures]), token);
 
         if (await ControlFraming.ReadAsync(stream, token) is var first && first is RejectedMessage early)
             throw new ConnectionRejectedException(early.Code, early.Message);
@@ -169,7 +205,8 @@ public sealed class ViewerSession : IAsyncDisposable
         using var cipher = new PacketCipher(key, Convert.FromBase64String(welcome.SessionSalt));
         using var connection = new ActiveConnection(this, stream, udp, new IPEndPoint(hostAddress, welcome.MediaPort), cipher, welcome.Stream);
         _backoff.Reset();
-        SetState(ConnectionState.Connected, $"Conectado a {welcome.HostName}.");
+        SetConfig(welcome.Stream);
+        SetState(ConnectionState.Connected, welcome.Stream.Mode == StreamMode.AudioOnly ? $"Na festa de música de {welcome.HostName}." : $"Conectado a {welcome.HostName}.");
         await connection.RunAsync(token);
     }
 
@@ -200,6 +237,8 @@ public sealed class ViewerSession : IAsyncDisposable
         private readonly CancellationTokenSource _stop = new();
         private StreamConfigMessage _config;
         private VideoDecoder? _decoder;
+        private D3D11VideoPresenter? _decoderPresenter;
+        private GpuFrameHandler? _gpuHandler;
         private string _decoderLabel = "—";
         private long _lastVideoTimestampViewerUs;
         private long _lastKeyframeRequestUs;
@@ -231,7 +270,7 @@ public sealed class ViewerSession : IAsyncDisposable
             var receive = new Thread(() => ReceiveLoop(t)) { IsBackground = true, Name = "ScreenFlow UDP", Priority = ThreadPriority.Highest };
             var decode = new Thread(() => DecodeLoop(t)) { IsBackground = true, Name = "ScreenFlow decoder", Priority = ThreadPriority.AboveNormal };
             receive.Start();
-            decode.Start();
+            if (_config.VideoEnabled) decode.Start();
             if (_config.AudioEnabled) StartAudio();
 
             var tick = Task.Run(() => TickLoopAsync(t));
@@ -246,7 +285,7 @@ public sealed class ViewerSession : IAsyncDisposable
                 _stop.Cancel();
                 _decodeQueue.CompleteAdding();
                 receive.Join(1000);
-                decode.Join(1000);
+                if (decode.IsAlive) decode.Join(1000);
                 try { await Task.WhenAll(tick, timers); } catch { }
             }
         }
@@ -255,7 +294,13 @@ public sealed class ViewerSession : IAsyncDisposable
         {
             try
             {
-                _owner._audio ??= new AudioPlayer(_owner._volume);
+                var profile = AudioProfile.ForMode(_config.Mode, AudioProfile.MaxVoiceKbps, AudioProfile.MaxMusicKbps);
+                if (_owner._audio is { } current && current.Profile.Music != profile.Music)
+                {
+                    _owner._audio = null;
+                    current.Dispose();
+                }
+                _owner._audio ??= new AudioPlayer(_owner._volume, profile, _owner._options.AudioOutput);
             }
             catch (Exception exception) { Log.Warn($"Saída de áudio indisponível: {exception.Message}"); }
         }
@@ -272,8 +317,10 @@ public sealed class ViewerSession : IAsyncDisposable
                         break;
                     case StreamConfigMessage config:
                         if (config.Codec != _config.Codec) _codecChanged = true;
-                        if (config.AudioEnabled && !_config.AudioEnabled) StartAudio();
+                        var startAudio = config.AudioEnabled && !_config.AudioEnabled;
                         _config = config;
+                        if (startAudio) StartAudio();
+                        _owner.SetConfig(config);
                         Log.Info($"Novo perfil do host: {config.Width}x{config.Height} {config.Fps} FPS {config.BitrateKbps} kbps ({config.Reason})");
                         break;
                     case BandwidthTestRequestMessage test:
@@ -302,12 +349,12 @@ public sealed class ViewerSession : IAsyncDisposable
         {
             var buffer = new byte[16 * 1024];
             var plain = new byte[16 * 1024];
-            EndPoint from = new IPEndPoint(IPAddress.Any, 0);
+            var from = new SocketAddress(AddressFamily.InterNetwork); // reaproveitado: nenhuma alocação por pacote
             _udp.ReceiveTimeout = 250;
             while (!token.IsCancellationRequested)
             {
                 int length;
-                try { length = _udp.ReceiveFrom(buffer, ref from); }
+                try { length = _udp.ReceiveFrom(buffer, SocketFlags.None, from); }
                 catch (SocketException) { continue; }
                 catch (ObjectDisposedException) { break; }
                 if (!MediaHeader.TryRead(buffer.AsSpan(0, length), out var header)) continue;
@@ -333,8 +380,11 @@ public sealed class ViewerSession : IAsyncDisposable
                         {
                             var audioViewerUs = _clock.HostToViewerUs(header.TimestampUs);
                             var lagMs = _lastVideoTimestampViewerUs == 0 ? 0 : (_lastVideoTimestampViewerUs - audioViewerUs) / 1000.0;
-                            audio.Play(payload.ToArray(), lagMs);
+                            audio.Play(payload, lagMs);
                         }
+                        break;
+                    case MediaPacketType.AudioPair:
+                        _owner._audio?.PlayPair(header.FrameId, payload);
                         break;
                     case MediaPacketType.Probe:
                         Interlocked.Add(ref _probeBytes, length);
@@ -380,21 +430,28 @@ public sealed class ViewerSession : IAsyncDisposable
             {
                 foreach (var frame in _decodeQueue.GetConsumingEnumerable(token))
                 {
-                    if (_decoder is null || _codecChanged)
+                    var presenter = _owner._presenter is { Failed: false } p ? p : null;
+                    if (_decoder is null || _codecChanged || presenter != _decoderPresenter)
                     {
+                        // Novo codec, ou o player na GPU apareceu/falhou: o decoder precisa do device certo.
                         _decoder?.Dispose();
-                        _decoder = new VideoDecoder(_config.Codec);
-                        _decoderLabel = _decoder.Description;
+                        _decoderPresenter?.ResetInputs();
+                        _decoder = CreateDecoder(presenter);
+                        _decoderPresenter = presenter;
+                        _gpuHandler = _decoder.SharesPresenterDevice ? presenter!.Present : null;
+                        _decoderLabel = _decoder.Description + (_gpuHandler is null ? string.Empty : " · desenho na GPU");
                         _codecChanged = false;
+                        if (!frame.Keyframe) RequestKeyframe("decoder novo");
                     }
-                    var image = _decoder.Decode(frame.Data, frame.TimestampUs);
-                    if (image is null) continue;
+                    var outcome = _decoder.Decode(frame.Data, frame.TimestampUs, _gpuHandler, out var image);
+                    if (outcome == DecodeOutcome.None) continue;
                     var now = MediaClock.NowUs;
                     _decoded.Add(1, now);
                     var viewerTs = _clock.HostToViewerUs(frame.TimestampUs);
                     _lastVideoTimestampViewerUs = viewerTs;
                     if (_clock.HasEstimate) _latencyMs = _latencyMs * 0.9 + (now - viewerTs) / 1000.0 * 0.1;
-                    _owner.FrameReady?.Invoke(image);
+                    _owner.SetRenderPath(outcome == DecodeOutcome.Gpu);
+                    if (image is not null) _owner.FrameReady?.Invoke(image);
                 }
             }
             catch (OperationCanceledException) { }
@@ -408,7 +465,18 @@ public sealed class ViewerSession : IAsyncDisposable
             {
                 _decoder?.Dispose();
                 _decoder = null;
+                _decoderPresenter?.ResetInputs();
             }
+        }
+
+        private VideoDecoder CreateDecoder(D3D11VideoPresenter? presenter)
+        {
+            if (presenter is not null)
+            {
+                try { return new VideoDecoder(_config.Codec, presenter.DevicePointer); }
+                catch (Exception exception) { Log.Warn($"Decoder no device do player falhou ({exception.Message}). Usando a CPU."); }
+            }
+            return new VideoDecoder(_config.Codec);
         }
 
         private async Task TickLoopAsync(CancellationToken token)
@@ -450,8 +518,11 @@ public sealed class ViewerSession : IAsyncDisposable
                 var fps = _decoded.PerSecond(now);
                 await SendAsync(new StatsMessage(_lossRate, _clock.RoundTripMs, kbps, fps, _latencyMs), token);
 
-                var stats = new ViewerStatistics(fps, kbps / 1000, _latencyMs, _clock.RoundTripMs, _lossRate, Quality.CodecLabel(_config.Codec),
-                    _config.Width, _config.Height, _decoderLabel, _reassembler.FramesDropped, _reassembler.PacketsRecoveredByFec, _config.Reason);
+                var audio = _owner._audio;
+                var stats = new ViewerStatistics(fps, kbps / 1000, _latencyMs, _clock.RoundTripMs, _lossRate,
+                    _config.VideoEnabled ? Quality.CodecLabel(_config.Codec) : "Opus", _config.Width, _config.Height,
+                    _config.VideoEnabled ? _decoderLabel : "Opus · só áudio", _reassembler.FramesDropped, _reassembler.PacketsRecoveredByFec, _config.Reason,
+                    _config.Mode, audio?.Buffered.TotalMilliseconds ?? 0, audio?.PacketsRecovered ?? 0, 0, _owner._gpuRendering == true);
                 _owner._lastStats = stats;
                 _owner.StatisticsUpdated?.Invoke(stats);
             }

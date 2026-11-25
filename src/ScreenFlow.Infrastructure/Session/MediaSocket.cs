@@ -5,7 +5,10 @@ using ScreenFlow.Core.Security;
 
 namespace ScreenFlow.Infrastructure.Session;
 
-/// <summary>Monta, criptografa e envia datagramas de mídia. Um buffer por thread que envia.</summary>
+/// <summary>
+/// Monta, criptografa e envia datagramas de mídia. Um buffer por thread que envia e o endereço do viewer já
+/// serializado (<see cref="SocketAddress"/>), então cada envio não aloca nada.
+/// </summary>
 internal sealed class MediaSender
 {
     private readonly Socket _socket;
@@ -15,7 +18,7 @@ internal sealed class MediaSender
 
     public long BytesSent;
 
-    public void Send(PacketCipher cipher, ref ulong packetCounter, MediaChunk chunk, EndPoint target, bool retransmit = false)
+    public void Send(PacketCipher cipher, ref ulong packetCounter, MediaChunk chunk, SocketAddress target, bool retransmit = false)
     {
         var header = chunk.Header;
         header.PacketNumber = Interlocked.Increment(ref packetCounter);
@@ -27,7 +30,7 @@ internal sealed class MediaSender
         try
         {
             cipher.Encrypt(header.PacketNumber, buffer.AsSpan(0, MediaHeader.Size), chunk.Payload.Span, buffer.AsSpan(MediaHeader.Size, chunk.Payload.Length + PacketCipher.TagSize));
-            _socket.SendTo(buffer, 0, length, SocketFlags.None, target);
+            _socket.SendTo(buffer.AsSpan(0, length), SocketFlags.None, target);
             Interlocked.Add(ref BytesSent, length);
         }
         catch (SocketException) { /* buffer cheio ou viewer saiu: o FEC/NACK cuida */ }

@@ -10,6 +10,9 @@
     <ApplicationIcon>Assets\screenflow.ico</ApplicationIcon>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <!-- Publicação: só os idiomas usados (o WPF traz recursos de 13 idiomas) e código pré-compilado (abre mais rápido). -->
+    <SatelliteResourceLanguages>pt-BR;en</SatelliteResourceLanguages>
+    <PublishReadyToRun Condition="'$(RuntimeIdentifier)' != ''">true</PublishReadyToRun>
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Assets\screenflow.ico" />
@@ -18,8 +21,13 @@
     <ProjectReference Include="..\ScreenFlow.Core\ScreenFlow.Core.csproj" />
     <ProjectReference Include="..\ScreenFlow.Infrastructure\ScreenFlow.Infrastructure.csproj" />
   </ItemGroup>
-  <!-- DLLs do FFmpeg (build LGPL) baixadas pelo CI em third_party/ffmpeg/bin -->
-  <ItemGroup Condition="Exists('$(MSBuildThisFileDirectory)..\..\third_party\ffmpeg\bin')">
-    <None Include="$(MSBuildThisFileDirectory)..\..\third_party\ffmpeg\bin\*.dll" Link="ffmpeg\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  <!-- DLLs do FFmpeg (build LGPL) baixadas pelo CI em third_party/ffmpeg/bin. O app só usa avcodec, avutil, swscale e
+       swresample (carregados sob demanda pelo FFmpeg.AutoGen); avformat, avfilter e avdevice ficam fora do instalador. -->
+  <PropertyGroup>
+    <FFmpegBin>$(MSBuildThisFileDirectory)..\..\third_party\ffmpeg\bin</FFmpegBin>
+  </PropertyGroup>
+  <ItemGroup Condition="Exists('$(FFmpegBin)')">
+    <None Include="$(FFmpegBin)\*.dll" Exclude="$(FFmpegBin)\avformat*.dll;$(FFmpegBin)\avfilter*.dll;$(FFmpegBin)\avdevice*.dll"
+          Link="ffmpeg\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

@@ -15,9 +15,17 @@ public sealed class DecodedFrame
     public long TimestampUs { get; set; }
 }
 
+/// <summary>Recebe um frame decodificado que ainda está na GPU (fatia de um array de texturas NV12).</summary>
+/// <returns>true se mostrou o frame; false para o decoder converter pela CPU.</returns>
+public delegate bool GpuFrameHandler(nint texture, int arraySlice, int width, int height);
+
+public enum DecodeOutcome { None, Cpu, Gpu }
+
 /// <summary>
 /// Decoder FFmpeg com aceleração D3D11VA (DXVA) quando disponível, e software como reserva.
 /// Configurado para baixa latência: sem fila de reordenação, um frame entra e um frame sai.
+/// Com um device compartilhado (o do player na GPU), o frame decodificado é mostrado sem sair da GPU;
+/// sem ele, o frame é copiado para a CPU e convertido para BGRA.
 /// </summary>
 public sealed unsafe class VideoDecoder : IDisposable
 {
@@ -33,10 +41,14 @@ public sealed unsafe class VideoDecoder : IDisposable
     private readonly DecodedFrame?[] _buffers = new DecodedFrame?[3];
     private int _bufferIndex;
 
-    public VideoDecoder(VideoCodec codec)
+    private readonly nint _sharedDevice;
+
+    /// <param name="sharedDevice">ID3D11Device* do player na GPU (0 = device próprio e cópia para a CPU).</param>
+    public VideoDecoder(VideoCodec codec, nint sharedDevice = 0)
     {
         if (!FFmpegLoader.EnsureLoaded()) throw new InvalidOperationException(FFmpegLoader.Error);
         Codec = codec;
+        _sharedDevice = sharedDevice;
         var id = codec switch
         {
             VideoCodec.Av1 => AVCodecID.AV_CODEC_ID_AV1,
@@ -59,6 +71,7 @@ public sealed unsafe class VideoDecoder : IDisposable
 
     public VideoCodec Codec { get; }
     public bool Hardware { get; private set; }
+    public bool SharesPresenterDevice => Hardware && _sharedDevice != 0;
     public string Description => $"{Quality.CodecLabel(Codec)} · " + (Hardware ? "D3D11VA (GPU)" : "software");
 
     private bool TryOpen(AVCodec* decoder, bool hardware)
@@ -69,8 +82,8 @@ public sealed unsafe class VideoDecoder : IDisposable
         _context->flags2 |= ffmpeg.AV_CODEC_FLAG2_FAST;
         if (hardware)
         {
-            AVBufferRef* device = null;
-            if (ffmpeg.av_hwdevice_ctx_create(&device, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0) < 0)
+            var device = _sharedDevice != 0 ? WrapSharedDevice() : CreateOwnDevice();
+            if (device is null)
             {
                 Free();
                 return false;
@@ -99,6 +112,29 @@ public sealed unsafe class VideoDecoder : IDisposable
         return true;
     }
 
+    private static AVBufferRef* CreateOwnDevice()
+    {
+        AVBufferRef* device = null;
+        return ffmpeg.av_hwdevice_ctx_create(&device, AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA, null, null, 0) < 0 ? null : device;
+    }
+
+    /// <summary>Usa o device do player: as texturas decodificadas já estão no device que desenha na tela.</summary>
+    private AVBufferRef* WrapSharedDevice()
+    {
+        var device = ffmpeg.av_hwdevice_ctx_alloc(AVHWDeviceType.AV_HWDEVICE_TYPE_D3D11VA);
+        if (device is null) return null;
+        var deviceContext = (AVHWDeviceContext*)device->data;
+        var d3d = (AVD3D11VADeviceContext*)deviceContext->hwctx;
+        Marshal.AddRef(_sharedDevice); // o FFmpeg libera essa referência ao fechar
+        d3d->device = (FFmpeg.AutoGen.ID3D11Device*)_sharedDevice;
+        if (ffmpeg.av_hwdevice_ctx_init(device) < 0)
+        {
+            ffmpeg.av_buffer_unref(&device);
+            return null;
+        }
+        return device;
+    }
+
     private AVPixelFormat ChooseFormat(AVCodecContext* context, AVPixelFormat* formats)
     {
         for (var p = formats; *p != AVPixelFormat.AV_PIX_FMT_NONE; p++)
@@ -109,8 +145,16 @@ public sealed unsafe class VideoDecoder : IDisposable
 
     /// <summary>Decodifica um frame completo. Retorna null quando o decoder ainda não produziu imagem.</summary>
     public DecodedFrame? Decode(byte[] data, long timestampUs)
+        => Decode(data, timestampUs, null, out var frame) == DecodeOutcome.Cpu ? frame : null;
+
+    /// <summary>
+    /// Decodifica um frame completo. Frames na GPU vão para <paramref name="gpu"/> (se informado e se aceitar);
+    /// os demais são convertidos para BGRA em <paramref name="cpuFrame"/>.
+    /// </summary>
+    public DecodeOutcome Decode(byte[] data, long timestampUs, GpuFrameHandler? gpu, out DecodedFrame? cpuFrame)
     {
-        DecodedFrame? result = null;
+        cpuFrame = null;
+        var outcome = DecodeOutcome.None;
         fixed (byte* pointer = data)
         {
             _packet->data = pointer;
@@ -122,7 +166,7 @@ public sealed unsafe class VideoDecoder : IDisposable
             if (sent < 0 && sent != ffmpeg.AVERROR(ffmpeg.EAGAIN))
             {
                 Log.Debug($"send_packet: {FFmpegLoader.ErrorText(sent)}");
-                return null;
+                return DecodeOutcome.None;
             }
         }
 
@@ -135,10 +179,20 @@ public sealed unsafe class VideoDecoder : IDisposable
                 Log.Debug($"receive_frame: {FFmpegLoader.ErrorText(received)}");
                 break;
             }
-            result = Convert(_frame, timestampUs);
+            if (gpu is not null && _frame->format == (int)AVPixelFormat.AV_PIX_FMT_D3D11
+                && gpu((nint)_frame->data[0], (int)(nint)_frame->data[1], _frame->width, _frame->height))
+            {
+                outcome = DecodeOutcome.Gpu;
+                cpuFrame = null;
+            }
+            else if (Convert(_frame, timestampUs) is { } converted)
+            {
+                outcome = DecodeOutcome.Cpu;
+                cpuFrame = converted;
+            }
             ffmpeg.av_frame_unref(_frame);
         }
-        return result;
+        return outcome;
     }
 
     private DecodedFrame? Convert(AVFrame* frame, long timestampUs)
