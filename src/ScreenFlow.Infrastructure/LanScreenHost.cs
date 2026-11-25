@@ -98,7 +98,11 @@ public sealed class LanScreenHost : IAsyncDisposable
         await stream.WriteAsync(challenge, cancellationToken);
 
         var proof = new byte[32];
-        await stream.ReadExactlyAsync(proof, cancellationToken);
+        using (var handshakeTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+        {
+            handshakeTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+            await stream.ReadExactlyAsync(proof, handshakeTimeout.Token);
+        }
         var expectedProof = SessionSecurity.CreateAuthenticationProof(SessionCode, challenge);
         var authenticated = CryptographicOperations.FixedTimeEquals(proof, expectedProof);
         CryptographicOperations.ZeroMemory(proof);
@@ -114,24 +118,26 @@ public sealed class LanScreenHost : IAsyncDisposable
 
         var mediaKey = SessionSecurity.DeriveMediaKey(SessionCode, challenge);
         var remote = client.Client.RemoteEndPoint?.ToString() ?? "cliente desconhecido";
-        var approved = ConnectionApproval is not null && await ConnectionApproval(remote);
-        await stream.WriteAsync(new[] { approved ? (byte)1 : (byte)0 }, cancellationToken);
-        if (!approved)
-        {
-            StatusChanged?.Invoke($"Conexão rejeitada: {remote}.");
-            CryptographicOperations.ZeroMemory(mediaKey);
-            return;
-        }
-
-        StatusChanged?.Invoke($"Tela compartilhada com {remote}.");
+        var isStreaming = false;
         try
         {
+            var approved = ConnectionApproval is not null && await ConnectionApproval(remote);
+            await stream.WriteAsync(new[] { approved ? (byte)1 : (byte)0 }, cancellationToken);
+            if (!approved)
+            {
+                StatusChanged?.Invoke($"Conexão rejeitada: {remote}.");
+                return;
+            }
+
+            isStreaming = true;
+            StatusChanged?.Invoke($"Tela compartilhada com {remote}.");
             await StreamFramesAsync(stream, mediaKey, cancellationToken);
         }
         finally
         {
             CryptographicOperations.ZeroMemory(mediaKey);
-            StatusChanged?.Invoke("Visualizador desconectado. A sessão continua aguardando outro participante.");
+            if (isStreaming)
+                StatusChanged?.Invoke("Visualizador desconectado. A sessão continua aguardando outro participante.");
         }
     }
 
