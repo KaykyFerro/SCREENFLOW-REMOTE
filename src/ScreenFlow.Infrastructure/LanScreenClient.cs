@@ -46,7 +46,7 @@ public sealed class LanScreenClient : IAsyncDisposable
 
             _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             StatusChanged?.Invoke("Conectado. Recebendo transmissão criptografada.");
-            _reader = ReceiveLoopAsync(stream, mediaKey, _cancellation.Token);
+            _reader = Task.Run(() => ReceiveLoopAsync(stream, mediaKey, _cancellation.Token));
         }
         catch
         {
