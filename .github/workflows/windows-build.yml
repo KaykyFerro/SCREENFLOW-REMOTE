@@ -1,0 +1,34 @@
+name: Windows build and tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Restore
+        run: dotnet restore ScreenFlowRemote.sln
+      - name: Build Release
+        run: dotnet build ScreenFlowRemote.sln --configuration Release --no-restore
+      - name: Run automated tests
+        run: dotnet test ScreenFlowRemote.sln --configuration Release --no-build --logger "trx;LogFileName=screenflow-tests.trx"
+      - name: Publish Windows x64 app
+        run: dotnet publish src/ScreenFlow.Remote/ScreenFlow.Remote.csproj --configuration Release --runtime win-x64 --self-contained false --output artifacts/win-x64
+      - name: Upload Windows x64 build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenFlow-Remote-win-x64
+          path: artifacts/win-x64/
+          if-no-files-found: error
+          retention-days: 14
