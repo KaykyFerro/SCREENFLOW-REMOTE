@@ -44,7 +44,7 @@ public sealed record AuthMessage(string Proof) : ControlMessage;
 
 public sealed record PendingApprovalMessage(string Message) : ControlMessage;
 
-public sealed record WelcomeMessage(string HostName, string SessionSalt, StreamConfigMessage Stream) : ControlMessage;
+public sealed record WelcomeMessage(string HostName, string SessionSalt, int MediaPort, StreamConfigMessage Stream) : ControlMessage;
 
 public sealed record RejectedMessage(string Code, string Message) : ControlMessage
 {
