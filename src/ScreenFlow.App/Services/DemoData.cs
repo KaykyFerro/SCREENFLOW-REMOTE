@@ -46,13 +46,18 @@ public static class DemoData
         return meter;
     }
 
-    /// <summary>Medidor que continua recebendo "música" (um acorde que pulsa), para o visualizador não cair a zero.</summary>
+    /// <summary>
+    /// Medidor que continua recebendo "música" (um acorde que pulsa sobre um ruído rosa), para o visualizador não cair a
+    /// zero. Sem o ruído, as faixas entre as notas ficam vazias e o visualizador parece quebrado.
+    /// </summary>
     public static AudioMeter LiveMeter(int bands = 48)
     {
         var meter = new AudioMeter(bands);
         var block = new float[960 * 2];
         double[] tones = [55, 82.4, 110, 164.8, 220, 329.6, 440, 659.3, 880, 1318.5, 1760, 2637, 3520, 5274, 7040, 10548];
         long position = 0;
+        var random = new Random(7);
+        double pink0 = 0, pink1 = 0, pink2 = 0;
         var timer = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(20) };
         timer.Tick += (_, _) =>
         {
@@ -65,7 +70,13 @@ public static class DemoData
                     var pulse = 0.55 + 0.45 * Math.Sin(t * (1.7 + k * 0.37) + k);
                     v += Math.Sin(2 * Math.PI * tones[k] * t) * pulse * (0.6 / (1 + k * 0.45));
                 }
-                block[i * 2] = block[i * 2 + 1] = (float)(v * 0.32);
+                // Ruído rosa (filtro de Paul Kellet) com um pouco de ruído branco: enche o espectro como uma música de verdade.
+                var white = random.NextDouble() * 2 - 1;
+                pink0 = 0.99765 * pink0 + white * 0.0990460;
+                pink1 = 0.96300 * pink1 + white * 0.2965164;
+                pink2 = 0.57000 * pink2 + white * 1.0526913;
+                var pink = pink0 + pink1 + pink2 + white * 0.1848;
+                block[i * 2] = block[i * 2 + 1] = (float)(v * 0.32 + pink * 0.04 + white * 0.02);
             }
             position += block.Length / 2;
             meter.AddInterleaved(block);
