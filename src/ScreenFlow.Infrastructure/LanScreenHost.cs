@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
@@ -21,6 +22,7 @@ public sealed class LanScreenHost : IAsyncDisposable
     private readonly int _framesPerSecond;
     private readonly byte[] _authenticationKey;
     private readonly TcpListener _listener;
+    private readonly ConcurrentDictionary<string, AuthFailureWindow> _failedAttempts = new();
     private CancellationTokenSource? _cancellation;
     private Task? _worker;
 
@@ -84,6 +86,15 @@ public sealed class LanScreenHost : IAsyncDisposable
 
     private async Task HandleClientAsync(TcpClient client, CancellationToken cancellationToken)
     {
+        var remoteIp = (client.Client.RemoteEndPoint as IPEndPoint)?.Address.ToString() ?? "unknown";
+        if (_failedAttempts.TryGetValue(remoteIp, out var failureWindow)
+            && failureWindow.Count >= 5
+            && DateTimeOffset.UtcNow - failureWindow.WindowStartedAt < TimeSpan.FromMinutes(1))
+        {
+            StatusChanged?.Invoke($"Tentativas limitadas temporariamente para {remoteIp}.");
+            return;
+        }
+
         var stream = client.GetStream();
         var challenge = RandomNumberGenerator.GetBytes(32);
         await stream.WriteAsync(challenge, cancellationToken);
@@ -91,12 +102,17 @@ public sealed class LanScreenHost : IAsyncDisposable
         var proof = new byte[32];
         await stream.ReadExactlyAsync(proof, cancellationToken);
         var expectedProof = DeriveKey("screenflow-auth-v1", challenge);
-        if (!CryptographicOperations.FixedTimeEquals(proof, expectedProof))
+        var authenticated = CryptographicOperations.FixedTimeEquals(proof, expectedProof);
+        CryptographicOperations.ZeroMemory(proof);
+        CryptographicOperations.ZeroMemory(expectedProof);
+        if (!authenticated)
         {
+            RegisterFailedAttempt(remoteIp);
             StatusChanged?.Invoke($"Tentativa de autenticação recusada: {client.Client.RemoteEndPoint}.");
             await Task.Delay(350, cancellationToken);
             return;
         }
+        _failedAttempts.TryRemove(remoteIp, out _);
 
         var mediaKey = DeriveKey("screenflow-media-v1", challenge);
         var remote = client.Client.RemoteEndPoint?.ToString() ?? "cliente desconhecido";
@@ -155,6 +171,19 @@ public sealed class LanScreenHost : IAsyncDisposable
         }
     }
 
+    private void RegisterFailedAttempt(string remoteIp)
+    {
+        var now = DateTimeOffset.UtcNow;
+        _failedAttempts.AddOrUpdate(
+            remoteIp,
+            _ => new AuthFailureWindow(now, 1),
+            (_, current) => now - current.WindowStartedAt >= TimeSpan.FromMinutes(1)
+                ? new AuthFailureWindow(now, 1)
+                : current with { Count = current.Count + 1 });
+    }
+
+    private sealed record AuthFailureWindow(DateTimeOffset WindowStartedAt, int Count);
+
     private byte[] DeriveKey(string purpose, byte[] challenge)
     {
         var label = Encoding.ASCII.GetBytes(purpose);
@@ -176,6 +205,7 @@ public sealed class LanScreenHost : IAsyncDisposable
         }
         _cancellation.Dispose();
         _cancellation = null;
+        CryptographicOperations.ZeroMemory(_authenticationKey);
         _worker = null;
         StatusChanged?.Invoke("Compartilhamento encerrado.");
     }
