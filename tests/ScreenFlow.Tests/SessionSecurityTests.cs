@@ -37,8 +37,8 @@ public class SessionSecurityTests
 
         var expected = SessionSecurity.CreateAuthenticationProof(code, challenge);
 
-        Assert.NotEqual(expected, SessionSecurity.CreateAuthenticationProof(otherCode, challenge));
-        Assert.NotEqual(expected, SessionSecurity.CreateAuthenticationProof(code, otherChallenge));
+        Assert.False(expected.SequenceEqual(SessionSecurity.CreateAuthenticationProof(otherCode, challenge)));
+        Assert.False(expected.SequenceEqual(SessionSecurity.CreateAuthenticationProof(code, otherChallenge)));
     }
 
     [Fact]
@@ -50,7 +50,7 @@ public class SessionSecurityTests
         var proof = SessionSecurity.CreateAuthenticationProof(code, challenge);
         var mediaKey = SessionSecurity.DeriveMediaKey(code, challenge);
 
-        Assert.NotEqual(proof, mediaKey);
+        Assert.False(proof.SequenceEqual(mediaKey));
         Assert.Equal(32, mediaKey.Length);
     }
 
