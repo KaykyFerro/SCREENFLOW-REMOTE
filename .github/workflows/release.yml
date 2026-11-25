@@ -1,0 +1,50 @@
+name: Release
+
+# Publica uma versão quando uma tag vX.Y.Z é enviada. O app procura atualizações nesses releases.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          "value=$version" >> $env:GITHUB_OUTPUT
+      - name: Download FFmpeg (LGPL)
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/fetch-ffmpeg.ps1
+      - name: Test
+        run: dotnet test tests/ScreenFlow.Tests --configuration Release
+      - name: Publish
+        run: dotnet publish src/ScreenFlow.App/ScreenFlow.App.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/publish -p:Version=${{ steps.version.outputs.value }}
+      - name: Install Inno Setup
+        run: choco install innosetup --yes --no-progress
+      - name: Build installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DMyAppVersion=${{ steps.version.outputs.value }}" installer\ScreenFlow.iss
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          $hash = (Get-FileHash artifacts/ScreenFlow-Setup-win-x64.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  ScreenFlow-Setup-win-x64.exe" | Out-File -Encoding ascii artifacts/ScreenFlow-Setup-win-x64.exe.sha256
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          gh release create "${{ github.ref_name }}" artifacts/ScreenFlow-Setup-win-x64.exe artifacts/ScreenFlow-Setup-win-x64.exe.sha256 --title "ScreenFlow ${{ steps.version.outputs.value }}" --generate-notes
