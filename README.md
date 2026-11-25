@@ -93,7 +93,7 @@ Logs ficam em `%LOCALAPPDATA%\ScreenFlow\logs` (botão **Abrir logs**).
 
 O app procura uma versão nova ao abrir (dá para desligar) e em **Configurações › Atualizações**. Ao clicar em **Atualizar agora**, ele baixa o instalador do último release, confere o SHA-256, instala em silêncio e reabre.
 
-Para publicar uma versão: `git tag v1.1.0 && git push origin v1.1.0`. O workflow `release.yml` compila, gera o instalador e o `.sha256` e cria o release.
+Para publicar uma versão, crie um release no GitHub com a tag nova `v1.1.0` na `main` (ou rode `git tag v1.1.0 && git push origin v1.1.0`). O workflow `release.yml` compila, gera o instalador e o `.sha256` e anexa ao release.
 
 ## Solução de problemas
 
