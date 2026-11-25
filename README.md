@@ -1,27 +1,27 @@
 # ScreenFlow Remote
 
-Aplicativo desktop Windows de compartilhamento de tela. O repositório agora contém um **MVP LAN funcional em desenvolvimento**, com host, visualizador, aprovação explícita, autenticação por código aleatório e frames criptografados.
+Aplicativo desktop Windows de compartilhamento de tela. O repositório contém um **MVP LAN funcional em desenvolvimento**, com host, visualizador, aprovação explícita, autenticação por código aleatório e frames criptografados.
 
 > **Status honesto:** o caminho LAN atual usa captura GDI + JPEG por TCP, com largura limitada a 1920 pixels e alvo de até 30 FPS. Ainda não é a arquitetura final de baixa latência baseada em Windows Graphics Capture, Direct3D e WebRTC. Não existe validação de 4K/165 FPS.
 
 ## Requisitos
 
-- Windows 10/11 x64
-- .NET 10 SDK
+- **Para instalar/usar:** Windows 10/11 x64. O pacote Windows autocontido inclui o runtime .NET.
+- **Para desenvolver:** .NET 10 SDK.
 
-## Build
+## Build de desenvolvimento
 
     dotnet restore ScreenFlowRemote.sln
     dotnet build ScreenFlowRemote.sln --configuration Release
     dotnet test ScreenFlowRemote.sln --configuration Release
     dotnet run --project src/ScreenFlow.Remote/ScreenFlow.Remote.csproj
 
-Um workflow do GitHub Actions executa build/teste em Windows e publica um artefato win-x64 a cada push na branch main.
+O GitHub Actions compila, executa os testes, publica a aplicação autocontida win-x64 e gera o instalador Windows usando Inno Setup. O instalador e a pasta publicada aparecem no artefato ScreenFlow-Remote-win-x64 da execução de Actions.
 
 ## Usar o MVP LAN
 
-1. Abra o ScreenFlow Remote no computador que compartilhará a tela.
-2. Selecione monitor, largura máxima e FPS.
+1. Instale o ScreenFlow Remote nos dois computadores.
+2. No computador que compartilhará a tela, selecione monitor, largura máxima e FPS.
 3. Clique em INICIAR COMPARTILHAMENTO.
 4. Compartilhe o IP mostrado, a porta TCP 39217 e o código da sessão com o outro computador.
 5. No segundo computador, informe IP e código e clique em CONECTAR.
