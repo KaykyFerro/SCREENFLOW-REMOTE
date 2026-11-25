@@ -1,7 +1,6 @@
 using System.Buffers.Binary;
 using System.Net.Sockets;
 using System.Security.Cryptography;
-using System.Text;
 
 namespace ScreenFlow.Infrastructure;
 
@@ -22,7 +21,7 @@ public sealed class LanScreenClient : IAsyncDisposable
         if (_client is not null) throw new InvalidOperationException("O cliente já está conectado.");
         if (string.IsNullOrWhiteSpace(host)) throw new ArgumentException("Informe o IP do computador transmissor.", nameof(host));
         var normalizedCode = (sessionCode ?? string.Empty).Trim().ToUpperInvariant();
-        if (normalizedCode.Length != 32 || normalizedCode.Any(c => !Uri.IsHexDigit(c)))
+        if (!SessionSecurity.IsValidSessionCode(normalizedCode))
             throw new ArgumentException("O código de sessão deve conter 32 caracteres hexadecimais.", nameof(sessionCode));
 
         _client = new TcpClient { NoDelay = true };
@@ -33,10 +32,7 @@ public sealed class LanScreenClient : IAsyncDisposable
             var challenge = new byte[32];
             await stream.ReadExactlyAsync(challenge, cancellationToken);
 
-            var authenticationKey = SHA256.HashData(Encoding.ASCII.GetBytes(normalizedCode));
-            var authLabel = Encoding.ASCII.GetBytes("screenflow-auth-v1");
-            var authMaterial = authLabel.Concat(challenge).ToArray();
-            var proof = HMACSHA256.HashData(authenticationKey, authMaterial);
+            var proof = SessionSecurity.CreateAuthenticationProof(normalizedCode, challenge);
             await stream.WriteAsync(proof, cancellationToken);
             CryptographicOperations.ZeroMemory(proof);
             CryptographicOperations.ZeroMemory(authMaterial);
@@ -46,11 +42,7 @@ public sealed class LanScreenClient : IAsyncDisposable
             if (response[0] != 1)
                 throw new UnauthorizedAccessException("O transmissor recusou a conexão.");
 
-            var mediaLabel = Encoding.ASCII.GetBytes("screenflow-media-v1");
-            var mediaMaterial = mediaLabel.Concat(challenge).ToArray();
-            var mediaKey = HMACSHA256.HashData(authenticationKey, mediaMaterial);
-            CryptographicOperations.ZeroMemory(authenticationKey);
-            CryptographicOperations.ZeroMemory(mediaMaterial);
+            var mediaKey = SessionSecurity.DeriveMediaKey(normalizedCode, challenge);
 
             _cancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             StatusChanged?.Invoke("Conectado. Recebendo transmissão criptografada.");
