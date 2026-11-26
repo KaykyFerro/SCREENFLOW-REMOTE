@@ -251,7 +251,7 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         capture.RecordingStopped += OnStopped;
         _capture = capture;
         Separation = separation;
-        Separated = capture is not WasapiLoopbackCapture;
+        Separated = capture is not LowLatencyLoopbackCapture;
         Description = $"{_sourceRate} Hz, {_sourceChannels} canais, {_sourceBits} bits{(_sourceFloat ? " float" : string.Empty)} → Opus {Profile.BitrateKbps} kbps"
                       + (Profile.Music ? " (música, 20 ms, VBR)" : " (baixa latência, 10 ms)") + $" · {separation}";
         Log.Info($"Áudio do sistema: {Description}");
@@ -290,7 +290,7 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
             }
         }
         separation = "todo o som do PC";
-        return new WasapiLoopbackCapture();
+        return new LowLatencyLoopbackCapture();
     }
 
     private void Warn(string message)
@@ -568,24 +568,36 @@ internal sealed class DeviceWatcher : IMMNotificationClient, IDisposable
 }
 
 /// <summary>
-/// Buffer de reprodução com alvo de latência: espera juntar o alvo antes de tocar, volta a juntar depois de um
-/// buraco (em vez de estalar) e pula para o alvo quando a fila passa do máximo (atraso acumulado).
+/// Loopback normal (todo o som do PC) com buffer curto. O <see cref="WasapiLoopbackCapture"/> do NAudio usa 100 ms e lê
+/// a cada 50 ms, o que somava até 50 ms de atraso no som; aqui o buffer é de 30 ms e a leitura a cada 15 ms.
+/// </summary>
+internal sealed class LowLatencyLoopbackCapture() : WasapiCapture(WasapiLoopbackCapture.GetDefaultLoopbackCaptureDevice(), false, 30)
+{
+    protected override AudioClientStreamFlags GetAudioClientStreamFlags() => AudioClientStreamFlags.Loopback | base.GetAudioClientStreamFlags();
+}
+
+/// <summary>
+/// Buffer de reprodução com o menor atraso que a rede deixa (<see cref="PlayoutController"/>): espera juntar o alvo
+/// antes de tocar, volta a juntar depois de um buraco (em vez de estalar), lê 0,5% mais rápido ou mais devagar para
+/// voltar ao alvo sem cortes (inclusive a diferença de relógio entre as placas de som) e só pula de uma vez quando o
+/// atraso passa muito do alvo.
 /// </summary>
 internal sealed class JitterBuffer : ISampleProvider
 {
+    private const int Channels = AudioProfile.Channels;
+
     private readonly object _gate = new();
     private readonly float[] _ring;
-    private readonly int _target;
-    private readonly int _max;
+    private readonly PlayoutController _playout;
     private int _read;
     private int _count;
     private bool _playing;
+    private double _fraction;
 
-    public JitterBuffer(int targetMs, int maxMs)
+    public JitterBuffer(int minMs, int maxTargetMs)
     {
-        _target = Floats(targetMs);
-        _max = Floats(maxMs);
-        _ring = new float[_max + Floats(200)];
+        _playout = new PlayoutController(minMs, maxTargetMs);
+        _ring = new float[Floats(_playout.MaxTargetMs * 3 + 40) + Floats(200)];
     }
 
     public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(AudioProfile.SampleRate, AudioProfile.Channels);
@@ -593,12 +605,20 @@ internal sealed class JitterBuffer : ISampleProvider
     public long Underruns { get; private set; }
     public long Skips { get; private set; }
 
-    public TimeSpan Buffered
+    /// <summary>O alvo de agora (sobe se o som falhar, desce devagar com a rede estável).</summary>
+    public int TargetMs
     {
-        get { lock (_gate) return TimeSpan.FromSeconds(_count / (double)(AudioProfile.SampleRate * AudioProfile.Channels)); }
+        get { lock (_gate) return _playout.TargetMs; }
     }
 
-    private static int Floats(int ms) => AudioProfile.SampleRate * ms / 1000 * AudioProfile.Channels;
+    public TimeSpan Buffered
+    {
+        get { lock (_gate) return TimeSpan.FromSeconds(_count / (double)(AudioProfile.SampleRate * Channels)); }
+    }
+
+    private static int Floats(int ms) => AudioProfile.SampleRate * ms / 1000 * Channels;
+
+    private double BufferedMs => _count * 1000.0 / (AudioProfile.SampleRate * Channels);
 
     public void Write(ReadOnlySpan<float> samples)
     {
@@ -612,9 +632,10 @@ internal sealed class JitterBuffer : ISampleProvider
             samples[..first].CopyTo(_ring.AsSpan(write));
             samples[first..].CopyTo(_ring);
             _count += samples.Length;
-            if (_count > _max)
+            if (_count > Floats(_playout.HardLimitMs))
             {
-                Drop(_count - _target);
+                Drop(_count - Floats(_playout.TargetMs));
+                _playout.Reset();
                 Skips++;
             }
         }
@@ -633,34 +654,56 @@ internal sealed class JitterBuffer : ISampleProvider
         {
             _read = _count = 0;
             _playing = false;
+            _fraction = 0;
+            _playout.Reset();
         }
     }
+
+    private float At(int frame, int channel) => _ring[(_read + frame * Channels + channel) % _ring.Length];
 
     public int Read(float[] buffer, int offset, int count)
     {
         lock (_gate)
         {
+            var now = MediaClock.Now;
             if (!_playing)
             {
-                if (_count < _target)
+                if (_count < Floats(_playout.TargetMs))
                 {
                     Array.Clear(buffer, offset, count);
                     return count;
                 }
                 _playing = true;
+                _fraction = 0;
             }
-            var n = Math.Min(count, _count);
-            var first = Math.Min(n, _ring.Length - _read);
+
+            // Lê com interpolação linear na velocidade que o controle pede (1 ± 0,5%).
+            var rate = _playout.Update(BufferedMs, now);
             var volume = Volume;
-            for (var i = 0; i < first; i++) buffer[offset + i] = _ring[_read + i] * volume;
-            for (var i = first; i < n; i++) buffer[offset + i] = _ring[i - first] * volume;
-            _read = (_read + n) % _ring.Length;
-            _count -= n;
-            if (n < count)
+            var frames = count / Channels;
+            var written = 0;
+            for (; written < frames; written++)
             {
-                Array.Clear(buffer, offset + n, count - n);
+                var available = _count / Channels;
+                if (available < 2) break;
+                var t = (float)_fraction;
+                for (var c = 0; c < Channels; c++)
+                {
+                    var a = At(0, c);
+                    var b = At(1, c);
+                    buffer[offset + written * Channels + c] = (a + (b - a) * t) * volume;
+                }
+                _fraction += rate;
+                var advance = (int)_fraction;
+                _fraction -= advance;
+                if (advance > 0) Drop(Math.Min(_count, advance * Channels));
+            }
+            if (written < frames)
+            {
+                Array.Clear(buffer, offset + written * Channels, count - written * Channels);
                 _playing = false;
                 Underruns++;
+                _playout.Underrun(now);
             }
             return count;
         }
@@ -690,7 +733,7 @@ public sealed unsafe class AudioPlayer : IDisposable
         if (!FFmpegLoader.EnsureLoaded()) throw new InvalidOperationException(FFmpegLoader.Error);
         Profile = profile;
         _outputEnabled = outputEnabled;
-        _buffer = new JitterBuffer(profile.PlaybackTargetMs, profile.PlaybackMaxMs) { Volume = Math.Clamp(volume, 0f, 1f) };
+        _buffer = new JitterBuffer(profile.PlaybackMinMs, profile.PlaybackMaxTargetMs) { Volume = Math.Clamp(volume, 0f, 1f) };
 
         var codec = ffmpeg.avcodec_find_decoder(AVCodecID.AV_CODEC_ID_OPUS);
         if (codec is null) throw new InvalidOperationException("Decoder Opus não está nesta build do FFmpeg.");

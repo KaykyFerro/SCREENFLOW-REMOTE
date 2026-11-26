@@ -64,14 +64,15 @@ public sealed record ApprovalRequest(Guid Id, string Name, string Address);
 /// Com "câmera junto", a câmera vai numa segunda faixa de vídeo (pacotes próprios, encoder próprio) e quem assiste vê
 /// num quadrinho por cima da tela.
 /// </summary>
-public sealed class HostSession : IAsyncDisposable
+public sealed partial class HostSession : IAsyncDisposable
 {
     private readonly HostOptions _options;
     private readonly ConcurrentDictionary<Guid, RemoteViewer> _viewers = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Start, int Count)> _failures = new();
     private readonly CancellationTokenSource _cancellation = new();
-    private readonly RetransmitCache _retransmit = new(96);
-    private readonly RetransmitCache _cameraRetransmit = new(48, MediaPacketType.CameraVideo);
+    // ~1,5 s a 165 FPS e mais de 4 s a 60 FPS: cobre o prazo de remontagem do viewer com folga.
+    private readonly RetransmitCache _retransmit = new(256);
+    private readonly RetransmitCache _cameraRetransmit = new(96, MediaPacketType.CameraVideo);
     private readonly AutoResetEvent _wake = new(false);
     private readonly AutoResetEvent _cameraWake = new(false);
     private readonly RateMeter _cameraFrames = new();
@@ -83,6 +84,8 @@ public sealed class HostSession : IAsyncDisposable
     private TcpListener? _listener;
     private Socket? _udp;
     private MediaSender? _sender;
+    private Pacer? _pacer;
+    private IDisposable? _timerResolution;
     private DiscoveryAnnouncer? _announcer;
     private Thread? _pipeline;
     private Thread? _cameraPipeline;
@@ -158,6 +161,8 @@ public sealed class HostSession : IAsyncDisposable
     {
         _udp = MediaSender.CreateUdp(_options.BindAddress, _options.MediaPort);
         _sender = new MediaSender(_udp);
+        _timerResolution = TimerResolution.Request();
+        _pacer = new Pacer(_sender, PacingRate());
         _listener = new TcpListener(_options.BindAddress, _options.ControlPort);
         _listener.Start(32);
         _announcer = new DiscoveryAnnouncer(_options.BindAddress, _options.BroadcastAddress, _options.DiscoveryPort, () =>
@@ -289,7 +294,7 @@ public sealed class HostSession : IAsyncDisposable
                 return;
             }
 
-            await viewer.SendAsync(new WelcomeMessage(_options.DeviceName, Convert.ToBase64String(salt), _options.MediaPort, CurrentConfig("conexão")), token);
+            await viewer.SendAsync(new WelcomeMessage(_options.DeviceName, Convert.ToBase64String(salt), _options.MediaPort, CurrentConfig("conexão"), [.. StreamModes.HostFeatures]), token);
             viewer.State = ViewerState.Streaming;
             _keyframeRequested = true;
             _cameraKeyframeRequested = true;
@@ -340,9 +345,11 @@ public sealed class HostSession : IAsyncDisposable
                     viewer.LastStats = stats;
                     break;
                 case NackMessage nack:
+                    // Sem índices: o viewer não recebeu nada do frame e pede ele inteiro (1.1.1).
                     var cache = nack.Track == VideoTrack.Camera ? _cameraRetransmit : _retransmit;
-                    foreach (var chunk in cache.Lookup(nack.FrameId, nack.Missing.Take(256)))
-                        _sender!.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress, retransmit: true);
+                    var resend = cache.Lookup(nack.FrameId, (nack.Missing ?? []).Take(512));
+                    if (resend.Count > 512) resend = resend[..512];
+                    if (resend.Count > 0) _pacer?.EnqueueRetransmission(viewer, resend);
                     break;
                 case KeyframeRequestMessage request:
                     if (request.Track == VideoTrack.Camera) _cameraKeyframeRequested = true;
@@ -492,20 +499,23 @@ public sealed class HostSession : IAsyncDisposable
         {
             try { await Task.Delay(1000, token); } catch (OperationCanceledException) { break; }
             var streaming = _viewers.Values.Where(v => v.State == ViewerState.Streaming).ToList();
+            var now = MediaClock.NowUs;
 
-            // Controle adaptativo pela pior rede entre os viewers.
+            // Controle adaptativo pela pior rede entre os viewers. O FPS que o viewer decodifica é comparado com o que
+            // saiu daqui: com a tela parada ou um vídeo de 30 FPS saem menos frames, e isso não é o viewer lento.
             if (_adaptive is not null && streaming.Count > 0)
             {
                 var samples = streaming.Where(v => v.LastStats is not null).Select(v => v.LastStats!).ToList();
                 if (samples.Count > 0)
                 {
-                    var worst = new NetworkSample(samples.Max(s => s.LossRate), samples.Max(s => s.RoundTripMs), samples.Min(s => s.ReceivedKbps), samples.Min(s => s.DecodeFps));
+                    var worst = new NetworkSample(samples.Max(s => s.LossRate), samples.Max(s => s.RoundTripMs), samples.Min(s => s.ReceivedKbps), samples.Min(s => s.DecodeFps),
+                        _encodedFrames.PerSecond(now));
                     if (_adaptive.Update(worst) is { } next) SetTarget(ApplyUploadBudget(next), _adaptive.LastReason);
                     else if (ApplyUploadBudget(_adaptive.Current) is var budget && budget != _target) SetTarget(budget, $"upload dividido entre {streaming.Count} viewers");
                 }
             }
+            if (_pacer is { } pacer) pacer.BytesPerSecond = PacingRate();
 
-            var now = MediaClock.NowUs;
             var sentMbps = 0.0;
             if (_sender is not null)
             {
@@ -613,14 +623,9 @@ public sealed class HostSession : IAsyncDisposable
                     encoder!.Encode(converter.Output, timestamp, packets);
                     foreach (var packet in packets)
                     {
-                        var id = frameId++;
-                        var chunks = Packetizer.Packetize(MediaPacketType.Video, id, packet.Data, packet.TimestampUs, packet.Keyframe, fecGroupSize: _options.FecGroupSize);
-                        _retransmit.Store(id, chunks);
                         _encodedFrames.Add(1, now);
                         _encodedBytes.Add(packet.Data.Length, now);
-                        foreach (var viewer in audience)
-                            foreach (var chunk in chunks)
-                                _sender!.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress);
+                        SendFrame(MediaPacketType.Video, frameId++, packet, audience, _retransmit);
                     }
                 }
                 catch (Exception exception) when (!_cancellation.IsCancellationRequested)
@@ -744,14 +749,9 @@ public sealed class HostSession : IAsyncDisposable
                     encoder!.Encode(converter.Output, timestamp, packets);
                     foreach (var packet in packets)
                     {
-                        var id = frameId++;
-                        var chunks = Packetizer.Packetize(MediaPacketType.CameraVideo, id, packet.Data, packet.TimestampUs, packet.Keyframe, fecGroupSize: _options.FecGroupSize);
-                        _cameraRetransmit.Store(id, chunks);
                         _cameraFrames.Add(1, now);
                         _cameraBytes.Add(packet.Data.Length, now);
-                        foreach (var viewer in audience)
-                            foreach (var chunk in chunks)
-                                _sender!.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress);
+                        SendFrame(MediaPacketType.CameraVideo, frameId++, packet, audience, _cameraRetransmit);
                     }
                 }
                 catch (Exception exception) when (!_cancellation.IsCancellationRequested)
@@ -923,7 +923,9 @@ public sealed class HostSession : IAsyncDisposable
         _viewers.Clear();
         _pipeline?.Join(TimeSpan.FromSeconds(3));
         _cameraPipeline?.Join(TimeSpan.FromSeconds(3));
+        _pacer?.Dispose();
         _udp?.Dispose();
+        _timerResolution?.Dispose();
         if (_acceptLoop is not null) try { await _acceptLoop; } catch { }
         if (_udpDrain is not null) try { await _udpDrain; } catch { }
         Log.Info("Host encerrado e recursos liberados.");
@@ -945,6 +947,7 @@ public sealed class HostSession : IAsyncDisposable
             Address = address;
             Cipher = new PacketCipher(key, salt);
             Hello = hello;
+            SpreadFec = hello.Supports(StreamModes.FeatureSpreadFec);
         }
 
         public Guid Id { get; }
@@ -956,6 +959,9 @@ public sealed class HostSession : IAsyncDisposable
         public string Address { get; }
         public PacketCipher Cipher { get; }
         public HelloMessage Hello { get; }
+
+        /// <summary>Entende a paridade espalhada (1.1.1). Versões antigas recebem a paridade de pacotes seguidos.</summary>
+        public bool SpreadFec { get; }
         public ulong PacketCounter;
         public volatile ViewerState State = ViewerState.Authenticating;
         public StatsMessage? LastStats { get; set; }

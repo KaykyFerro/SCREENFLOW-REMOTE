@@ -385,14 +385,27 @@ public partial class PlayerWindow : Window
             $"Bitrate       {s.BitrateMbps,6:0.0} Mbps\n" +
             $"Latência      {(s.LatencyMs > 0 ? $"{s.LatencyMs,6:0} ms" : "     —")}\n" +
             $"Ping (RTT)    {s.RoundTripMs,6:0} ms\n" +
-            $"Perda         {s.LossRate,6:P1}\n" +
+            $"Perda         {s.LossRate,6:P1} agora · {s.TotalLossRate:P2} desde que entrou\n" +
             $"Codec         {s.Codec} · {s.Width}×{s.Height}\n" +
             $"Decoder       {s.Decoder}\n" +
             $"Desenho       {path}\n" +
             $"Áudio         buffer {s.AudioBufferMs:0} ms\n" +
             (s.CameraFps > 0 ? $"Câmera        {s.CameraWidth}×{s.CameraHeight} · {s.CameraFps:0} FPS\n" : _cameraExpected ? "Câmera        esperando a câmera de quem transmite\n" : string.Empty) +
-            $"FEC           {s.FecRecovered:N0} recuperados · {s.FramesDropped:N0} frames perdidos\n" +
+            $"Recuperados   {s.FecRecovered:N0} pelo FEC · {s.NackRecovered:N0} reenviados\n" +
+            $"Perdidos      {LostFrames(s)}\n" +
             $"Qualidade     {s.QualityReason}";
+    }
+
+    /// <summary>"0 frames", ou "12 frames (9 incompletos · 3 não chegaram)", e o que o decoder deixou para trás.</summary>
+    private static string LostFrames(ViewerStatistics s)
+    {
+        var parts = new List<string>(3);
+        if (s.FramesExpired > 0) parts.Add($"{s.FramesExpired:N0} incompletos");
+        if (s.FramesMissing > 0) parts.Add($"{s.FramesMissing:N0} não chegaram");
+        if (s.FramesSuperseded > 0) parts.Add($"{s.FramesSuperseded:N0} pulados por um keyframe");
+        var text = $"{s.FramesDropped:N0} frames" + (parts.Count > 0 && parts.Count < 4 && s.FramesDropped > 0 ? $" ({string.Join(" · ", parts)})" : string.Empty);
+        if (s.DecoderLate > 0) text += $" · decoder atrasou {s.DecoderLate:N0}";
+        return text;
     }
 
     // ───────────────────────── Controles ─────────────────────────

@@ -48,7 +48,11 @@ public sealed record AuthMessage(string Proof) : ControlMessage;
 
 public sealed record PendingApprovalMessage(string Message) : ControlMessage;
 
-public sealed record WelcomeMessage(string HostName, string SessionSalt, int MediaPort, StreamConfigMessage Stream) : ControlMessage;
+/// <param name="Features">Recursos do host (<see cref="StreamModes.HostFeatures"/>, 1.1.1). Hosts antigos não mandam.</param>
+public sealed record WelcomeMessage(string HostName, string SessionSalt, int MediaPort, StreamConfigMessage Stream, string[]? Features = null) : ControlMessage
+{
+    public bool Supports(string feature) => Features is not null && Features.Contains(feature, StringComparer.OrdinalIgnoreCase);
+}
 
 public sealed record RejectedMessage(string Code, string Message) : ControlMessage
 {

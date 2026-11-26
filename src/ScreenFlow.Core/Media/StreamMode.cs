@@ -12,7 +12,21 @@ public static class StreamModes
     /// <summary>O viewer recebe a segunda faixa de vídeo (a câmera junto com a tela) e mostra num quadrinho (1.1.0).</summary>
     public const string FeatureCameraOverlay = "camera-overlay";
 
-    public static IReadOnlyList<string> ViewerFeatures { get; } = [FeatureAudioOnly, FeatureCamera, FeatureCameraOverlay];
+    /// <summary>O viewer entende a paridade espalhada (1.1.1): perdas em sequência caem em grupos de FEC diferentes.</summary>
+    public const string FeatureSpreadFec = "fec-spread";
+
+    /// <summary>O viewer recebe o que está tocando na janela ou no som compartilhado e pode mandar comandos (1.1.1).</summary>
+    public const string FeatureMediaInfo = "media-info";
+
+    public static IReadOnlyList<string> ViewerFeatures { get; } = [FeatureAudioOnly, FeatureCamera, FeatureCameraOverlay, FeatureSpreadFec, FeatureMediaInfo];
+
+    /// <summary>Recursos anunciados pelo host na boas-vindas. Viewers antigos ignoram a lista.</summary>
+    /// <remarks>"frame-nack": o host reenvia um frame inteiro quando o viewer não recebeu nada dele (NACK sem índices).
+    /// "media-control": o host aceita comandos de mídia (voltar, pausar, pular) de quem assiste, se ele deixar.</remarks>
+    public const string HostFeatureFrameNack = "frame-nack";
+    public const string HostFeatureMediaControl = "media-control";
+
+    public static IReadOnlyList<string> HostFeatures { get; } = [HostFeatureFrameNack, HostFeatureMediaControl];
 
     public static string Label(StreamMode mode, bool cameraWithScreen = false) => mode switch
     {

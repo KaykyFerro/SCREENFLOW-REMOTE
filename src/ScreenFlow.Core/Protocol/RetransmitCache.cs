@@ -5,7 +5,7 @@ public sealed class RetransmitCache
 {
     private readonly int _capacityFrames;
     private readonly MediaPacketType _dataType;
-    private readonly Dictionary<uint, List<MediaChunk>> _frames = new();
+    private readonly Dictionary<uint, MediaChunk[]> _frames = new();
     private readonly Queue<uint> _order = new();
     private readonly object _gate = new();
 
@@ -16,26 +16,31 @@ public sealed class RetransmitCache
         _dataType = dataType;
     }
 
-    public void Store(uint frameId, List<MediaChunk> chunks)
+    /// <summary>Guarda os pacotes de dados de um frame (a paridade não é guardada: o NACK pede dados).</summary>
+    public void Store(uint frameId, IEnumerable<MediaChunk> chunks)
     {
+        var data = chunks.Where(c => c.Header.Type == _dataType).OrderBy(c => c.Header.Index).ToArray();
         lock (_gate)
         {
-            if (_frames.TryAdd(frameId, chunks)) _order.Enqueue(frameId);
+            if (_frames.TryAdd(frameId, data)) _order.Enqueue(frameId);
             while (_order.Count > _capacityFrames) _frames.Remove(_order.Dequeue());
         }
     }
 
+    /// <summary>Os pacotes pedidos. Sem índices, o frame inteiro (o viewer não recebeu nada dele).</summary>
     public List<MediaChunk> Lookup(uint frameId, IEnumerable<ushort> indices)
     {
         var result = new List<MediaChunk>();
         lock (_gate)
         {
             if (!_frames.TryGetValue(frameId, out var chunks)) return result;
+            var any = false;
             foreach (var index in indices)
             {
-                var chunk = chunks.FirstOrDefault(c => c.Header.Type == _dataType && c.Header.Index == index);
-                if (chunk is not null) result.Add(chunk);
+                any = true;
+                if (index < chunks.Length && chunks[index].Header.Index == index) result.Add(chunks[index]);
             }
+            if (!any) result.AddRange(chunks);
         }
         return result;
     }

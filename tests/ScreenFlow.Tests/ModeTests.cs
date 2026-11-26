@@ -95,8 +95,8 @@ public class ModeTests
         var music = AudioProfile.ForMode(StreamMode.AudioOnly, 160, 256);
         Assert.True(music.Music);
         Assert.True(music.Redundant);
-        Assert.Equal(20, music.FrameMs);
-        Assert.Equal(960, music.FrameSamples);
+        Assert.Equal(10, music.FrameMs); // 1.1.1: quadros de 10 ms também na música (menos atraso)
+        Assert.Equal(480, music.FrameSamples);
         Assert.Equal("audio", music.OpusApplication);
         Assert.Equal(256, music.BitrateKbps);
 
@@ -104,7 +104,8 @@ public class ModeTests
         Assert.False(voice.Music);
         Assert.Equal(480, voice.FrameSamples);
         Assert.Equal("lowdelay", voice.OpusApplication);
-        Assert.True(voice.PlaybackTargetMs < music.PlaybackTargetMs);
+        Assert.True(voice.PlaybackMinMs < music.PlaybackMinMs);
+        Assert.True(music.PlaybackMinMs <= 40, "a festa de música começa com pouco atraso");
 
         Assert.Equal(AudioProfile.MaxMusicKbps, AudioProfile.ForMusic(999).BitrateKbps);
     }

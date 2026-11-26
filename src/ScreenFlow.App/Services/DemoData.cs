@@ -121,7 +121,12 @@ public static partial class DemoData
     /// <summary>Estatísticas de quem assiste, para o player e o Monitoramento.</summary>
     public static ViewerStatistics ViewerStats(StreamMode mode = StreamMode.Screen) => mode == StreamMode.AudioOnly
         ? new ViewerStatistics(0, 0, 0, 24, 0.001, "Opus", 0, 0, "Opus 256 kbps", 0, 0, "rede estável", StreamMode.AudioOnly, 62, 3, 512, false)
-        : new ViewerStatistics(164.6, 38.2, 21, 24, 0.0004, "HEVC", 2560, 1440, "NVDEC (D3D11VA)", 2, 17, "rede estável", mode, 58, 0, 160, true);
+        : new ViewerStatistics(164.6, 38.2, 21, 24, 0.0004, "HEVC", 2560, 1440, "NVDEC (D3D11VA)", 2, 17, "rede estável", mode, 58, 0, 160, true)
+        {
+            TotalLossRate = 0.0011,
+            FramesExpired = 2,
+            NackRecovered = 41,
+        };
 
     private static double Wave(int second, double period) => Math.Sin(second / period) * 0.6 + Math.Sin(second / (period * 0.37) + 1.3) * 0.4;
 }

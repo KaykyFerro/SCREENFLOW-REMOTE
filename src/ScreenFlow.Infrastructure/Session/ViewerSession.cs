@@ -207,7 +207,8 @@ public sealed class ViewerSession : IAsyncDisposable
         }
 
         using var cipher = new PacketCipher(key, Convert.FromBase64String(welcome.SessionSalt));
-        using var connection = new ActiveConnection(this, stream, udp, new IPEndPoint(hostAddress, welcome.MediaPort), cipher, welcome.Stream);
+        using var connection = new ActiveConnection(this, stream, udp, new IPEndPoint(hostAddress, welcome.MediaPort), cipher, welcome.Stream,
+            welcome.Supports(StreamModes.HostFeatureFrameNack));
         _backoff.Reset();
         SetConfig(welcome.Stream);
         SetState(ConnectionState.Connected, welcome.Stream.Mode == StreamMode.AudioOnly ? $"Na festa de música de {welcome.HostName}." : $"Conectado a {welcome.HostName}.");
@@ -257,6 +258,9 @@ public sealed class ViewerSession : IAsyncDisposable
         private ulong _highestPacket;
         private ulong _windowStartPacket;
         private long _windowReceived;
+        private ulong _firstPacket;
+        private long _totalReceived;
+        private long _decoderLate;
         private double _lossRate;
         private double _latencyMs;
         private volatile bool _codecChanged;
@@ -265,7 +269,7 @@ public sealed class ViewerSession : IAsyncDisposable
         private long _probeBytes;
         private long _probeCount;
 
-        public ActiveConnection(ViewerSession owner, NetworkStream stream, Socket udp, IPEndPoint hostMedia, PacketCipher cipher, StreamConfigMessage config)
+        public ActiveConnection(ViewerSession owner, NetworkStream stream, Socket udp, IPEndPoint hostMedia, PacketCipher cipher, StreamConfigMessage config, bool wholeFrameNack)
         {
             _owner = owner;
             _stream = stream;
@@ -273,6 +277,8 @@ public sealed class ViewerSession : IAsyncDisposable
             _hostMedia = hostMedia;
             _cipher = cipher;
             _config = config;
+            // Hosts 1.1.1 reenviam um frame que sumiu inteiro: ele é pedido de novo em vez de pulado.
+            _reassembler.WholeFrameNack = _cameraReassembler.WholeFrameNack = wholeFrameNack;
         }
 
         public async Task RunAsync(CancellationToken token)
@@ -292,6 +298,7 @@ public sealed class ViewerSession : IAsyncDisposable
 
             var tick = Task.Run(() => TickLoopAsync(t));
             var timers = Task.Run(() => TimerLoopAsync(t));
+            using var timerResolution = TimerResolution.Request();
             try
             {
                 await SendAsync(new KeyframeRequestMessage("entrada"), t);
@@ -423,8 +430,10 @@ public sealed class ViewerSession : IAsyncDisposable
         private void CountPacket(ulong number)
         {
             Interlocked.Increment(ref _windowReceived);
+            Interlocked.Increment(ref _totalReceived);
             if (number > _highestPacket) _highestPacket = number;
             if (_windowStartPacket == 0) _windowStartPacket = number;
+            if (_firstPacket == 0) _firstPacket = number;
         }
 
         private void Enqueue(List<AssembledFrame> frames)
@@ -437,6 +446,7 @@ public sealed class ViewerSession : IAsyncDisposable
                     // Decoder atrasado: descarta o mais antigo para não acumular latência.
                     _decodeQueue.TryTake(out _);
                     _decodeQueue.TryAdd(frame);
+                    Interlocked.Increment(ref _decoderLate);
                     RequestKeyframe("decoder atrasado");
                 }
             }
@@ -575,16 +585,45 @@ public sealed class ViewerSession : IAsyncDisposable
                 List<NackRequest> nacks;
                 List<AssembledFrame> ready;
                 int dropped;
-                lock (_reassemblyGate) (nacks, ready, dropped) = _reassembler.Tick(MediaClock.Now);
+                // Pacotes ainda esperando no socket (o PC ficou ocupado): os que faltam podem estar ali, o prazo dobra.
+                var pending = InputPending();
+                lock (_reassemblyGate) (nacks, ready, dropped) = _reassembler.Tick(MediaClock.Now, pending);
                 Enqueue(ready);
                 if (dropped > 0) RequestKeyframe("frames perdidos");
                 foreach (var nack in nacks) await SendAsync(new NackMessage(nack.FrameId, nack.Missing), token);
 
                 if (!_cameraSeen) continue;
-                lock (_cameraGate) (nacks, ready, dropped) = _cameraReassembler.Tick(MediaClock.Now);
+                lock (_cameraGate) (nacks, ready, dropped) = _cameraReassembler.Tick(MediaClock.Now, pending);
                 EnqueueCamera(ready);
                 if (dropped > 0) RequestKeyframe("frames da câmera perdidos", VideoTrack.Camera);
                 foreach (var nack in nacks) await SendAsync(new NackMessage(nack.FrameId, nack.Missing, VideoTrack.Camera), token);
+            }
+        }
+
+        private bool InputPending()
+        {
+            try { return _udp.Available > 0; }
+            catch (Exception exception) when (exception is SocketException or ObjectDisposedException) { return false; }
+        }
+
+        /// <summary>
+        /// Prazo e espera entre NACKs pelo RTT: com o Radmin passando por um relay o RTT chega a 150 ms, e 120 ms de prazo
+        /// não davam nem para uma retransmissão.
+        /// </summary>
+        private void TuneReassembly(double rttMs)
+        {
+            if (rttMs <= 0) return;
+            var deadline = TimeSpan.FromMilliseconds(Math.Clamp(rttMs * 3 + 50, 120, 500));
+            var retry = TimeSpan.FromMilliseconds(Math.Clamp(rttMs * 1.25 + 5, 10, 150));
+            lock (_reassemblyGate)
+            {
+                _reassembler.Deadline = deadline;
+                _reassembler.NackRetryInterval = retry;
+            }
+            lock (_cameraGate)
+            {
+                _cameraReassembler.Deadline = deadline;
+                _cameraReassembler.NackRetryInterval = retry;
             }
         }
 
@@ -608,17 +647,32 @@ public sealed class ViewerSession : IAsyncDisposable
                 var expected = (double)(_highestPacket - _windowStartPacket);
                 _windowStartPacket = _highestPacket;
                 _lossRate = expected <= 0 ? 0 : Math.Clamp(1 - received / expected, 0, 1);
+                var totalExpected = _firstPacket == 0 ? 0 : (double)(_highestPacket - _firstPacket + 1);
+                var totalLoss = totalExpected <= 0 ? 0 : Math.Clamp(1 - Interlocked.Read(ref _totalReceived) / totalExpected, 0, 1);
                 var kbps = _bytes.PerSecond(now) * 8 / 1000.0;
                 var fps = _decoded.PerSecond(now);
+                TuneReassembly(_clock.RoundTripMs);
                 await SendAsync(new StatsMessage(_lossRate, _clock.RoundTripMs, kbps, fps, _latencyMs), token);
 
                 var audio = _owner._audio;
+                long expired, missing, superseded, fec, nack;
+                lock (_reassemblyGate)
+                    (expired, missing, superseded, fec, nack) = (_reassembler.FramesExpired, _reassembler.FramesMissing, _reassembler.FramesSuperseded,
+                        _reassembler.PacketsRecoveredByFec, _reassembler.PacketsRecoveredByNack);
                 var stats = new ViewerStatistics(fps, kbps / 1000, _latencyMs, _clock.RoundTripMs, _lossRate,
                     _config.VideoEnabled ? Quality.CodecLabel(_config.Codec) : "Opus", _config.Width, _config.Height,
-                    _config.VideoEnabled ? _decoderLabel : "Opus · só áudio", _reassembler.FramesDropped, _reassembler.PacketsRecoveredByFec, _config.Reason,
+                    _config.VideoEnabled ? _decoderLabel : "Opus · só áudio", expired + missing + superseded, fec, _config.Reason,
                     _config.Mode, audio?.Buffered.TotalMilliseconds ?? 0, audio?.PacketsRecovered ?? 0,
                     _config.VideoEnabled ? 0 : kbps, _owner._gpuRendering == true,
-                    _cameraSeen ? _cameraDecoded.PerSecond(now) : 0, _cameraWidth, _cameraHeight);
+                    _cameraSeen ? _cameraDecoded.PerSecond(now) : 0, _cameraWidth, _cameraHeight)
+                {
+                    TotalLossRate = totalLoss,
+                    FramesExpired = expired,
+                    FramesMissing = missing,
+                    FramesSuperseded = superseded,
+                    NackRecovered = nack,
+                    DecoderLate = Interlocked.Read(ref _decoderLate),
+                };
                 _owner._lastStats = stats;
                 _owner.StatisticsUpdated?.Invoke(stats);
             }
