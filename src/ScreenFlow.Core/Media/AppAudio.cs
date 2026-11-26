@@ -77,6 +77,29 @@ public static class AppAudioPlan
     }
 
     /// <summary>
+    /// O contrário de <see cref="Choose"/>: só o som de alguns apps (a festa de música com "só o Spotify"). Entra cada
+    /// processo com som desses executáveis (navegadores e apps como o Spotify tocam de um processo filho com o mesmo
+    /// nome, então ele entra também). Nunca entra o ScreenFlow nem um ancestral dele (a árvore do ancestral traria a voz da
+    /// rede junto); e um processo cujo ancestral já entra fica de fora, para o som não dobrar.
+    /// </summary>
+    /// <param name="onlyExes">Executáveis que entram (em minúsculas, como em <see cref="MutedApp.NormalizeExe"/>).</param>
+    public static IReadOnlyList<int> ChooseOnly(IEnumerable<int> sessionProcesses, IReadOnlyDictionary<int, ProcessEntry> processes, int ownProcessId,
+        IReadOnlySet<string> onlyExes)
+    {
+        var ownAncestors = Ancestors(ownProcessId, processes).ToHashSet();
+        var candidates = new HashSet<int>();
+        foreach (var id in sessionProcesses)
+        {
+            if (id < FirstUserProcessId || id == ownProcessId || ownAncestors.Contains(id)) continue;
+            if (processes.TryGetValue(id, out var entry) && onlyExes.Contains(entry.Exe)) candidates.Add(id);
+        }
+        return candidates
+            .Where(id => !Ancestors(id, processes).Any(a => candidates.Contains(a) && !Ancestors(a, processes).Contains(id)))
+            .OrderBy(id => id)
+            .ToList();
+    }
+
+    /// <summary>
     /// Pai, avô e assim por diante. Um pai que começou depois do filho é outro processo que reaproveitou o id de um pai
     /// que já fechou: a corrente para ali.
     /// </summary>

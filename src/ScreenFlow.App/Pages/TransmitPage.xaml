@@ -75,7 +75,7 @@
 
                             <StackPanel x:Name="ScreenOptions">
                                 <TextBlock Style="{StaticResource Label}" Text="Monitor ou janela"/>
-                                <DockPanel Margin="{DynamicResource FieldGap}">
+                                <DockPanel x:Name="SourceRow" Margin="{DynamicResource FieldGap}">
                                     <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Atualizar a lista" Click="RefreshSources_Click" Margin="8,0,0,0"/>
                                     <ComboBox x:Name="SourceCombo"/>
                                 </DockPanel>
@@ -108,7 +108,7 @@
 
                             <StackPanel x:Name="CameraOptions" Visibility="Collapsed">
                                 <TextBlock Style="{StaticResource Label}" Text="Câmera"/>
-                                <DockPanel Margin="{DynamicResource FieldGap}">
+                                <DockPanel x:Name="CameraRow" Margin="{DynamicResource FieldGap}">
                                     <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar câmeras de novo" Click="RefreshCameras_Click" Margin="8,0,0,0"/>
                                     <ComboBox x:Name="CameraCombo"/>
                                 </DockPanel>
@@ -117,17 +117,25 @@
                             </StackPanel>
 
                             <StackPanel x:Name="PartyOptions" Visibility="Collapsed">
+                                <TextBlock Style="{StaticResource Label}" Text="O que toca na festa"/>
+                                <DockPanel Margin="{DynamicResource FieldGap}">
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar os apps de novo" Click="RefreshPartyApps_Click" Margin="8,0,0,0"/>
+                                    <ComboBox x:Name="PartyAppCombo" ToolTip="Escolha o app da música para ninguém ouvir notificações, jogos e o resto do PC. Dá para trocar com a festa no ar."/>
+                                </DockPanel>
                                 <TextBlock Style="{StaticResource Label}" Text="Qualidade do som"/>
                                 <ComboBox x:Name="MusicCombo" Margin="{DynamicResource FieldGap}"/>
                                 <Border Style="{StaticResource InsetCard}" Margin="0,0,0,14">
                                     <DockPanel>
                                         <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE946;" Foreground="{DynamicResource Violet}" VerticalAlignment="Top" Margin="0,2,12,0"/>
-                                        <TextBlock Style="{StaticResource Muted}" FontSize="13" LineHeight="19"
+                                        <TextBlock x:Name="PartyInfoText" Style="{StaticResource Muted}" FontSize="13" LineHeight="19"
                                                    Text="Toca tudo o que sai no som do PC (Spotify, YouTube, jogos). Opus estéreo 48 kHz, com cópia de cada pacote no seguinte: se um se perder na rede, ninguém percebe."/>
                                     </DockPanel>
                                 </Border>
                             </StackPanel>
 
+                            <CheckBox x:Name="FixedQualityToggle" Style="{StaticResource Switch}" Content="Qualidade fixa (não baixa sozinha quando a rede aperta)"
+                                      ToolTip="Fica sempre na resolução e no FPS escolhidos. Dá para trocar a qualidade a qualquer momento, até durante a transmissão."
+                                      Checked="FixedQuality_Changed" Unchecked="FixedQuality_Changed"/>
                             <CheckBox x:Name="AudioToggle" Style="{StaticResource Switch}" Content="Compartilhar o som do PC"/>
                             <TextBlock x:Name="ProfileHint" Style="{StaticResource Caption}"/>
                         </StackPanel>

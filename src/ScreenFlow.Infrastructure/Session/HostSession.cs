@@ -66,7 +66,8 @@ public sealed record ApprovalRequest(Guid Id, string Name, string Address);
 /// </summary>
 public sealed partial class HostSession : IAsyncDisposable
 {
-    private readonly HostOptions _options;
+    // Trocado inteiro (é imutável) quando quem transmite muda a qualidade ao vivo.
+    private volatile HostOptions _options;
     private readonly ConcurrentDictionary<Guid, RemoteViewer> _viewers = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Start, int Count)> _failures = new();
     private readonly CancellationTokenSource _cancellation = new();
@@ -144,6 +145,9 @@ public sealed partial class HostSession : IAsyncDisposable
 
     /// <summary>O som do PC está separado por app (a voz da rede fica fora). Null sem som do PC.</summary>
     public bool? AudioSeparated => (_audio as SystemAudioCapture)?.Separated;
+
+    /// <summary>O app que vai sozinho na festa de música ("só o Spotify"). Null: vai o som do PC.</summary>
+    public string? AudioOnlyApp => (_audio as SystemAudioCapture)?.OnlyApp;
 
     /// <summary>Troca os apps que ficam fora do som (vale na hora, durante a transmissão).</summary>
     public void ConfigureAudio(SystemAudioOptions options) => (_audio as SystemAudioCapture)?.Configure(options);
@@ -468,12 +472,47 @@ public sealed partial class HostSession : IAsyncDisposable
 
     private StreamTarget ApplyUploadBudget(StreamTarget target)
     {
+        // Qualidade fixa: nada muda sozinho, nem a divisão do upload entre quem assiste.
+        if (!_options.Adaptive) return target;
         var watching = Math.Max(1, _viewers.Values.Count(v => v.State == ViewerState.Streaming));
         // A câmera junto usa um pedaço do upload de cada pessoa: a tela fica com o resto.
         var camera = HasCameraOverlay ? Volatile.Read(ref _cameraKbps) : 0;
         var limit = Math.Max(1_000, Quality.PerViewerBitrateKbps(target.BitrateKbps + camera, _options.UploadMbps, watching) - camera);
         return limit < target.BitrateKbps ? target with { BitrateKbps = limit } : target;
     }
+
+    /// <summary>
+    /// Troca a qualidade durante a transmissão: resolução, FPS e se ela se adapta à rede (ou fica fixa). Vale na hora:
+    /// o encoder é refeito com um keyframe e quem assiste recebe a configuração nova. O limite do viewer mais fraco
+    /// (resolução e FPS que ele aguenta) continua valendo. No modo câmera, a câmera passa para o formato novo.
+    /// </summary>
+    public bool ChangeQuality(Resolution resolution, int fps, bool adaptive)
+    {
+        if (!HasVideo || fps <= 0) return false;
+        lock (_configGate)
+        {
+            var options = _options;
+            if (options.Resolution == resolution && options.Fps == fps && options.Adaptive == adaptive) return false;
+            var target = options.Target.Kind == CaptureKind.Camera
+                ? options.Target with { Width = resolution.Width, Height = resolution.Height, RefreshRateHz = fps }
+                : options.Target;
+            _options = options with { Resolution = resolution, Fps = fps, Adaptive = adaptive, Target = target };
+            _adaptive = null;
+            var reason = adaptive ? "qualidade escolhida por quem transmite" : "qualidade fixa escolhida por quem transmite";
+            if (_viewers.Values.Any(v => v.State == ViewerState.Streaming)) Renegotiate(null);
+            else
+            {
+                var bitrate = options.BitrateKbps > 0 ? options.BitrateKbps : Quality.TargetBitrateKbps(resolution, fps, _encoderName.Length > 0 ? _codec : options.PreferredCodec ?? VideoCodec.Hevc);
+                _profile = new StreamTarget(bitrate, fps, resolution);
+            }
+            SetTarget(ApplyUploadBudget(_profile), reason);
+            Log.Info($"Qualidade trocada ao vivo: {_profile} ({(adaptive ? "adaptativa" : "fixa")}).");
+            return true;
+        }
+    }
+
+    /// <summary>A qualidade se adapta à rede (false: fixa, do jeito que quem transmite escolheu).</summary>
+    public bool AdaptiveQuality => _options.Adaptive;
 
     private void SetTarget(StreamTarget target, string reason)
     {
@@ -540,6 +579,8 @@ public sealed partial class HostSession : IAsyncDisposable
         VideoEncoder? encoder = null;
         StreamTarget? active = null;
         string? activeEncoder = null;
+        CaptureTarget? captureTarget = null;
+        var captureFps = 0;
         uint frameId = 0;
         var packets = new List<EncodedPacket>(4);
         long lastEncodeUs = 0;
@@ -570,14 +611,24 @@ public sealed partial class HostSession : IAsyncDisposable
                     var target = _target;
                     if (gpu is null)
                     {
+                        captureTarget = _options.Target;
+                        captureFps = target.Fps;
                         gpu = GpuDevice.Create(_options.Monitor?.DeviceName);
-                        capture = CaptureFactory.Create(gpu, _options.Target, _options.Monitor, target.Fps);
+                        capture = CaptureFactory.Create(gpu, captureTarget, _options.Monitor, captureFps);
                         _captureBackend = capture.Backend;
                         _sourceSize = (capture.Width, capture.Height);
                     }
                     if (capture!.SizeChanged)
                     {
                         Log.Info("Tamanho da origem mudou: recriando captura.");
+                        TearDown();
+                        continue;
+                    }
+                    // Qualidade trocada ao vivo: a câmera muda de formato, e a captura da tela foi aberta com um limite
+                    // de FPS (ela entrega no máximo isso), então um FPS maior precisa de uma captura nova.
+                    if (_options.Target != captureTarget || target.Fps > captureFps)
+                    {
+                        Log.Info("Qualidade nova pede outra captura: recriando.");
                         TearDown();
                         continue;
                     }

@@ -20,6 +20,9 @@ public partial class SettingsPage : UserControl, IShellPage
     private readonly DispatcherTimer _micTimer = new() { Interval = TimeSpan.FromMilliseconds(60) };
     private readonly VoiceGate _micGate = new();
     private IVoiceInput? _micTest;
+    private MicrophoneInput? _monitorInput;
+    private MicrophoneMonitor? _monitor;
+    private bool _monitorStarting;
     private double _micLevelDb = -100;
     private double _shownLevel;
     private bool _loading;
@@ -37,7 +40,11 @@ public partial class SettingsPage : UserControl, IShellPage
         CameraQualityCombo.Fill(OverviewPage.CameraQualities);
         ThemeCombo.Fill([new Choice<AppTheme>(AppTheme.Dark, "Escuro"), new Choice<AppTheme>(AppTheme.Light, "Claro")]);
         _micTimer.Tick += (_, _) => UpdateMicMeter();
-        Unloaded += (_, _) => StopMicTest();
+        Unloaded += (_, _) =>
+        {
+            StopMicTest();
+            StopMonitor();
+        };
     }
 
     private AppSettings Settings => AppServices.Settings.Current;
@@ -68,6 +75,7 @@ public partial class SettingsPage : UserControl, IShellPage
         PinBox.Text = s.Pin ?? string.Empty;
         ApproveToggle.IsChecked = s.ApproveEachViewer;
         TrayToggle.IsChecked = s.MinimizeToTray;
+        ReopenToggle.IsChecked = s.ShowWindowWhenSessionEnds;
         ThemeCombo.SelectValue(ThemeManager.Current);
         LoadMicrophones(s.MicrophoneId);
         SensitivitySlider.Value = s.VoiceSensitivity;
@@ -134,6 +142,7 @@ public partial class SettingsPage : UserControl, IShellPage
         s.Pin = pinText.Length == 0 ? null : pinText;
         s.ApproveEachViewer = ApproveToggle.IsChecked == true;
         s.MinimizeToTray = TrayToggle.IsChecked == true;
+        s.ShowWindowWhenSessionEnds = ReopenToggle.IsChecked == true;
         s.MicrophoneId = MicrophoneCombo.Value<string?>();
         s.VoiceSensitivity = SensitivitySlider.Value;
         s.VoiceVolume = VoiceVolumeSlider.Value;
@@ -273,6 +282,84 @@ public partial class SettingsPage : UserControl, IShellPage
         MicLevel.Width = 0;
         MicTestButton.Content = "Testar microfone";
         MicTestText.Text = "Fale normalmente: a barra precisa passar da marca para a sua voz ir. Se não passar, puxe a sensibilidade para a direita.";
+    }
+
+    // ───────────────────────── Ouvir o próprio microfone ─────────────────────────
+
+    private void MicMonitor_Click(object sender, RoutedEventArgs e)
+    {
+        if (_monitor is not null) StopMonitor();
+        else _ = StartMonitorAsync();
+    }
+
+    /// <summary>
+    /// Abre o microfone escolhido só para o retorno (o Windows deixa vários programas lerem o mesmo microfone, então
+    /// funciona também com a voz ligada) e toca no fone.
+    /// </summary>
+    private async Task StartMonitorAsync()
+    {
+        if (AppServices.DemoMode || _monitorStarting) return;
+        _monitorStarting = true;
+        MicMonitorButton.IsEnabled = false;
+        var id = MicrophoneCombo.Value<string?>();
+        try
+        {
+            var (input, monitor) = await Task.Run(() =>
+            {
+                var monitor = new MicrophoneMonitor();
+                try
+                {
+                    var input = new MicrophoneInput(id);
+                    input.FrameReady += monitor.Write;
+                    input.Start();
+                    return (input, monitor);
+                }
+                catch
+                {
+                    monitor.Dispose();
+                    throw;
+                }
+            });
+            if (!IsLoaded)
+            {
+                _ = Task.Run(() => { input.Dispose(); monitor.Dispose(); });
+                return;
+            }
+            _monitorInput = input;
+            _monitor = monitor;
+            MicMonitorLabel.Text = "Parar de ouvir";
+            MicMonitorText.Text = "Você está se ouvindo. Use fone de ouvido: na caixa de som o microfone capta o próprio som e começa a apitar.";
+            MicMonitorText.SetResourceReference(TextBlock.ForegroundProperty, "Success");
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"Ouvir o microfone: {exception.Message}");
+            MicMonitorText.Text = RoomService.MicrophoneProblem(exception);
+            MicMonitorText.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
+        }
+        finally
+        {
+            _monitorStarting = false;
+            MicMonitorButton.IsEnabled = true;
+        }
+    }
+
+    private void StopMonitor()
+    {
+        var input = _monitorInput;
+        var monitor = _monitor;
+        _monitorInput = null;
+        _monitor = null;
+        if (input is not null || monitor is not null)
+            _ = Task.Run(() =>
+            {
+                input?.Dispose();
+                monitor?.Dispose();
+            });
+        if (!IsInitialized) return;
+        MicMonitorLabel.Text = "Ouvir meu microfone";
+        MicMonitorText.Text = "Toca o seu microfone no fone, para você ouvir como a sua voz está saindo.";
+        MicMonitorText.SetResourceReference(TextBlock.ForegroundProperty, "TextSubtle");
     }
 
     private void UpdateMicMeter()

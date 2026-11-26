@@ -3,6 +3,7 @@ using ScreenFlow.Core;
 using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Protocol;
 using ScreenFlow.Core.Settings;
+using ScreenFlow.Infrastructure.Media;
 using ScreenFlow.Infrastructure.Network;
 using ScreenFlow.Infrastructure.Session;
 
@@ -86,6 +87,14 @@ public static partial class DemoData
     }
 
     /// <summary>Transmissões "encontradas na rede" para a tela Assistir.</summary>
+    /// <summary>Apps abertos para "O que toca na festa".</summary>
+    public static IReadOnlyList<RunningApp> PartyApps { get; } =
+    [
+        new("spotify.exe", "Spotify", null, true, null),
+        new("chrome.exe", "Google Chrome", null, true, null),
+        new("discord.exe", "Discord", null, false, null),
+    ];
+
     public static IReadOnlyList<DiscoveryAnnouncement> Sessions { get; } =
     [
         new(AppInfo.Name, AppInfo.ProtocolVersion, "PC-do-Lucas", "26.40.18.100", AppInfo.DefaultControlPort, AppInfo.DisplayVersion, false, 3, StreamMode.Screen, CameraOverlay: true),

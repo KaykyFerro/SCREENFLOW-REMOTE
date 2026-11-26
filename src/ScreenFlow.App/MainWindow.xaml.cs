@@ -579,6 +579,22 @@ public partial class MainWindow : Window
         if (page is not null) Navigate(page);
     }
 
+    /// <summary>
+    /// A transmissão acabou (pelo menu da bandeja, por erro) ou o player fechou: se o ScreenFlow estava na bandeja ou
+    /// minimizado, a janela volta na página certa. Com a janela aberta nada muda; saindo do app, nada acontece.
+    /// </summary>
+    public void ShowAfterSessionEnded(UserControl page)
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(() => ShowAfterSessionEnded(page));
+            return;
+        }
+        if (_exitRequested || _cleanedUp || !IsLoaded || !AppServices.Settings.Current.ShowWindowWhenSessionEnds) return;
+        if (IsVisible && WindowState != WindowState.Minimized) return;
+        ShowFromTray(page);
+    }
+
     /// <summary>Notificação do Windows pelo ícone da bandeja; o clique nela abre o app e roda a ação.</summary>
     public void TrayNotify(string title, string message, Action? onClick = null, bool quiet = false)
     {
@@ -841,6 +857,7 @@ public partial class MainWindow : Window
             HideToTray();
             return;
         }
+        _exitRequested = true; // a transmissão e o player que fecham agora não trazem a janela de volta
         IsEnabled = false;
         _networkTimer.Stop();
         _updateTimer.Stop();

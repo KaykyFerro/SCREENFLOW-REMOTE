@@ -185,9 +185,19 @@
                                         ToolTip="A voz só vai pela rede quando passa desta marca."/>
                             </Grid>
                             <DockPanel Margin="{DynamicResource FieldGap}">
-                                <Button x:Name="MicTestButton" DockPanel.Dock="Right" Content="Testar microfone" MinHeight="34" Padding="14,0" Margin="12,0,0,0" Click="MicTest_Click"/>
+                                <Button x:Name="MicTestButton" DockPanel.Dock="Right" Content="Testar microfone" MinHeight="34" MinWidth="172" Padding="14,0" Margin="12,0,0,0" Click="MicTest_Click"/>
                                 <TextBlock x:Name="MicTestText" Style="{StaticResource Caption}" VerticalAlignment="Center"
                                            Text="Fale normalmente: a barra precisa passar da marca para a sua voz ir. Se não passar, puxe a sensibilidade para a direita."/>
+                            </DockPanel>
+                            <DockPanel Margin="{DynamicResource FieldGap}">
+                                <Button x:Name="MicMonitorButton" DockPanel.Dock="Right" MinHeight="34" MinWidth="172" Padding="14,0" Margin="12,0,0,0" Click="MicMonitor_Click">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE7F6;" FontSize="14" VerticalAlignment="Center"/>
+                                        <TextBlock x:Name="MicMonitorLabel" Text="Ouvir meu microfone" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+                                <TextBlock x:Name="MicMonitorText" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                           Text="Toca o seu microfone no fone, para você ouvir como a sua voz está saindo."/>
                             </DockPanel>
                             <DockPanel Margin="0,0,0,6">
                                 <TextBlock x:Name="VoiceVolumeValue" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
@@ -289,8 +299,10 @@
                             <TextBlock Style="{StaticResource Label}" Text="PIN padrão (opcional)"/>
                             <TextBox x:Name="PinBox" MaxLength="32" Tag="Sem PIN" Margin="{DynamicResource FieldGap}"/>
                             <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de mostrar a tela" Margin="0,0,0,14"/>
-                            <CheckBox x:Name="TrayToggle" Style="{StaticResource Switch}"
+                            <CheckBox x:Name="TrayToggle" Style="{StaticResource Switch}" Margin="0,0,0,14"
                                       Content="Fechar e minimizar levam o ScreenFlow para a bandeja, perto do relógio (a transmissão, a voz e o chat continuam)"/>
+                            <CheckBox x:Name="ReopenToggle" Style="{StaticResource Switch}"
+                                      Content="Abrir o ScreenFlow de novo quando a transmissão acabar ou o player fechar (se ele estiver na bandeja)"/>
                         </StackPanel>
                     </Border>
 

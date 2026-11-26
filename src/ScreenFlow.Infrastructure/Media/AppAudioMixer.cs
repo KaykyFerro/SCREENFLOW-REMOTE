@@ -9,7 +9,8 @@ using ScreenFlow.Core.Media;
 namespace ScreenFlow.Infrastructure.Media;
 
 /// <summary>
-/// Som do PC menos alguns apps (e menos o ScreenFlow). O Windows só tira uma árvore de processos por captura, então cada
+/// Som do PC menos alguns apps (e menos o ScreenFlow) ou, na festa de música, só o som de alguns apps
+/// (<see cref="OpenOnly"/>). O Windows só tira uma árvore de processos por captura, então cada
 /// app com som é capturado separado (loopback de processo, "só este app e os filhos") e tudo é misturado aqui. O ritmo da
 /// mistura vem de uma captura "tudo menos o ScreenFlow", que anda junto com o motor de áudio do Windows: cada pacote dela
 /// puxa a mesma quantidade de áudio de cada app, então a mistura nunca adianta nem atrasa em relação ao som real.
@@ -25,6 +26,7 @@ public sealed class AppAudioMixer : IWaveIn
 
     private readonly int _ownProcessId = Environment.ProcessId;
     private readonly HashSet<string> _muted;
+    private readonly HashSet<string>? _only;
     private readonly ProcessLoopbackCapture _clock;
     private readonly object _gate = new();
     private readonly Dictionary<int, Source> _sources = new();
@@ -36,16 +38,20 @@ public sealed class AppAudioMixer : IWaveIn
     private volatile bool _stopped;
     private bool _disposed;
 
-    private AppAudioMixer(IEnumerable<string> mutedExes, ProcessLoopbackCapture clock)
+    private AppAudioMixer(IEnumerable<string> mutedExes, IEnumerable<string>? onlyExes, ProcessLoopbackCapture clock)
     {
         _muted = mutedExes.Select(MutedApp.NormalizeExe).Where(e => e.Length > 0).ToHashSet();
+        _only = onlyExes?.Select(MutedApp.NormalizeExe).Where(e => e.Length > 0).ToHashSet();
         _clock = clock;
         _clock.DataAvailable += OnClock;
         _clock.RecordingStopped += OnClockStopped;
     }
 
     /// <summary>Abre a mistura. Lança se o Windows não tiver o loopback de processo.</summary>
-    public static AppAudioMixer Open(IEnumerable<string> mutedExes) => new(mutedExes, ProcessLoopbackCapture.ExcludingProcess(Environment.ProcessId));
+    public static AppAudioMixer Open(IEnumerable<string> mutedExes) => new(mutedExes, null, ProcessLoopbackCapture.ExcludingProcess(Environment.ProcessId));
+
+    /// <summary>Só o som destes apps (e do que eles abriram). Lança se o Windows não tiver o loopback de processo.</summary>
+    public static AppAudioMixer OpenOnly(IEnumerable<string> onlyExes) => new([], onlyExes, ProcessLoopbackCapture.ExcludingProcess(Environment.ProcessId));
 
     public WaveFormat WaveFormat { get; set; } = ProcessLoopbackCapture.CaptureFormat;
 
@@ -98,7 +104,9 @@ public sealed class AppAudioMixer : IWaveIn
     {
         if (_stopped) return;
         var table = ProcessTable.Snapshot();
-        var wanted = AppAudioPlan.Choose(AudioSessions.Scan().Keys, table, _ownProcessId, _muted).Take(MaxSources).ToHashSet();
+        var sessions = AudioSessions.Scan().Keys;
+        var wanted = (_only is null ? AppAudioPlan.Choose(sessions, table, _ownProcessId, _muted) : AppAudioPlan.ChooseOnly(sessions, table, _ownProcessId, _only))
+            .Take(MaxSources).ToHashSet();
 
         List<Source> removed;
         int[] added;

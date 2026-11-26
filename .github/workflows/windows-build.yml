@@ -112,7 +112,8 @@ jobs:
         shell: pwsh
         run: |
           # Dois apps tocando fora do ScreenFlow para o teste do som do PC: 440 Hz no powershell.exe (o app que o teste
-          # tira da transmissão) e 700 Hz no pwsh.exe (um app que continua nela). Sem placa de som, eles só fecham.
+          # tira da transmissão) e 700 Hz no pwsh.exe (um app que continua nela e o único da festa com um app só). Sem
+          # placa de som, eles só fecham.
           function New-ToneWav([string]$Path, [double]$Hz) {
             $rate = 48000
             $frames = $rate * 2

@@ -151,8 +151,11 @@ internal sealed class OpusFramer : IDisposable
     public void Dispose() => _encoder.Dispose();
 }
 
-/// <summary>Como separar o som do PC: tirar a voz da rede e os sons do ScreenFlow, e quais apps tirar também.</summary>
-public sealed record SystemAudioOptions(bool SeparateApps = true, IReadOnlyList<MutedApp>? MutedApps = null);
+/// <summary>
+/// Como separar o som do PC: tirar a voz da rede e os sons do ScreenFlow, e quais apps tirar também. Com
+/// <paramref name="OnlyApp"/> (festa de música), vai só o som desse app.
+/// </summary>
+public sealed record SystemAudioOptions(bool SeparateApps = true, IReadOnlyList<MutedApp>? MutedApps = null, MutedApp? OnlyApp = null);
 
 /// <summary>
 /// Captura o som do PC, converte para 48 kHz estéreo float com o swresample (reamostragem de qualidade e downmix correto
@@ -200,6 +203,9 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
     /// <summary>O som está separado por app (a voz da rede fica fora). False: vai todo o som do PC.</summary>
     public bool Separated { get; private set; }
 
+    /// <summary>O app que está indo sozinho (festa com "só o Spotify"). Null: vai o som do PC.</summary>
+    public string? OnlyApp { get; private set; }
+
     public bool Paused
     {
         get => _framer.Paused;
@@ -229,17 +235,19 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         options = Clean(options);
         lock (_gate)
         {
-            if (options.SeparateApps == _options.SeparateApps && options.MutedApps!.Select(a => a.Exe).SequenceEqual(_options.MutedApps!.Select(a => a.Exe))) return;
+            if (options.SeparateApps == _options.SeparateApps && options.OnlyApp?.Exe == _options.OnlyApp?.Exe
+                && options.MutedApps!.Select(a => a.Exe).SequenceEqual(_options.MutedApps!.Select(a => a.Exe))) return;
             _options = options;
         }
         Restart("apps tirados do som mudaram", delayMs: 0);
     }
 
-    private static SystemAudioOptions Clean(SystemAudioOptions options) => options with { MutedApps = MutedApp.Normalize(options.MutedApps) };
+    private static SystemAudioOptions Clean(SystemAudioOptions options)
+        => options with { MutedApps = MutedApp.Normalize(options.MutedApps), OnlyApp = MutedApp.Normalize([options.OnlyApp]).FirstOrDefault() };
 
     private void OpenCapture()
     {
-        var capture = CreateCapture(out var separation);
+        var capture = CreateCapture(out var separation, out var onlyApp);
         var format = capture.WaveFormat;
         _sourceRate = format.SampleRate;
         _sourceChannels = Math.Max(1, format.Channels);
@@ -252,15 +260,36 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         _capture = capture;
         Separation = separation;
         Separated = capture is not LowLatencyLoopbackCapture;
+        OnlyApp = onlyApp;
         Description = $"{_sourceRate} Hz, {_sourceChannels} canais, {_sourceBits} bits{(_sourceFloat ? " float" : string.Empty)} → Opus {Profile.BitrateKbps} kbps"
-                      + (Profile.Music ? " (música, 20 ms, VBR)" : " (baixa latência, 10 ms)") + $" · {separation}";
+                      + (Profile.Music ? $" (música, {Profile.FrameMs} ms, VBR)" : $" (baixa latência, {Profile.FrameMs} ms)") + $" · {separation}";
         Log.Info($"Áudio do sistema: {Description}");
     }
 
-    /// <summary>Escolhe a captura: mistura sem os apps escolhidos, tudo menos o ScreenFlow ou, se nada disso abrir, tudo.</summary>
-    private IWaveIn CreateCapture(out string separation)
+    /// <summary>
+    /// Escolhe a captura: só o app escolhido (festa de música), mistura sem os apps escolhidos, tudo menos o ScreenFlow
+    /// ou, se nada disso abrir, tudo.
+    /// </summary>
+    private IWaveIn CreateCapture(out string separation, out string? onlyApp)
     {
         var options = _options;
+        onlyApp = null;
+        if (options.OnlyApp is { } only)
+        {
+            try
+            {
+                if (!ProcessLoopbackCapture.Supported) throw new PlatformNotSupportedException("precisa do Windows 10 versão 2004 ou mais novo");
+                var mixer = AppAudioMixer.OpenOnly([only.Exe]);
+                separation = $"só o som de {only.Name}";
+                onlyApp = only.Name;
+                return mixer;
+            }
+            catch (Exception exception)
+            {
+                Log.Warn($"Não deu para mandar só o som de {only.Exe}: {exception.Message}");
+                Warn($"Não deu para mandar só o som de {only.Name} ({exception.Message}). Vai o som do PC.");
+            }
+        }
         if (options.SeparateApps && ProcessLoopbackCapture.Supported)
         {
             if (options.MutedApps is { Count: > 0 } muted)

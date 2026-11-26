@@ -27,6 +27,8 @@ public partial class TransmitPage : UserControl, IShellPage
     private readonly ObservableCollection<ViewerRow> _viewerRows = [];
     private readonly ObservableCollection<AppChoice> _apps = [];
     private int _appsVersion;
+    private int _partyAppsVersion;
+    private bool _fillingPartyApps;
     private HostSession? _session;
     private System.Net.IPAddress? _liveAddress;
     private IReadOnlyList<DisplayMonitor> _monitors = [];
@@ -46,10 +48,11 @@ public partial class TransmitPage : UserControl, IShellPage
         FpsCombo.Fill(Quality.FrameRates.Select(f => new Choice<int>(f, $"{f} FPS")));
         CameraQualityCombo.Fill(OverviewPage.CameraQualities);
         MusicCombo.Fill(AudioProfile.MusicBitrates.Select(k => new Choice<int>(k, OverviewPage.MusicLabel(k))));
-        QualityCombo.SelectionChanged += (_, _) => UpdateProfileHint();
-        FpsCombo.SelectionChanged += (_, _) => UpdateProfileHint();
-        CameraQualityCombo.SelectionChanged += (_, _) => UpdateProfileHint();
+        QualityCombo.SelectionChanged += (_, _) => QualityChanged();
+        FpsCombo.SelectionChanged += (_, _) => QualityChanged();
+        CameraQualityCombo.SelectionChanged += (_, _) => QualityChanged();
         MusicCombo.SelectionChanged += (_, _) => UpdateProfileHint();
+        PartyAppCombo.SelectionChanged += (_, _) => PartyApp_Changed();
         AudioToggle.Checked += (_, _) => UpdateAudioCard();
         AudioToggle.Unchecked += (_, _) => UpdateAudioCard();
         Spectrum.Source = () => _session?.AudioMeter;
@@ -104,6 +107,7 @@ public partial class TransmitPage : UserControl, IShellPage
         CameraQualityCombo.SelectValue((Resolution.FromLabel(Settings.CameraResolution), Settings.CameraFps));
         MusicCombo.SelectValue(Settings.MusicBitrateKbps, k => k);
         AudioToggle.IsChecked = Settings.AudioEnabled;
+        FixedQualityToggle.IsChecked = !Settings.AdaptiveQuality;
         CameraWithScreenToggle.IsChecked = Settings.CameraWithScreen;
         ApproveToggle.IsChecked = Settings.ApproveEachViewer;
         PinBox.Text = Settings.Pin ?? string.Empty;
@@ -131,14 +135,73 @@ public partial class TransmitPage : UserControl, IShellPage
         ScreenOptions.Visibility = mode == StreamMode.Screen ? Visibility.Visible : Visibility.Collapsed;
         CameraOptions.Visibility = mode == StreamMode.Camera ? Visibility.Visible : Visibility.Collapsed;
         PartyOptions.Visibility = mode == StreamMode.AudioOnly ? Visibility.Visible : Visibility.Collapsed;
-        AudioToggle.Visibility = mode == StreamMode.AudioOnly ? Visibility.Collapsed : Visibility.Visible;
+        AudioToggle.Visibility = FixedQualityToggle.Visibility = mode == StreamMode.AudioOnly ? Visibility.Collapsed : Visibility.Visible;
         OptionsTitle.Text = StreamModes.Label(mode);
         StartText.Text = mode == StreamMode.AudioOnly ? "Começar a festa" : "Iniciar transmissão";
         StartGlyph.Text = mode switch { StreamMode.Camera => "", StreamMode.AudioOnly => "", _ => "" };
         if (mode == StreamMode.Camera) _ = LoadCamerasAsync();
+        if (mode == StreamMode.AudioOnly) _ = LoadPartyAppsAsync();
         UpdateAudioCard();
         UpdateProfileHint();
+        UpdateMutedApps();
     }
+
+    // ───────────────────────── Festa de música: o app da música ─────────────────────────
+
+    private void RefreshPartyApps_Click(object sender, RoutedEventArgs e) => _ = LoadPartyAppsAsync();
+
+    /// <summary>"O que toca na festa": todo o som do PC ou um app só (os que estão tocando som aparecem primeiro).</summary>
+    private async Task LoadPartyAppsAsync()
+    {
+        var version = ++_partyAppsVersion;
+        IReadOnlyList<RunningApp> running = [];
+        if (AppServices.DemoMode) running = DemoData.PartyApps;
+        else
+        {
+            try { running = await Task.Run(AppAudioCatalog.List); }
+            catch (Exception exception) { Log.Warn($"Não deu para listar os apps abertos: {exception.Message}"); }
+        }
+        if (version != _partyAppsVersion) return;
+
+        var saved = Settings.PartyApp;
+        var choices = new List<Choice<MutedApp?>> { new(null, "Todo o som do PC") };
+        choices.AddRange(running.Select(app => new Choice<MutedApp?>(new MutedApp(app.Exe, app.Name), app.PlayingSound ? $"Só {app.Name} · tocando agora" : $"Só {app.Name}")));
+        if (saved is not null && running.All(app => app.Exe != saved.Exe)) choices.Add(new(saved, $"Só {saved.Name} · fechado agora"));
+        _fillingPartyApps = true;
+        PartyAppCombo.Fill(choices);
+        PartyAppCombo.SelectedItem = choices.FirstOrDefault(c => c.Value?.Exe == saved?.Exe) ?? choices[0];
+        _fillingPartyApps = false;
+        UpdatePartyInfo();
+    }
+
+    private void PartyApp_Changed()
+    {
+        if (_fillingPartyApps || PartyAppCombo.SelectedItem is not Choice<MutedApp?> choice) return;
+        var app = choice.Value;
+        if (app?.Exe == Settings.PartyApp?.Exe) return;
+        Settings.PartyApp = app;
+        AppServices.Settings.Save();
+        UpdatePartyInfo();
+        if (_session?.Mode != StreamMode.AudioOnly)
+        {
+            UpdateMutedApps();
+            return;
+        }
+        OnAudioSettingsChanged();
+        _shell.Toast(app is null ? "A festa agora toca todo o som do PC." : $"A festa agora toca só o som de {app.Name}.", ToastKind.Success);
+    }
+
+    private void UpdatePartyInfo()
+    {
+        const string quality = "Opus estéreo 48 kHz, com cópia de cada pacote no seguinte: se um se perder na rede, ninguém percebe.";
+        PartyInfoText.Text = Settings.PartyApp is { } app
+            ? $"Toca só o som de {app.Name}: notificações, jogos e o resto do PC ficam de fora. Dá para trocar com a festa no ar. {quality}"
+            : $"Toca tudo o que sai no som do PC (Spotify, YouTube, jogos). Para tocar só a música, escolha o app dela aqui em cima. {quality}";
+    }
+
+    /// <summary>Como separar o som do PC para a transmissão neste modo (a festa pode ir com o som de um app só).</summary>
+    private SystemAudioOptions AudioOptions(StreamMode mode)
+        => new(Settings.SeparateAppAudio, Settings.MutedApps, mode == StreamMode.AudioOnly ? Settings.PartyApp : null);
 
     /// <summary>"Mandar a câmera junto": mostra a escolha da câmera e já procura as câmeras do PC.</summary>
     private void CameraWithScreen_Changed(object sender, RoutedEventArgs e)
@@ -150,12 +213,76 @@ public partial class TransmitPage : UserControl, IShellPage
         UpdateProfileHint();
     }
 
+    private void FixedQuality_Changed(object sender, RoutedEventArgs e)
+    {
+        if (IsInitialized) QualityChanged();
+    }
+
+    private void QualityChanged()
+    {
+        UpdateProfileHint();
+        ApplyLiveQuality();
+    }
+
+    /// <summary>
+    /// Qualidade trocada com a transmissão no ar (resolução, FPS ou qualidade fixa): vale na hora para quem está
+    /// assistindo e fica salva para a próxima vez.
+    /// </summary>
+    private void ApplyLiveQuality()
+    {
+        if (!IsInitialized || _session is not { HasVideo: true } session) return;
+        Resolution? resolution;
+        int fps;
+        if (session.Mode == StreamMode.Camera)
+        {
+            if (CameraQualityCombo.SelectedItem is not Choice<(Resolution Resolution, int Fps)> camera) return;
+            (resolution, fps) = camera.Value;
+        }
+        else
+        {
+            resolution = QualityCombo.Value<Resolution>();
+            fps = FpsCombo.SelectedItem is Choice<int> f ? f.Value : 0;
+        }
+        if (resolution is null || fps <= 0) return;
+        var adaptive = FixedQualityToggle.IsChecked != true;
+        if (!session.ChangeQuality(resolution, fps, adaptive)) return;
+
+        if (session.Mode == StreamMode.Camera)
+        {
+            Settings.CameraResolution = resolution.Label;
+            Settings.CameraFps = fps;
+        }
+        else
+        {
+            Settings.Resolution = resolution.Label;
+            Settings.Fps = fps;
+        }
+        Settings.AdaptiveQuality = adaptive;
+        AppServices.Settings.Save();
+        _shell.Toast(adaptive
+            ? $"Qualidade agora: {resolution.Label} a {fps} FPS. Quem está assistindo já recebe assim."
+            : $"Qualidade fixa em {resolution.Label} a {fps} FPS. Quem está assistindo já recebe assim.", ToastKind.Success);
+    }
+
+    /// <summary>
+    /// Ao vivo, trava só o que não dá para trocar com a transmissão no ar (o modo, a tela ou câmera, quem pode entrar).
+    /// A qualidade continua livre.
+    /// </summary>
+    private void LockWhileLive(bool live)
+    {
+        ModeGrid.IsEnabled = AccessPanel.IsEnabled = !live;
+        SourceRow.IsEnabled = CameraWithScreenToggle.IsEnabled = OverlayCameraPanel.IsEnabled = CameraRow.IsEnabled = !live;
+        MusicCombo.IsEnabled = AudioToggle.IsEnabled = !live;
+    }
+
     private void UpdateAudioCard()
     {
         var mode = _session?.Mode ?? SelectedMode;
         var audio = mode == StreamMode.AudioOnly || (_session?.AudioEnabled ?? AudioToggle.IsChecked == true);
         AudioCard.Visibility = audio ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    private const string FixedHint = " Qualidade fixa: ela não baixa sozinha, então se a rede não aguentar a imagem pode travar.";
 
     private void UpdateProfileHint()
     {
@@ -169,7 +296,8 @@ public partial class TransmitPage : UserControl, IShellPage
             case StreamMode.Camera when CameraQualityCombo.SelectedItem is Choice<(Resolution Resolution, int Fps)> camera:
                 var codec = Settings.PreferredCodec ?? VideoCodec.Hevc;
                 var kbps = Quality.TargetBitrateKbps(camera.Value.Resolution, camera.Value.Fps, codec);
-                ProfileHint.Text = $"Cerca de {kbps / 1000.0:0.#} Mbps por pessoa em {Quality.CodecLabel(codec)}. A câmera usa o formato mais próximo que ela suportar.";
+                ProfileHint.Text = $"Cerca de {kbps / 1000.0:0.#} Mbps por pessoa em {Quality.CodecLabel(codec)}. A câmera usa o formato mais próximo que ela suportar."
+                                   + (FixedQualityToggle.IsChecked == true ? FixedHint : string.Empty);
                 break;
             default:
                 if (QualityCombo.Value<Resolution>() is not { } resolution || FpsCombo.SelectedItem is not Choice<int> fps) return;
@@ -178,12 +306,15 @@ public partial class TransmitPage : UserControl, IShellPage
                 var text = $"Perfil {Quality.TierLabel(resolution, fps.Value)}: cerca de {target / 1000.0:0} Mbps por pessoa em {Quality.CodecLabel(screenCodec)}.";
                 if (CameraWithScreenToggle.IsChecked == true)
                     text += $" A câmera junto usa mais uns {Quality.CameraOverlayBitrateKbps(1280, 720, 30, screenCodec) / 1000.0:0.#} Mbps por pessoa.";
+                var fixedQuality = FixedQualityToggle.IsChecked == true;
                 if (Settings.UploadMbps > 0)
                 {
                     var people = Math.Max(1, (int)(Settings.UploadMbps * 0.8 * 1000 / target));
-                    text += $" Com o seu upload ({Settings.UploadMbps:0} Mbps) cabem umas {people} pessoas nessa qualidade; acima disso a qualidade se ajusta sozinha.";
+                    text += $" Com o seu upload ({Settings.UploadMbps:0} Mbps) cabem umas {people} pessoas nessa qualidade"
+                            + (fixedQuality ? "." : "; acima disso a qualidade se ajusta sozinha.");
                 }
-                else text += " Com mais gente assistindo, o upload é dividido e a qualidade se ajusta sozinha.";
+                else if (!fixedQuality) text += " Com mais gente assistindo, o upload é dividido e a qualidade se ajusta sozinha.";
+                if (fixedQuality) text += FixedHint;
                 ProfileHint.Text = text;
                 break;
         }
@@ -368,6 +499,7 @@ public partial class TransmitPage : UserControl, IShellPage
 
         Settings.Mode = mode;
         Settings.AudioEnabled = AudioToggle.IsChecked == true;
+        if (mode != StreamMode.AudioOnly) Settings.AdaptiveQuality = FixedQualityToggle.IsChecked != true;
         Settings.CameraWithScreen = CameraWithScreenToggle.IsChecked == true;
         Settings.ApproveEachViewer = ApproveToggle.IsChecked == true;
         Settings.Pin = pin.Length == 0 ? null : pin;
@@ -391,7 +523,7 @@ public partial class TransmitPage : UserControl, IShellPage
                 Settings.PreferredCodec, Settings.PreferredEncoder, hardware.Encoders,
                 mode == StreamMode.AudioOnly || Settings.AudioEnabled, Settings.AudioBitrateKbps, Settings.AdaptiveQuality, Settings.FecGroupSize, Settings.UploadMbps,
                 mode, Settings.MusicBitrateKbps, OverlayCamera: overlay,
-                AudioSeparation: new SystemAudioOptions(Settings.SeparateAppAudio, Settings.MutedApps));
+                AudioSeparation: AudioOptions(mode));
 
             var session = new HostSession(options) { ApprovalHandler = RequestApprovalAsync };
             session.StatusChanged += message => Dispatcher.BeginInvoke(() => StateText.Text = message);
@@ -402,7 +534,7 @@ public partial class TransmitPage : UserControl, IShellPage
             _liveAddress = adapter.Address;
             _session = session;
 
-            ModeGrid.IsEnabled = OptionsPanel.IsEnabled = AccessPanel.IsEnabled = false;
+            LockWhileLive(true);
             StartButton.Visibility = Visibility.Collapsed;
             StopButton.Visibility = Visibility.Visible;
             SetBadge("Ao vivo", "Pink", "PinkSoft");
@@ -447,7 +579,7 @@ public partial class TransmitPage : UserControl, IShellPage
         _viewerRows.Clear();
         NoViewers.Visibility = Visibility.Visible;
         ViewerCount.Text = string.Empty;
-        ModeGrid.IsEnabled = OptionsPanel.IsEnabled = AccessPanel.IsEnabled = true;
+        LockWhileLive(false);
         StartButton.Visibility = Visibility.Visible;
         StopButton.Visibility = Visibility.Collapsed;
         StatViewers.Text = "0";
@@ -460,6 +592,7 @@ public partial class TransmitPage : UserControl, IShellPage
         Telemetry.EndHost();
         UpdateAudioCard();
         _shell.NotifyLiveStateChanged();
+        if (session is not null) _shell.ShowAfterSessionEnded(this);
     }
 
     private void ShowError(string message)
@@ -642,16 +775,24 @@ public partial class TransmitPage : UserControl, IShellPage
     /// <summary>As opções do som do PC mudaram (aqui ou nas Configurações): vale na hora para a transmissão no ar.</summary>
     public void OnAudioSettingsChanged()
     {
-        _session?.ConfigureAudio(new SystemAudioOptions(Settings.SeparateAppAudio, Settings.MutedApps));
+        if (_session is { } session) session.ConfigureAudio(AudioOptions(session.Mode));
         UpdateMutedApps();
     }
 
     /// <summary>"Fica fora da transmissão": o que foi pedido ou, ao vivo, o que está acontecendo de fato.</summary>
     private void UpdateMutedApps()
     {
+        if (!IsInitialized) return;
         var names = Settings.MutedApps.Select(a => a.Name).ToList();
         var live = _session?.AudioSeparated;
-        if (live == true)
+        // Festa com o som de um app só: tirar apps não faz diferença.
+        var partyApp = (_session?.Mode ?? SelectedMode) == StreamMode.AudioOnly ? Settings.PartyApp : null;
+        ChooseAppsButton.IsEnabled = partyApp is null;
+        if (_session?.AudioOnlyApp is { } only)
+            MutedAppsText.Text = $"Tudo menos {only}: a festa toca só o som dele.";
+        else if (_session is null && partyApp is not null)
+            MutedAppsText.Text = $"Tudo menos {partyApp.Name}: a festa toca só o som dele.";
+        else if (live == true)
             MutedAppsText.Text = $"Agora vai o som do PC {_session!.AudioSeparation}.";
         else if (live == false)
             MutedAppsText.Text = Settings.SeparateAppAudio
@@ -716,7 +857,7 @@ public partial class TransmitPage : UserControl, IShellPage
         CameraWithScreenToggle.IsChecked = true;
         var meter = DemoData.LiveMeter();
         Spectrum.Source = () => meter;
-        ModeGrid.IsEnabled = OptionsPanel.IsEnabled = AccessPanel.IsEnabled = false;
+        LockWhileLive(true);
         StartButton.Visibility = Visibility.Collapsed;
         StopButton.Visibility = Visibility.Visible;
         SetBadge("Ao vivo", "Pink", "PinkSoft");

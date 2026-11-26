@@ -15,7 +15,12 @@ public sealed class UpdateService
     private Task<ReleaseInfo?>? _checking;
 
     public ReleaseInfo? Available { get; private set; }
-    public bool Checking => _checking is { IsCompleted: false };
+
+    /// <summary>
+    /// Procurando agora. É um campo próprio (e não "a tarefa ainda não terminou") porque o aviso de fim sai de dentro da
+    /// tarefa: lendo a tarefa, o botão Procurar agora ficava travado em "Procurando…" quando não havia versão nova.
+    /// </summary>
+    public bool Checking { get; private set; }
     public bool Installing { get; private set; }
     public double Progress { get; private set; }
     public string? Error { get; private set; }
@@ -27,10 +32,11 @@ public sealed class UpdateService
     /// <summary>Encontrou uma versão nova que o usuário ainda não pulou.</summary>
     public event Action<ReleaseInfo>? Found;
 
-    public Task<ReleaseInfo?> CheckAsync(bool manual) => Checking ? _checking! : _checking = CheckCoreAsync(manual);
+    public Task<ReleaseInfo?> CheckAsync(bool manual) => Checking && _checking is not null ? _checking : _checking = CheckCoreAsync(manual);
 
     private async Task<ReleaseInfo?> CheckCoreAsync(bool manual)
     {
+        Checking = true;
         Error = null;
         Changed?.Invoke();
         try
@@ -53,6 +59,7 @@ public sealed class UpdateService
         }
         finally
         {
+            Checking = false;
             Changed?.Invoke();
         }
     }

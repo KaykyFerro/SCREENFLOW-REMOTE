@@ -263,6 +263,78 @@ public sealed unsafe class MicrophoneInput : IVoiceInput
     }
 }
 
+/// <summary>
+/// "Ouvir meu microfone": toca o próprio microfone na saída padrão do Windows (o fone), com o menor atraso possível:
+/// buffer adaptativo a partir de 20 ms e WASAPI de 20 ms. Recebe os mesmos quadros que vão para a voz (48 kHz mono, já
+/// sem o ronco grave), então a pessoa ouve o microfone do jeito que ele chega no ScreenFlow. Se a saída padrão mudar
+/// (fone Bluetooth), passa a tocar nela.
+/// </summary>
+public sealed class MicrophoneMonitor : IDisposable
+{
+    private readonly object _gate = new();
+    private readonly JitterBuffer _buffer = new(20, 100);
+    private readonly VolumeSampleProvider _volume;
+    private readonly float[] _stereo = new float[VoiceFormat.FrameSamples * AudioProfile.Channels];
+    private readonly DeviceWatcher _watcher;
+    private WasapiOut? _output;
+    private bool _disposed;
+
+    public MicrophoneMonitor(float volume = 1f)
+    {
+        _volume = new VolumeSampleProvider(_buffer) { Volume = Math.Clamp(volume, 0f, 1.5f) };
+        Open();
+        _watcher = new DeviceWatcher(DataFlow.Render, () => Task.Run(() =>
+        {
+            Thread.Sleep(400);
+            lock (_gate)
+            {
+                if (_disposed) return;
+                Close();
+                try { Open(); } catch (Exception exception) { Log.Warn($"Não deu para ouvir o microfone na nova saída: {exception.Message}"); }
+            }
+        }));
+    }
+
+    /// <summary>Quanto o retorno está atrasado agora (buffer), para o teste.</summary>
+    public int TargetMs => _buffer.TargetMs;
+
+    /// <summary>Um quadro do microfone (mono). Chamado pela thread da captura.</summary>
+    public void Write(float[] mono)
+    {
+        var count = Math.Min(mono.Length, VoiceFormat.FrameSamples);
+        for (var i = 0; i < count; i++) _stereo[i * 2] = _stereo[i * 2 + 1] = mono[i];
+        _buffer.Write(_stereo.AsSpan(0, count * 2));
+    }
+
+    private void Open()
+    {
+        var output = new WasapiOut(AudioClientShareMode.Shared, true, 20);
+        output.Init(_volume);
+        output.Play();
+        _output = output;
+    }
+
+    private void Close()
+    {
+        var output = _output;
+        _output = null;
+        if (output is null) return;
+        try { output.Stop(); } catch { }
+        try { output.Dispose(); } catch { }
+    }
+
+    public void Dispose()
+    {
+        _watcher.Dispose();
+        lock (_gate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            Close();
+        }
+    }
+}
+
 /// <summary>Voz de teste: "fala" (um tom com vibrato) por um tempo e fica em silêncio, em ciclo. Usada no autoteste.</summary>
 public sealed class ToneVoiceInput : IVoiceInput
 {
@@ -523,7 +595,8 @@ internal sealed class VoiceOutput : IDisposable
 
     public JitterBuffer AddStream()
     {
-        var buffer = new JitterBuffer(60, 240);
+        // Voz em quadros de 20 ms: começa em 40 ms e só cresce se a voz de alguém falhar.
+        var buffer = new JitterBuffer(40, 240);
         _voices.AddMixerInput(buffer);
         return buffer;
     }

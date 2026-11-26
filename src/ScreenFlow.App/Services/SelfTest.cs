@@ -170,6 +170,7 @@ public static class SelfTest
     // Tons do teste do som do PC: o do ScreenFlow e os dois que o CI deixa tocando fora dele (veja windows-build.yml).
     private const double OwnHz = 1000, MutedHz = 440, KeptHz = 700;
     private const string MutedExe = "powershell.exe";
+    private const string KeptExe = "pwsh.exe";
 
     /// <summary>
     /// Som do PC separado por app, no áudio de verdade do Windows (no CI, numa placa de som virtual). O ScreenFlow toca
@@ -193,6 +194,7 @@ public static class SelfTest
 
         WasapiOut? tone = null;
         AppAudioMixer? mixer = null;
+        AppAudioMixer? only = null;
         var recorders = new List<Recorder>();
         try
         {
@@ -209,6 +211,8 @@ public static class SelfTest
                 recorders.Add(new Recorder("sem o ScreenFlow", ProcessLoopbackCapture.ExcludingProcess(Environment.ProcessId)));
                 mixer = AppAudioMixer.Open([MutedExe]);
                 recorders.Add(new Recorder($"sem o {MutedExe}", mixer));
+                only = AppAudioMixer.OpenOnly([KeptExe]);
+                recorders.Add(new Recorder($"só o {KeptExe}", only));
                 foreach (var recorder in recorders) recorder.Start();
             });
             await Task.Delay(1500); // o misturador acha os apps e enche as filas
@@ -220,8 +224,9 @@ public static class SelfTest
                 line($"{recorder.Name}: {recorder.Seconds:0.0} s, {OwnHz:0} Hz {recorder.Level(OwnHz):0.000}, {MutedHz:0} Hz {recorder.Level(MutedHz):0.000}, " +
                      $"{KeptHz:0} Hz {recorder.Level(KeptHz):0.000}");
             line($"Mistura capturando: {(mixer!.CapturedApps.Count == 0 ? "nenhum app" : string.Join(", ", mixer.CapturedApps))}.");
+            line($"Só um app capturando: {(only!.CapturedApps.Count == 0 ? "nenhum app" : string.Join(", ", only.CapturedApps))}.");
 
-            var (all, withoutUs, withoutApp) = (recorders[0], recorders[1], recorders[2]);
+            var (all, withoutUs, withoutApp, onlyApp) = (recorders[0], recorders[1], recorders[2], recorders[3]);
             var reference = all.Level(OwnHz);
             if (reference < 0.05)
             {
@@ -241,6 +246,8 @@ public static class SelfTest
 
             Check(withoutUs.Seconds > 0.8, "a captura sem o ScreenFlow não entregou áudio.");
             Check(withoutApp.Seconds > 0.8, "a mistura sem o app não entregou áudio.");
+            Check(onlyApp.Seconds > 0.8, "a captura de um app só não entregou áudio.");
+            Check(Silent(onlyApp, OwnHz), "o som do próprio ScreenFlow apareceu na captura de um app só.");
             Check(Silent(withoutUs, OwnHz), "o som do próprio ScreenFlow apareceu na captura sem o ScreenFlow.");
             Check(Silent(withoutApp, OwnHz), "o som do próprio ScreenFlow apareceu na mistura.");
             var external = 0;
@@ -249,15 +256,18 @@ public static class SelfTest
                 external++;
                 Check(Heard(withoutUs, MutedHz), $"a captura sem o ScreenFlow perdeu o som do {MutedExe}.");
                 Check(Silent(withoutApp, MutedHz), $"o som do {MutedExe} apareceu na mistura que deveria tirá-lo.");
+                Check(Silent(onlyApp, MutedHz), $"o som do {MutedExe} apareceu na captura que deveria ter só o {KeptExe}.");
             }
             if (all.Level(KeptHz) > 0.05)
             {
                 external++;
                 Check(Heard(withoutUs, KeptHz), "a captura sem o ScreenFlow perdeu o som de outro app.");
                 Check(Heard(withoutApp, KeptHz), "a mistura perdeu o som de um app que não foi tirado.");
+                Check(Heard(onlyApp, KeptHz), $"a captura de um app só perdeu o som do {KeptExe}.");
             }
             if (external < 2) line("Aviso: os tons de fora (440 e 700 Hz) não estavam tocando todos, então só parte da separação foi conferida.");
-            line(ok ? "PASSOU: o som do ScreenFlow e o do app tirado ficam fora; o resto do som do PC vai." : "FALHOU: a separação do som por app não funcionou.");
+            line(ok ? $"PASSOU: o som do ScreenFlow e o do app tirado ficam fora; o resto do som do PC vai; e só o {KeptExe} vai quando é o único escolhido."
+                : "FALHOU: a separação do som por app não funcionou.");
             return ok;
         }
         catch (Exception exception)
@@ -270,6 +280,7 @@ public static class SelfTest
         {
             foreach (var recorder in recorders) recorder.Dispose();
             mixer?.Dispose();
+            only?.Dispose();
             tone?.Dispose();
         }
     }
