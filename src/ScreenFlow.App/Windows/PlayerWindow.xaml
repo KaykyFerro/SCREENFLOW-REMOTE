@@ -265,7 +265,7 @@
                         <TextBlock x:Name="QualityText" Text="Qualidade"/>
                     </StackPanel>
                 </Button>
-                <Button x:Name="AppsButton" Style="{StaticResource IconButton}" Content="&#xE74F;" ToolTip="Tirar apps do som da transmissão" Click="Apps_Click"
+                <Button x:Name="AppsButton" Style="{StaticResource IconButton}" Content="&#xE71D;" ToolTip="Tirar apps do som da transmissão" Click="Apps_Click"
                         Margin="0,0,4,0" Visibility="Collapsed"/>
                 <Popup x:Name="RemoteQualityPopup" Placement="Top" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade" Closed="RemotePopup_Closed">
                     <Border Style="{StaticResource PlayerPopupCard}">
