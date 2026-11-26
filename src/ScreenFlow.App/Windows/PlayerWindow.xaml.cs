@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
@@ -57,6 +58,15 @@ public partial class PlayerWindow : Window
     private bool _shuttingDown;
     private bool _cleaned;
 
+    // Controles de quem assiste (1.2.0)
+    private readonly DispatcherTimer _mediaClock = new() { Interval = TimeSpan.FromMilliseconds(500) };
+    private bool _remoteOn;
+    private RemoteStateMessage _remote = RemoteStateMessage.Disabled;
+    private MediaStateMessage _media = MediaStateMessage.None;
+    private AudioAppsMessage _apps = new([]);
+    private string? _coverShown;
+    private bool _seeking;
+
     public PlayerWindow(ViewerSession session, string host, StreamMode? expectedMode = null)
     {
         Session = session;
@@ -85,6 +95,11 @@ public partial class PlayerWindow : Window
             _gpuPath = gpu;
             UpdateLayers();
         });
+        session.RemoteChanged += () => Dispatcher.BeginInvoke(OnRemoteChanged);
+        _mediaClock.Tick += (_, _) => UpdateMediaPosition();
+        // As janelinhas acompanham a barra quando ela vai para a janela sobreposta (o nome do botão não é achado lá).
+        RemoteQualityPopup.PlacementTarget = QualityButton;
+        RemoteAppsPopup.PlacementTarget = AppsButton;
 
         CompositionTarget.Rendering += OnRendering;
         _hideControls.Tick += (_, _) => HideControls();
@@ -95,6 +110,7 @@ public partial class PlayerWindow : Window
         SizeChanged += (_, _) =>
         {
             ResizeCameraPip();
+            FitControlBar();
             RepositionOverlays();
         };
         StateChanged += (_, _) => RepositionOverlays();
@@ -217,6 +233,7 @@ public partial class PlayerWindow : Window
         if (_cameraExpected) _cameraWatch.Start();
         else _cameraWatch.Stop();
         UpdateLayers();
+        ShowRemote();
     }
 
     /// <summary>Caminho pela CPU: copia o frame mais recente na hora da composição (sem fila, sem latência acumulada).</summary>
@@ -524,7 +541,7 @@ public partial class PlayerWindow : Window
     private void HideControls()
     {
         _hideControls.Stop();
-        if (ControlBar.IsMouseOver || Session.State != ConnectionState.Connected) return;
+        if (ControlBar.IsMouseOver || RemoteQualityPopup.IsOpen || RemoteAppsPopup.IsOpen || Session.State != ConnectionState.Connected) return;
         _controlsShown = false;
         ControlBar.IsHitTestVisible = false;
         ControlBar.BeginAnimation(OpacityProperty, new DoubleAnimation(0, TimeSpan.FromMilliseconds(260)));
@@ -536,6 +553,256 @@ public partial class PlayerWindow : Window
         Cursor = hidden ? Cursors.None : null;
         if (_surface is not null) _surface.HideCursor = hidden;
     }
+
+    // ───────────────────────── Controles de quem assiste (1.2.0) ─────────────────────────
+
+    private void OnRemoteChanged()
+    {
+        if (_demo || _shuttingDown) return;
+        _remoteOn = Session.RemoteAvailable;
+        _remote = Session.RemoteState;
+        _media = Session.Media;
+        _apps = Session.AudioApps;
+        ShowRemote();
+    }
+
+    /// <summary>
+    /// Mostra só o que o host deixa: a qualidade (com vídeo), voltar, pausar e pular a música ou o vídeo que está tocando e
+    /// os apps do som. Hosts antigos e hosts que desligaram os controles não mostram nada disso.
+    /// </summary>
+    private void ShowRemote()
+    {
+        var on = _remoteOn;
+        var state = _remote;
+        var media = _media;
+        var video = _mode != StreamMode.AudioOnly;
+
+        QualityButton.Visibility = on && state.CanChangeQuality && video ? Visibility.Visible : Visibility.Collapsed;
+        QualityText.Text = state.Resolution.Length > 0 && state.Fps > 0
+            ? $"{state.Resolution} · {state.Fps} FPS{(state.Adaptive ? string.Empty : " fixa")}"
+            : "Qualidade";
+        AppsButton.Visibility = on && state.CanChooseApps ? Visibility.Visible : Visibility.Collapsed;
+        if (QualityButton.Visibility != Visibility.Visible) RemoteQualityPopup.IsOpen = false;
+        if (AppsButton.Visibility != Visibility.Visible) RemoteAppsPopup.IsOpen = false;
+
+        var playing = on && media.Available;
+        var controls = playing && state.CanControlMedia;
+        var title = media.Title.Length > 0 ? media.Title : media.AppName;
+        var playGlyph = media.Playing ? "\uE769" : "\uE768";
+        var playTip = media.Playing ? "Pausar (vale para todo mundo)" : "Tocar (vale para todo mundo)";
+
+        BarMedia.Visibility = controls ? Visibility.Visible : Visibility.Collapsed;
+        BarMediaTitle.Text = title;
+        BarMediaArtist.Text = media.Artist.Length > 0 ? media.Artist : media.AppName;
+        BarMedia.ToolTip = media.Artist.Length > 0 ? $"{title} · {media.Artist} ({media.AppName})" : $"{title} ({media.AppName})";
+        BarPlayPause.Content = playGlyph;
+        BarPlayPause.ToolTip = playTip;
+        BarPrevious.IsEnabled = PartyPrevious.IsEnabled = media.CanPrevious;
+        BarNext.IsEnabled = PartyNext.IsEnabled = media.CanNext;
+        BarPlayPause.IsEnabled = PartyPlayPause.IsEnabled = media.CanPlayPause;
+
+        PartyMedia.Visibility = playing && !video ? Visibility.Visible : Visibility.Collapsed;
+        PartyDetail.Visibility = PartyMedia.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
+        PartyMediaApp.Text = $"{media.AppName} · {(media.Playing ? "tocando agora" : "pausado")}";
+        PartyMediaTitle.Text = title;
+        PartyMediaArtist.Text = media.Artist;
+        PartyMediaArtist.Visibility = media.Artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        PartyMediaButtons.Visibility = controls ? Visibility.Visible : Visibility.Collapsed;
+        PartyPlayGlyph.Text = playGlyph;
+        PartyPlayPause.ToolTip = playTip;
+        ShowCover(playing ? media.Cover : null);
+        UpdateMediaPosition();
+        if (playing && media.Playing) _mediaClock.Start();
+        else _mediaClock.Stop();
+        FitControlBar();
+    }
+
+    /// <summary>Com o player estreito, a barra perde o nome da música (os botões continuam).</summary>
+    private void FitControlBar()
+    {
+        BarMediaInfo.Visibility = ActualWidth is 0 or >= 1150 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>A posição anda sozinha entre uma atualização e outra do host (parada se estiver pausado).</summary>
+    private void UpdateMediaPosition()
+    {
+        var media = _media;
+        var duration = media.DurationSeconds;
+        PartySeekRow.Visibility = duration > 0 ? Visibility.Visible : Visibility.Collapsed;
+        PartySeek.IsEnabled = media.CanSeek && _remote.CanControlMedia && _remoteOn;
+        PartyDuration.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(duration));
+        if (_seeking) return;
+        var position = _demo ? media.PositionSeconds : Session.MediaPosition;
+        PartySeek.Maximum = Math.Max(1, duration);
+        PartySeek.Value = Math.Clamp(position, 0, PartySeek.Maximum);
+        PartyPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(position));
+    }
+
+    private void ShowCover(string? cover)
+    {
+        if (cover == _coverShown) return;
+        _coverShown = cover;
+        var image = DecodeCover(cover);
+        PartyCover.Background = image is null ? null : new ImageBrush(image) { Stretch = Stretch.UniformToFill };
+        PartyCover.Visibility = image is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>A capa chega em JPEG pequeno (base64). Uma imagem grande demais ou quebrada fica sem capa.</summary>
+    private static ImageSource? DecodeCover(string? base64)
+    {
+        if (string.IsNullOrEmpty(base64) || base64.Length > RemoteControl.MaxCoverBytes * 4 / 3 + 4) return null;
+        try
+        {
+            var bytes = Convert.FromBase64String(base64);
+            // Confere o tamanho pelo cabeçalho antes de abrir: uma capa de verdade tem até umas centenas de pixels.
+            var frame = BitmapDecoder.Create(new System.IO.MemoryStream(bytes), BitmapCreateOptions.DelayCreation, BitmapCacheOption.None).Frames[0];
+            if (frame.PixelWidth is <= 0 or > 1024 || frame.PixelHeight is <= 0 or > 1024) return null;
+            var image = new BitmapImage();
+            image.BeginInit();
+            image.CacheOption = BitmapCacheOption.OnLoad;
+            image.StreamSource = new System.IO.MemoryStream(bytes);
+            image.EndInit();
+            image.Freeze();
+            return image;
+        }
+        catch (Exception exception) when (exception is FormatException or NotSupportedException or InvalidOperationException or ArgumentException
+                                              or System.IO.IOException or System.Runtime.InteropServices.COMException)
+        {
+            return null;
+        }
+    }
+
+    private async void MediaPrevious_Click(object sender, RoutedEventArgs e) => await SendMediaAsync(MediaCommandMessage.Previous);
+    private async void MediaNext_Click(object sender, RoutedEventArgs e) => await SendMediaAsync(MediaCommandMessage.Next);
+
+    private async void MediaPlayPause_Click(object sender, RoutedEventArgs e)
+    {
+        // Troca o ícone na hora; o estado de verdade chega do host logo depois.
+        var glyph = _media.Playing ? "\uE768" : "\uE769";
+        BarPlayPause.Content = glyph;
+        PartyPlayGlyph.Text = glyph;
+        await SendMediaAsync(MediaCommandMessage.PlayPause);
+    }
+
+    private async Task SendMediaAsync(string command, double position = 0)
+    {
+        if (_demo) return;
+        if (!await Session.SendMediaCommandAsync(command, position)) ShowRemote();
+    }
+
+    private void PartySeek_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (PartySeek.IsEnabled) _seeking = true;
+    }
+
+    private async void PartySeek_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_seeking) return;
+        _seeking = false;
+        await SendMediaAsync(MediaCommandMessage.Seek, PartySeek.Value);
+    }
+
+    private void PartySeek_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_seeking) PartyPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(e.NewValue));
+    }
+
+    private void Quality_Click(object sender, RoutedEventArgs e)
+    {
+        FillQualityChoices();
+        RemoteAppsPopup.IsOpen = false;
+        RemoteQualityPopup.IsOpen = true;
+    }
+
+    /// <summary>As escolhas são as que o host ofereceu, com a de agora marcada.</summary>
+    private void FillQualityChoices()
+    {
+        var state = _remote;
+        var camera = state.CameraQualities.Length > 0;
+        ScreenQualityPanel.Visibility = camera ? Visibility.Collapsed : Visibility.Visible;
+        CameraQualityPanel.Visibility = camera ? Visibility.Visible : Visibility.Collapsed;
+        FillChoices(ResolutionChoices, "remote-resolution", state.Resolutions.Select(r => ((object)r, r)), state.Resolution);
+        FillChoices(FpsChoices, "remote-fps", state.FrameRates.Select(f => ((object)f, $"{f}")), state.Fps);
+        FillChoices(CameraChoices, "remote-camera", state.CameraQualities.Select(q => ((object)q, $"{q.Resolution} · {q.Fps} FPS")),
+            new RemoteQuality(state.Resolution, state.Fps));
+        FixedQualityChoice.IsChecked = !state.Adaptive;
+        QualityNote.Text = string.Empty;
+    }
+
+    private void FillChoices(Panel panel, string group, IEnumerable<(object Value, string Label)> choices, object current)
+    {
+        panel.Children.Clear();
+        var style = (Style)FindResource("PlayerChip");
+        foreach (var (value, label) in choices)
+            panel.Children.Add(new RadioButton { Style = style, GroupName = group, Content = label, Tag = value, IsChecked = Equals(value, current) });
+    }
+
+    private static object? Chosen(Panel panel) => panel.Children.OfType<RadioButton>().FirstOrDefault(r => r.IsChecked == true)?.Tag;
+
+    private async void ApplyQuality_Click(object sender, RoutedEventArgs e)
+    {
+        string? resolution;
+        int fps;
+        if (_remote.CameraQualities.Length > 0)
+        {
+            var quality = Chosen(CameraChoices) as RemoteQuality;
+            (resolution, fps) = (quality?.Resolution, quality?.Fps ?? 0);
+        }
+        else
+        {
+            resolution = Chosen(ResolutionChoices) as string;
+            fps = Chosen(FpsChoices) is int f ? f : 0;
+        }
+        if (resolution is null || fps <= 0)
+        {
+            QualityNote.Text = "Escolha a resolução e o FPS.";
+            return;
+        }
+        var adaptive = FixedQualityChoice.IsChecked != true;
+        if (_demo || await Session.RequestQualityAsync(resolution, fps, adaptive))
+        {
+            RemoteQualityPopup.IsOpen = false;
+            QualityText.Text = "Trocando…";
+        }
+        else QualityNote.Text = "Não deu para pedir agora. A conexão caiu?";
+    }
+
+    private void Apps_Click(object sender, RoutedEventArgs e)
+    {
+        FillAppsChoices();
+        RemoteQualityPopup.IsOpen = false;
+        RemoteAppsPopup.IsOpen = true;
+    }
+
+    /// <summary>Os apps com som no PC de quem transmite, com os que já estão fora marcados.</summary>
+    private void FillAppsChoices()
+    {
+        AppsChoices.Children.Clear();
+        var caption = (Style)FindResource("Caption");
+        foreach (var app in _apps.Apps)
+        {
+            var text = new StackPanel();
+            text.Children.Add(new TextBlock { Text = app.Name, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis, MaxWidth = 280 });
+            text.Children.Add(new TextBlock
+            {
+                Text = app.Excluded ? "Fora do som agora" : app.Playing ? "Tocando som agora" : "Com som aberto",
+                Style = caption,
+                FontWeight = FontWeights.Normal,
+            });
+            AppsChoices.Children.Add(new CheckBox { Content = text, IsChecked = app.Excluded, Tag = app.Exe, ToolTip = app.Exe, Margin = new Thickness(0, 5, 0, 5) });
+        }
+        AppsEmpty.Visibility = _apps.Apps.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+        AppsNote.Text = string.Empty;
+    }
+
+    private async void ApplyApps_Click(object sender, RoutedEventArgs e)
+    {
+        var excluded = AppsChoices.Children.OfType<CheckBox>().Where(box => box.IsChecked == true).Select(box => (string)box.Tag).ToList();
+        if (_demo || await Session.RequestAudioAppsAsync(excluded)) RemoteAppsPopup.IsOpen = false;
+        else AppsNote.Text = "Não deu para pedir agora. A conexão caiu?";
+    }
+
+    private void RemotePopup_Closed(object? sender, EventArgs e) => ShowControls();
 
     // ───────────────────────── Fechar ─────────────────────────
 
@@ -567,6 +834,8 @@ public partial class PlayerWindow : Window
         CompositionTarget.Rendering -= OnRendering;
         _hideControls.Stop();
         _cameraWatch.Stop();
+        _mediaClock.Stop();
+        RemoteQualityPopup.IsOpen = RemoteAppsPopup.IsOpen = false;
         _controlsOverlay?.Close();
         _statsOverlay?.Close();
         _cameraOverlay?.Close();
@@ -616,6 +885,7 @@ public partial class PlayerWindow : Window
         {
             StateOverlay.Visibility = Visibility.Collapsed;
             UpdateLayers();
+            ShowRemoteDemo();
         }
         else
         {
@@ -623,5 +893,32 @@ public partial class PlayerWindow : Window
                 ? "Quem está transmitindo precisa aceitar a sua entrada. Assim que aceitar, a imagem aparece aqui."
                 : $"Conectando em {_host}…");
         }
+    }
+
+    /// <summary>Os controles de quem assiste com um host 1.2.0 de exemplo: a música tocando, a qualidade e os apps do som.</summary>
+    private void ShowRemoteDemo()
+    {
+        _remoteOn = true;
+        _remote = new RemoteStateMessage(true, true, true, ["720p", "1080p", "1440p", "4K"], [30, 60, 120, 144, 165], [], "1440p", 165, true);
+        _media = new MediaStateMessage("Spotify", "Noite de Neon", "Os Pixels", true, 83, 214, true, true, true, true, DemoData.AlbumCover());
+        _apps = new AudioAppsMessage(
+        [
+            new RemoteAudioApp("spotify.exe", "Spotify", false, true),
+            new RemoteAudioApp("chrome.exe", "Google Chrome", false, true),
+            new RemoteAudioApp("discord.exe", "Discord", true, false),
+        ]);
+        ShowRemote();
+    }
+
+    internal void ShowQualityDemo()
+    {
+        FillQualityChoices();
+        RemoteQualityPopup.IsOpen = true;
+    }
+
+    internal void ShowAppsDemo()
+    {
+        FillAppsChoices();
+        RemoteAppsPopup.IsOpen = true;
     }
 }

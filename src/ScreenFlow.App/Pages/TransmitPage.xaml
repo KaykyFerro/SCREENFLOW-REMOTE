@@ -142,6 +142,7 @@
                     </Border>
 
                     <Border Style="{StaticResource Card}">
+                        <StackPanel>
                         <StackPanel x:Name="AccessPanel">
                             <TextBlock Style="{StaticResource Heading}" Text="Quem pode entrar" Margin="0,0,0,16"/>
                             <TextBlock Style="{StaticResource Caption}" Text="Seu IP do Radmin"/>
@@ -172,6 +173,13 @@
                             <TextBox x:Name="PinBox" Tag="Sem PIN" MaxLength="32" ToolTip="Deixe vazio para não pedir PIN. Mínimo de 4 caracteres."/>
                             <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0"
                                        Text="Qualquer pessoa na mesma rede Radmin alcança o seu IP. Use PIN ou aprovação para controlar quem entra."/>
+                        </StackPanel>
+                        <!-- Fica fora do AccessPanel: dá para trocar com a transmissão no ar. -->
+                        <CheckBox x:Name="ViewerControlsToggle" Style="{StaticResource Switch}" Content="Quem assiste pode mexer nos controles" Margin="0,18,0,0"
+                                  Checked="ViewerControls_Changed" Unchecked="ViewerControls_Changed"
+                                  ToolTip="Pelo player, quem assiste troca a qualidade, pausa e pula a música ou o vídeo e tira apps do som. Vale para todo mundo."/>
+                        <TextBlock x:Name="ViewerControlsHint" Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap"
+                                   Text="Pelo player: trocar a qualidade, pausar e pular a música ou o vídeo e tirar apps do som. Vale para todo mundo e dá para desligar com a transmissão no ar."/>
                         </StackPanel>
                     </Border>
                 </StackPanel>

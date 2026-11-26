@@ -41,6 +41,12 @@ public sealed class ViewerSession : IAsyncDisposable
     private volatile StreamConfigMessage? _config;
     private volatile D3D11VideoPresenter? _presenter;
     private bool? _gpuRendering;
+    private volatile ActiveConnection? _connection;
+    private volatile bool _remoteAvailable;
+    private volatile RemoteStateMessage _remote = RemoteStateMessage.Disabled;
+    private volatile MediaStateMessage _media = MediaStateMessage.None;
+    private long _mediaReceivedUs;
+    private volatile AudioAppsMessage _apps = new([]);
 
     public ViewerSession(ViewerOptions options)
     {
@@ -79,6 +85,65 @@ public sealed class ViewerSession : IAsyncDisposable
 
     /// <summary>Chamado quando o host exige PIN e nenhum foi informado (ou o informado estava errado).</summary>
     public Func<bool, Task<string?>>? PinProvider { get; set; }
+
+    // ───────────────────────── Controles de quem assiste (1.2.0) ─────────────────────────
+
+    /// <summary>Conectado a um host que aceita os pedidos de quem assiste (1.2.0 ou mais nova). Hosts antigos não têm os controles.</summary>
+    public bool RemoteAvailable => _remoteAvailable && _connection is not null;
+
+    /// <summary>O que o host deixa fazer e as qualidades que oferece.</summary>
+    public RemoteStateMessage RemoteState => _remote;
+
+    /// <summary>O que está tocando no host, como chegou (veja <see cref="MediaPosition"/> para a posição de agora).</summary>
+    public MediaStateMessage Media => _media;
+
+    /// <summary>A posição da música agora, contando o tempo desde que o estado chegou.</summary>
+    public double MediaPosition => RemoteControl.PositionAt(_media, (MediaClock.NowUs - Interlocked.Read(ref _mediaReceivedUs)) / 1_000_000.0);
+
+    /// <summary>Os apps com som no host e quais estão fora da transmissão.</summary>
+    public AudioAppsMessage AudioApps => _apps;
+
+    /// <summary>Mudou o que o host deixa fazer, a música ou a lista de apps (ou a conexão caiu). Chamado fora da thread da interface.</summary>
+    public event Action? RemoteChanged;
+
+    /// <summary>Pede outra qualidade ao host. false se não está conectado ou o host não oferece.</summary>
+    public Task<bool> RequestQualityAsync(string resolution, int fps, bool adaptive)
+        => SendRemoteAsync(new QualityRequestMessage(resolution, fps, adaptive), RemoteState.CanChangeQuality);
+
+    /// <summary>Pausa, volta, pula ou muda o ponto da música que está tocando no host.</summary>
+    public Task<bool> SendMediaCommandAsync(string command, double positionSeconds = 0)
+        => SendRemoteAsync(new MediaCommandMessage(command, positionSeconds), RemoteState.CanControlMedia);
+
+    /// <summary>Os apps da lista que devem ficar fora do som da transmissão.</summary>
+    public Task<bool> RequestAudioAppsAsync(IEnumerable<string> excluded)
+        => SendRemoteAsync(new AudioAppsRequestMessage([.. excluded.Distinct(StringComparer.OrdinalIgnoreCase).Take(RemoteControl.MaxApps)]), RemoteState.CanChooseApps);
+
+    private async Task<bool> SendRemoteAsync(ControlMessage message, bool allowed)
+    {
+        if (!allowed || !_remoteAvailable || _connection is not { } connection) return false;
+        return await connection.TrySendAsync(message).ConfigureAwait(false);
+    }
+
+    private void SetRemote(RemoteStateMessage? remote = null, MediaStateMessage? media = null, AudioAppsMessage? apps = null)
+    {
+        if (remote is not null) _remote = remote;
+        if (media is not null)
+        {
+            Interlocked.Exchange(ref _mediaReceivedUs, MediaClock.NowUs);
+            _media = RemoteControl.Trim(media);
+        }
+        if (apps is not null) _apps = apps.Apps is { Length: <= RemoteControl.MaxApps } ? apps : new AudioAppsMessage([.. (apps.Apps ?? []).Take(RemoteControl.MaxApps)]);
+        RemoteChanged?.Invoke();
+    }
+
+    private void ResetRemote(bool available)
+    {
+        _remoteAvailable = available;
+        _remote = RemoteStateMessage.Disabled;
+        _media = MediaStateMessage.None;
+        _apps = new AudioAppsMessage([]);
+        RemoteChanged?.Invoke();
+    }
 
     public float Volume
     {
@@ -211,8 +276,15 @@ public sealed class ViewerSession : IAsyncDisposable
             welcome.Supports(StreamModes.HostFeatureFrameNack));
         _backoff.Reset();
         SetConfig(welcome.Stream);
+        _connection = connection;
+        ResetRemote(welcome.Supports(StreamModes.HostFeatureRemoteControl));
         SetState(ConnectionState.Connected, welcome.Stream.Mode == StreamMode.AudioOnly ? $"Na festa de música de {welcome.HostName}." : $"Conectado a {welcome.HostName}.");
-        await connection.RunAsync(token);
+        try { await connection.RunAsync(token); }
+        finally
+        {
+            _connection = null;
+            ResetRemote(false);
+        }
     }
 
     public async ValueTask DisposeAsync()
@@ -298,7 +370,7 @@ public sealed class ViewerSession : IAsyncDisposable
 
             var tick = Task.Run(() => TickLoopAsync(t));
             var timers = Task.Run(() => TimerLoopAsync(t));
-            using var timerResolution = TimerResolution.Request();
+            using var performance = SessionPerformance.Request();
             try
             {
                 await SendAsync(new KeyframeRequestMessage("entrada"), t);
@@ -351,6 +423,18 @@ public sealed class ViewerSession : IAsyncDisposable
                         break;
                     case BandwidthTestRequestMessage test:
                         _ = RunBandwidthTestAsync(test, token);
+                        break;
+                    case RemoteStateMessage remote:
+                        _owner.SetRemote(remote: remote);
+                        break;
+                    case MediaStateMessage media:
+                        _owner.SetRemote(media: media);
+                        break;
+                    case AudioAppsMessage apps:
+                        _owner.SetRemote(apps: apps);
+                        break;
+                    case UnknownControlMessage unknown:
+                        Log.Debug($"Mensagem do host que esta versão não conhece: {unknown.Type}");
                         break;
                     case ByeMessage bye:
                         throw new ConnectionRejectedException("bye", bye.Reason);
@@ -684,6 +768,18 @@ public sealed class ViewerSession : IAsyncDisposable
             try { await ControlFraming.WriteAsync(_stream, message, token).ConfigureAwait(false); }
             catch (Exception exception) when (exception is IOException or ObjectDisposedException) { _stop.Cancel(); }
             finally { _writeLock.Release(); }
+        }
+
+        /// <summary>Manda um pedido de quem assiste fora dos laços da conexão. false se a conexão já caiu.</summary>
+        public async Task<bool> TrySendAsync(ControlMessage message)
+        {
+            try
+            {
+                var token = _stop.Token;
+                await SendAsync(message, token).ConfigureAwait(false);
+                return !token.IsCancellationRequested;
+            }
+            catch (Exception exception) when (exception is OperationCanceledException or ObjectDisposedException) { return false; }
         }
 
         public void Dispose()

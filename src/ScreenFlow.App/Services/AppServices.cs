@@ -44,7 +44,17 @@ public static class AppServices
     /// <summary>Detecção de hardware em segundo plano (abre encoders de verdade, leva ~1–2 s).</summary>
     public static Task<HardwareProfile> Hardware => _hardware ??= DemoMode ? Task.FromResult(DemoData.Hardware) : Task.Run(() => HardwareDetector.Detect());
 
-    public static Task<HardwareProfile> RefreshHardware() => _hardware = DemoMode ? Task.FromResult(DemoData.Hardware) : Task.Run(() => HardwareDetector.Detect(refresh: true));
+    public static Task<HardwareProfile> RefreshHardware()
+    {
+        _hardware = DemoMode ? Task.FromResult(DemoData.Hardware) : Task.Run(() => HardwareDetector.Detect(refresh: true));
+        _gpus = _hardware.ContinueWith(t => t.Result.Gpus, TaskScheduler.Default);
+        return _hardware;
+    }
+
+    private static Task<IReadOnlyList<GpuInfo>>? _gpus;
+
+    /// <summary>Só as placas de vídeo: sai em instantes (não espera os encoders serem testados), para o cartão da placa.</summary>
+    public static Task<IReadOnlyList<GpuInfo>> Gpus => _gpus ??= DemoMode ? Task.FromResult(DemoData.Hardware.Gpus) : Task.Run(() => HardwareDetector.Gpus());
 
     public static IReadOnlyList<DisplayMonitor> Monitors() => DemoMode ? DemoData.Monitors : MonitorDiscovery.GetMonitors();
 
@@ -55,8 +65,7 @@ public static class AppServices
     }
 
     /// <summary>A GPU de verdade (a com mais memória), ignorando adaptadores virtuais e o renderizador básico.</summary>
-    public static GpuInfo? MainGpu(HardwareProfile hardware)
-        => hardware.Gpus.OrderByDescending(g => g.DedicatedVideoMemoryMb).ThenBy(g => g.Vendor == EncoderVendor.Software).FirstOrDefault();
+    public static GpuInfo? MainGpu(HardwareProfile hardware) => hardware.MainGpu;
 
     public static NetworkAdapterInfo? FindRadmin() => DemoMode ? DemoData.Radmin : RadminNetwork.FindRadmin();
 
@@ -119,7 +128,10 @@ public static class AppServices
 
         var hardware = await Hardware;
         builder.AppendLine("HARDWARE");
-        foreach (var gpu in hardware.Gpus) builder.AppendLine($"  GPU: {gpu.Name} ({gpu.Vendor}, {gpu.DedicatedVideoMemoryMb} MB)");
+        if (hardware.Gpus.Count == 0) builder.AppendLine("  GPU: nenhuma placa de vídeo encontrada pelo DXGI nem no Gerenciador de Dispositivos.");
+        foreach (var gpu in hardware.Gpus)
+            builder.AppendLine($"  GPU: {gpu.Name} ({gpu.Vendor}, {gpu.DedicatedVideoMemoryMb} MB" + (gpu.Driver is null ? string.Empty : $", driver {gpu.Driver}") + ")"
+                               + (gpu == hardware.MainGpu ? " [principal]" : string.Empty) + (gpu.Problem is null ? string.Empty : $" · PROBLEMA: {gpu.Problem}"));
         builder.AppendLine($"  CPU: {hardware.CpuCores} núcleos lógicos · RAM: {hardware.MemoryMb / 1024.0:0.0} GB");
         foreach (var monitor in MonitorDiscovery.GetMonitors()) builder.AppendLine($"  {monitor.DisplayLabel}");
         var cameras = await CameraDiscovery.GetCamerasAsync();
@@ -128,6 +140,9 @@ public static class AppServices
 
         builder.AppendLine($"CODECS (FFmpeg {(FFmpegLoader.EnsureLoaded() ? FFmpegLoader.Version : "não carregado: " + FFmpegLoader.Error)})");
         builder.AppendLine("  Encoders disponíveis: " + (hardware.Encoders.Count == 0 ? "nenhum" : string.Join(", ", hardware.Encoders.Select(e => e.Label))));
+        foreach (var (name, messages) in hardware.EncoderFailures)
+            builder.AppendLine($"  {name} não abriu: " + (messages.Count == 0 ? "o FFmpeg não disse o motivo." : string.Join(" | ", messages.Take(4))));
+        if (hardware.MainGpuEncoderHint is { } hint) builder.AppendLine($"  • Placa principal sem encoder: {hint}.");
         builder.AppendLine("  Decoders por hardware (D3D11): " + (hardware.HardwareDecoders.Count == 0 ? "nenhum" : string.Join(", ", hardware.HardwareDecoders.Select(Quality.CodecLabel))));
         builder.AppendLine("  Captura: " + (WgcCapture.IsSupported ? "Windows.Graphics.Capture" : "DXGI Desktop Duplication"));
         builder.AppendLine("  Player: " + (s.GpuVideoRenderer ? "vídeo direto na GPU (D3D11)" : "pela CPU"));

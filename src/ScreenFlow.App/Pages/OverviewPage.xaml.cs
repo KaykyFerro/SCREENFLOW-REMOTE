@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using ScreenFlow.App.Services;
+using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Capture;
@@ -228,13 +229,47 @@ public partial class OverviewPage : UserControl, IShellPage
         UpdateProfileCard();
         UpdateNetworkCard();
 
-        var hardware = await AppServices.Hardware;
-        var gpu = AppServices.MainGpu(hardware);
-        GpuValue.Text = gpu?.ShortName ?? "Não identificada";
-        GpuValue.ToolTip = gpu?.Name;
+        // A placa aparece logo; o encoder vem depois (abrir cada encoder leva uns segundos).
+        try
+        {
+            ShowGpu(GpuInfo.Main(await AppServices.Gpus), null);
+            var hardware = await AppServices.Hardware;
+            ShowGpu(hardware.MainGpu, hardware);
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"Não deu para detectar a placa de vídeo: {exception.Message}");
+            GpuValue.Text = "Não identificada";
+            GpuDetail.Text = "A detecção falhou. Veja Configurações › Diagnóstico.";
+        }
+    }
+
+    /// <summary>
+    /// O nome curto da placa e, embaixo, o encoder que ela usa, ou o motivo de ela não funcionar ou de estar sem encoder
+    /// (driver com erro, driver antigo para o NVENC, NVENC ocupado).
+    /// </summary>
+    private void ShowGpu(GpuInfo? gpu, HardwareProfile? hardware)
+    {
+        GpuValue.Text = gpu?.ShortName ?? (hardware is null ? "Detectando…" : "Não identificada");
+        GpuValue.ToolTip = gpu is null ? null : gpu.Driver is null ? gpu.Name : $"{gpu.Name} · driver {gpu.Driver}";
+        if (hardware is null)
+        {
+            GpuDetail.Text = gpu?.Problem is { } early ? $"Com problema: {early}." : "Procurando o encoder…";
+            return;
+        }
+        // Com o encoder da placa abrindo, ela funciona, mesmo que o Windows aponte algo (como reiniciar depois do driver novo).
+        if (gpu?.Problem is { } problem && hardware.MainGpuEncoder is null)
+        {
+            GpuDetail.Text = $"Com problema: {problem}.";
+            return;
+        }
         var encoder = hardware.Encoders.FirstOrDefault(e => e.FfmpegName == Settings.PreferredEncoder)
+                      ?? hardware.MainGpuEncoder
                       ?? hardware.Encoders.OrderByDescending(e => e.Hardware).ThenByDescending(e => e.Codec).FirstOrDefault();
-        GpuDetail.Text = encoder is null ? "Sem encoder de vídeo" : $"Encoder {Quality.CodecLabel(encoder.Codec)} · {encoder.FfmpegName}" + (encoder.Hardware ? string.Empty : " (software)");
+        var text = encoder is null ? "Sem encoder de vídeo" : $"Encoder {Quality.CodecLabel(encoder.Codec)} · {encoder.FfmpegName}" + (encoder.Hardware ? string.Empty : " (software)");
+        if (gpu is null) text += ". Nenhuma placa encontrada: veja Configurações › Diagnóstico";
+        else if (hardware.MainGpuEncoderHint is { } hint) text += $". Sem o encoder da placa: {hint}";
+        GpuDetail.Text = text;
     }
 
     private void UpdateProfileCard()

@@ -13,6 +13,54 @@
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="/Themes/Dark.xaml"/>
             </ResourceDictionary.MergedDictionaries>
+
+            <!-- Escolhas da janelinha de qualidade (resolução, FPS, formato da câmera) -->
+            <Style x:Key="PlayerChip" TargetType="RadioButton">
+                <Setter Property="Foreground" Value="{DynamicResource TextMuted}"/>
+                <Setter Property="FontSize" Value="13"/>
+                <Setter Property="FontWeight" Value="SemiBold"/>
+                <Setter Property="Height" Value="32"/>
+                <Setter Property="Margin" Value="0,0,6,6"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="RadioButton">
+                            <Border x:Name="Root" Background="#14FFFFFF" BorderBrush="#26FFFFFF" BorderThickness="1" CornerRadius="16" Padding="13,0">
+                                <ContentPresenter VerticalAlignment="Center"/>
+                            </Border>
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="Root" Property="Background" Value="#26FFFFFF"/>
+                                    <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+                                </Trigger>
+                                <Trigger Property="IsChecked" Value="True">
+                                    <Setter TargetName="Root" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                                    <Setter TargetName="Root" Property="BorderBrush" Value="{DynamicResource AccentBorder}"/>
+                                    <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
+
+            <!-- Fundo das janelinhas do player (qualidade e apps do som) -->
+            <Style x:Key="PlayerPopupCard" TargetType="Border">
+                <Setter Property="Width" Value="372"/>
+                <Setter Property="Margin" Value="16,20,16,6"/>
+                <Setter Property="Background" Value="#FA101932"/>
+                <Setter Property="BorderBrush" Value="#33FFFFFF"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="CornerRadius" Value="18"/>
+                <Setter Property="Padding" Value="18,14,18,16"/>
+                <Setter Property="TextElement.Foreground" Value="{DynamicResource Text}"/>
+                <Setter Property="Effect">
+                    <Setter.Value>
+                        <DropShadowEffect BlurRadius="32" ShadowDepth="8" Direction="270" Opacity="0.5" Color="#000000"/>
+                    </Setter.Value>
+                </Setter>
+            </Style>
         </ResourceDictionary>
     </Window.Resources>
 
@@ -57,6 +105,54 @@
                                TextTrimming="CharacterEllipsis" Text="Festa de música"/>
                     <TextBlock x:Name="PartyDetail" FontSize="15" Foreground="{DynamicResource TextMuted}" TextWrapping="Wrap"
                                Text="O som que toca no PC de quem transmite chega aqui em qualidade de música. Ajuste o volume na barra de baixo."/>
+
+                    <!-- Tocando agora no PC de quem transmite (1.2.0), com voltar, pausar, pular e mudar o ponto -->
+                    <Border x:Name="PartyMedia" Visibility="Collapsed" Margin="0,8,0,0" MaxWidth="700" HorizontalAlignment="Left" CornerRadius="18" Padding="14"
+                            Background="#B3101932" BorderBrush="#26FFFFFF" BorderThickness="1">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="Auto"/>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="Auto"/>
+                            </Grid.RowDefinitions>
+                            <Grid Width="76" Height="76">
+                                <Border CornerRadius="13" Background="{DynamicResource BrandGradient}">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE8D6;" FontSize="26" Foreground="{DynamicResource OnAccent}"/>
+                                </Border>
+                                <Border x:Name="PartyCover" CornerRadius="13" Visibility="Collapsed"/>
+                            </Grid>
+                            <StackPanel Grid.Column="1" Margin="16,0,16,0" VerticalAlignment="Center">
+                                <TextBlock x:Name="PartyMediaApp" Style="{StaticResource Caption}" Text="Tocando agora"/>
+                                <TextBlock x:Name="PartyMediaTitle" FontSize="19" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                                <TextBlock x:Name="PartyMediaArtist" FontSize="14" Foreground="{DynamicResource TextMuted}" TextTrimming="CharacterEllipsis"/>
+                            </StackPanel>
+                            <StackPanel x:Name="PartyMediaButtons" Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Button x:Name="PartyPrevious" Style="{StaticResource IconButton}" Content="&#xE892;" ToolTip="Voltar (vale para todo mundo)" Click="MediaPrevious_Click"/>
+                                <Button x:Name="PartyPlayPause" Style="{StaticResource PrimaryButton}" Width="52" Height="44" Padding="0" Margin="10,0"
+                                        HorizontalContentAlignment="Center" ToolTip="Pausar (vale para todo mundo)" Click="MediaPlayPause_Click">
+                                    <TextBlock x:Name="PartyPlayGlyph" Style="{StaticResource Icon}" Text="&#xE769;" FontSize="16"/>
+                                </Button>
+                                <Button x:Name="PartyNext" Style="{StaticResource IconButton}" Content="&#xE893;" ToolTip="Pular (vale para todo mundo)" Click="MediaNext_Click"/>
+                            </StackPanel>
+                            <Grid x:Name="PartySeekRow" Grid.Row="1" Grid.ColumnSpan="3" Margin="0,12,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="PartyPosition" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="38" Text="0:00"/>
+                                <Slider x:Name="PartySeek" Grid.Column="1" Margin="10,0" Minimum="0" Maximum="1" ToolTip="Arraste para ir a outro ponto (vale para todo mundo)"
+                                        PreviewMouseLeftButtonDown="PartySeek_PreviewMouseLeftButtonDown" PreviewMouseLeftButtonUp="PartySeek_PreviewMouseLeftButtonUp"
+                                        ValueChanged="PartySeek_ValueChanged"/>
+                                <TextBlock x:Name="PartyDuration" Grid.Column="2" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="38"
+                                           TextAlignment="Right" Text="0:00"/>
+                            </Grid>
+                        </Grid>
+                    </Border>
                 </StackPanel>
                 <controls:SpectrumVisualizer x:Name="PartySpectrum" Grid.Row="1" MaxHeight="380" Margin="0,36,0,0" BarGap="6" Mirror="True"/>
                 <UniformGrid Grid.Row="2" Columns="4" Margin="0,28,-14,0" HorizontalAlignment="Left" MaxWidth="760">
@@ -147,9 +243,72 @@
                         <TextBlock x:Name="BarTitle" Text="Ao vivo" TextTrimming="CharacterEllipsis"/>
                     </StackPanel>
                 </Border>
+                <!-- Música ou vídeo tocando no PC de quem transmite (1.2.0): voltar, pausar e pular para todo mundo -->
+                <StackPanel x:Name="BarMedia" Orientation="Horizontal" Visibility="Collapsed">
+                    <Button x:Name="BarPrevious" Style="{StaticResource IconButton}" Content="&#xE892;" ToolTip="Voltar (vale para todo mundo)" Click="MediaPrevious_Click"/>
+                    <Button x:Name="BarPlayPause" Style="{StaticResource IconButton}" Content="&#xE769;" ToolTip="Pausar (vale para todo mundo)" Click="MediaPlayPause_Click"/>
+                    <Button x:Name="BarNext" Style="{StaticResource IconButton}" Content="&#xE893;" ToolTip="Pular (vale para todo mundo)" Click="MediaNext_Click"/>
+                    <StackPanel x:Name="BarMediaInfo" VerticalAlignment="Center" Margin="6,0,6,0" MaxWidth="190">
+                        <TextBlock x:Name="BarMediaTitle" FontSize="12.5" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock x:Name="BarMediaArtist" FontSize="11.5" Foreground="{DynamicResource TextMuted}" TextTrimming="CharacterEllipsis"/>
+                    </StackPanel>
+                    <Border Width="1" Height="22" Background="#26FFFFFF" Margin="6,0,8,0"/>
+                </StackPanel>
                 <Button x:Name="MuteButton" Style="{StaticResource IconButton}" Content="&#xE767;" ToolTip="Mudo (M)" Click="Mute_Click"/>
                 <Slider x:Name="VolumeSlider" Width="130" Minimum="0" Maximum="1" VerticalAlignment="Center" Margin="6,0,10,0" ValueChanged="Volume_Changed"/>
                 <Border Width="1" Height="22" Background="#26FFFFFF" Margin="4,0,8,0"/>
+                <!-- Controles de quem assiste (1.2.0): só aparecem com um host que deixa -->
+                <Button x:Name="QualityButton" Style="{StaticResource ChipButton}" Margin="0,0,6,0" VerticalAlignment="Center" Visibility="Collapsed"
+                        Click="Quality_Click" ToolTip="Trocar a qualidade da transmissão (vale para todo mundo)">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Style="{StaticResource Icon}" Text="&#xE7F4;" FontSize="13" Margin="0,0,7,0"/>
+                        <TextBlock x:Name="QualityText" Text="Qualidade"/>
+                    </StackPanel>
+                </Button>
+                <Button x:Name="AppsButton" Style="{StaticResource IconButton}" Content="&#xE74F;" ToolTip="Tirar apps do som da transmissão" Click="Apps_Click"
+                        Margin="0,0,4,0" Visibility="Collapsed"/>
+                <Popup x:Name="RemoteQualityPopup" Placement="Top" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade" Closed="RemotePopup_Closed">
+                    <Border Style="{StaticResource PlayerPopupCard}">
+                        <StackPanel>
+                            <TextBlock Text="Qualidade da transmissão" FontSize="15.5" FontWeight="SemiBold"/>
+                            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,14"
+                                       Text="Muda para todo mundo que está assistindo. Na qualidade automática, ela ainda baixa sozinha quando a rede aperta."/>
+                            <StackPanel x:Name="ScreenQualityPanel">
+                                <TextBlock Style="{StaticResource Label}" Text="Resolução"/>
+                                <WrapPanel x:Name="ResolutionChoices" Margin="0,6,0,8"/>
+                                <TextBlock Style="{StaticResource Label}" Text="FPS"/>
+                                <WrapPanel x:Name="FpsChoices" Margin="0,6,0,8"/>
+                            </StackPanel>
+                            <StackPanel x:Name="CameraQualityPanel" Visibility="Collapsed">
+                                <TextBlock Style="{StaticResource Label}" Text="Câmera"/>
+                                <WrapPanel x:Name="CameraChoices" Margin="0,6,0,8"/>
+                            </StackPanel>
+                            <CheckBox x:Name="FixedQualityChoice" Style="{StaticResource Switch}" Content="Qualidade fixa (não baixa sozinha)" Margin="0,2,0,0"/>
+                            <DockPanel Margin="0,14,0,0">
+                                <Button DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Content="Aplicar" MinHeight="34" Padding="18,0" Click="ApplyQuality_Click"/>
+                                <TextBlock x:Name="QualityNote" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
+                            </DockPanel>
+                        </StackPanel>
+                    </Border>
+                </Popup>
+                <Popup x:Name="RemoteAppsPopup" Placement="Top" StaysOpen="False" AllowsTransparency="True" PopupAnimation="Fade" Closed="RemotePopup_Closed">
+                    <Border Style="{StaticResource PlayerPopupCard}">
+                        <StackPanel>
+                            <TextBlock Text="Tirar apps do som" FontSize="15.5" FontWeight="SemiBold"/>
+                            <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,10"
+                                       Text="Marque o que ninguém deve ouvir. Muda o som para todo mundo que está assistindo."/>
+                            <TextBlock x:Name="AppsEmpty" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,6" Visibility="Collapsed"
+                                       Text="Nenhum app com som no PC de quem transmite agora."/>
+                            <ScrollViewer MaxHeight="300" VerticalScrollBarVisibility="Auto">
+                                <StackPanel x:Name="AppsChoices"/>
+                            </ScrollViewer>
+                            <DockPanel Margin="0,14,0,0">
+                                <Button DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Content="Aplicar" MinHeight="34" Padding="18,0" Click="ApplyApps_Click"/>
+                                <TextBlock x:Name="AppsNote" Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap" Margin="0,0,12,0"/>
+                            </DockPanel>
+                        </StackPanel>
+                    </Border>
+                </Popup>
                 <Button x:Name="CameraButton" Style="{StaticResource IconButton}" Content="&#xE8B8;" ToolTip="Mostrar ou esconder a câmera (C)" Click="Camera_Click"
                         Margin="0,0,4,0" Visibility="Collapsed"/>
                 <Button x:Name="StatsButton" Style="{StaticResource IconButton}" Content="&#xE9D9;" ToolTip="Estatísticas (F3)" Click="Stats_Click"/>

@@ -57,6 +57,9 @@ public sealed record HostStatistics(int Viewers, double EncodeFps, double Bitrat
 
 public sealed record ApprovalRequest(Guid Id, string Name, string Address);
 
+/// <summary>Um pedido de quem assiste (1.2.0): <see cref="QualityRequestMessage"/>, <see cref="MediaCommandMessage"/> ou <see cref="AudioAppsRequestMessage"/>.</summary>
+public sealed record RemoteRequest(Guid ViewerId, string ViewerName, ControlMessage Message);
+
 /// <summary>
 /// Sessão de transmissão: aceita viewers no canal TCP, captura e codifica a tela (ou a câmera) uma vez só e envia o
 /// mesmo vídeo (criptografado por viewer) para todos via UDP. Suporta dezenas de viewers; o limite prático é o upload.
@@ -86,7 +89,7 @@ public sealed partial class HostSession : IAsyncDisposable
     private Socket? _udp;
     private MediaSender? _sender;
     private Pacer? _pacer;
-    private IDisposable? _timerResolution;
+    private IDisposable? _performance;
     private DiscoveryAnnouncer? _announcer;
     private Thread? _pipeline;
     private Thread? _cameraPipeline;
@@ -156,16 +159,104 @@ public sealed partial class HostSession : IAsyncDisposable
     public event Action? ViewersChanged;
     public event Action<HostStatistics>? StatisticsUpdated;
     public event Action<string, double>? BandwidthMeasured;
+
+    /// <summary>
+    /// Alguém que assiste pediu outra qualidade, um comando de mídia ou outros apps no som (1.2.0). O pedido já foi
+    /// conferido contra o que foi oferecido em <see cref="PublishRemoteState"/>; quem transmite decide e aplica.
+    /// Chamado fora da thread da interface.
+    /// </summary>
+    public event Action<RemoteRequest>? RemoteRequested;
     public Func<ApprovalRequest, CancellationToken, Task<bool>>? ApprovalHandler { get; set; }
 
     public IReadOnlyList<ViewerInfo> Viewers => _viewers.Values.Select(v => v.Info).OrderBy(v => v.Name).ToArray();
     public HostOptions Options => _options;
 
+    /// <summary>Alguém assistindo tem os controles de quem assiste (1.2.0 ou mais nova).</summary>
+    public bool HasRemoteViewers => _viewers.Values.Any(v => v.State == ViewerState.Streaming && v.Remote);
+
+    // ───────────────────────── Controles de quem assiste (1.2.0) ─────────────────────────
+
+    private volatile RemoteStateMessage _remoteState = RemoteStateMessage.Disabled;
+    private volatile MediaStateMessage _mediaState = MediaStateMessage.None;
+    private long _mediaStateAt;
+    private volatile AudioAppsMessage _audioApps = new([]);
+
+    /// <summary>O que quem assiste pode fazer e as qualidades que pode pedir. Vai na hora para quem está assistindo.</summary>
+    public void PublishRemoteState(RemoteStateMessage state)
+    {
+        _remoteState = state;
+        SendToRemoteViewers(state);
+    }
+
+    /// <summary>O que está tocando agora (ou <see cref="MediaStateMessage.None"/>).</summary>
+    public void PublishMedia(MediaStateMessage media)
+    {
+        var trimmed = RemoteControl.Trim(media);
+        Interlocked.Exchange(ref _mediaStateAt, Environment.TickCount64);
+        _mediaState = trimmed;
+        SendToRemoteViewers(trimmed);
+    }
+
+    /// <summary>Os apps com som e quais ficam fora da transmissão.</summary>
+    public void PublishAudioApps(AudioAppsMessage apps)
+    {
+        _audioApps = apps.Apps.Length <= RemoteControl.MaxApps ? apps : new AudioAppsMessage(apps.Apps[..RemoteControl.MaxApps]);
+        SendToRemoteViewers(_audioApps);
+    }
+
+    public AudioAppsMessage PublishedAudioApps => _audioApps;
+
+    private void SendToRemoteViewers(ControlMessage message)
+    {
+        foreach (var viewer in _viewers.Values)
+            if (viewer.State == ViewerState.Streaming && viewer.Remote) SendQuietly(viewer, message);
+    }
+
+    /// <summary>Quem acabou de entrar recebe o estado atual dos controles.</summary>
+    private void SendRemoteSnapshot(RemoteViewer viewer)
+    {
+        if (!viewer.Remote) return;
+        SendQuietly(viewer, _remoteState);
+        // A posição andou desde que a música foi publicada: quem entra recebe a de agora.
+        var media = _mediaState;
+        var elapsed = (Environment.TickCount64 - Interlocked.Read(ref _mediaStateAt)) / 1000.0;
+        SendQuietly(viewer, media.Playing ? media with { PositionSeconds = RemoteControl.PositionAt(media, elapsed) } : media);
+        SendQuietly(viewer, _audioApps);
+    }
+
+    private void SendQuietly(RemoteViewer viewer, ControlMessage message)
+        => _ = viewer.SendAsync(message, _cancellation.Token).ContinueWith(t => _ = t.Exception, TaskContinuationOptions.OnlyOnFaulted);
+
+    /// <summary>Confere um pedido de quem assiste contra o que foi oferecido e passa adiante.</summary>
+    private void HandleRemoteRequest(RemoteViewer viewer, ControlMessage message)
+    {
+        if (!viewer.Remote) return;
+        if (!viewer.Limiter.TryTake(Environment.TickCount64))
+        {
+            Log.Debug($"Pedido de {viewer.Name} ignorado: pedidos demais seguidos.");
+            return;
+        }
+        var state = _remoteState;
+        var ok = message switch
+        {
+            QualityRequestMessage quality => HasVideo && RemoteControl.Accepts(state, quality),
+            MediaCommandMessage command => RemoteControl.Accepts(state, _mediaState, command),
+            AudioAppsRequestMessage apps => RemoteControl.Accepts(state, apps),
+            _ => false,
+        };
+        if (!ok)
+        {
+            Log.Info($"Pedido de {viewer.Name} recusado: {message.GetType().Name}.");
+            return;
+        }
+        RemoteRequested?.Invoke(new RemoteRequest(viewer.Id, viewer.Name, message));
+    }
+
     public void Start()
     {
         _udp = MediaSender.CreateUdp(_options.BindAddress, _options.MediaPort);
         _sender = new MediaSender(_udp);
-        _timerResolution = TimerResolution.Request();
+        _performance = SessionPerformance.Request();
         _pacer = new Pacer(_sender, PacingRate());
         _listener = new TcpListener(_options.BindAddress, _options.ControlPort);
         _listener.Start(32);
@@ -300,6 +391,7 @@ public sealed partial class HostSession : IAsyncDisposable
 
             await viewer.SendAsync(new WelcomeMessage(_options.DeviceName, Convert.ToBase64String(salt), _options.MediaPort, CurrentConfig("conexão"), [.. StreamModes.HostFeatures]), token);
             viewer.State = ViewerState.Streaming;
+            SendRemoteSnapshot(viewer);
             _keyframeRequested = true;
             _cameraKeyframeRequested = true;
             _wake.Set();
@@ -362,6 +454,12 @@ public sealed partial class HostSession : IAsyncDisposable
                 case BandwidthTestResultMessage result:
                     Log.Info($"Teste de banda até {viewer.Name}: {result.ReceivedMbps:0.0} Mbps, perda {result.LossRate:P1}");
                     BandwidthMeasured?.Invoke(viewer.Name, result.ReceivedMbps);
+                    break;
+                case QualityRequestMessage or MediaCommandMessage or AudioAppsRequestMessage:
+                    HandleRemoteRequest(viewer, message);
+                    break;
+                case UnknownControlMessage unknown:
+                    Log.Debug($"Mensagem de tipo desconhecido de {viewer.Name}: {unknown.Type}");
                     break;
                 case ByeMessage:
                     return;
@@ -976,7 +1074,7 @@ public sealed partial class HostSession : IAsyncDisposable
         _cameraPipeline?.Join(TimeSpan.FromSeconds(3));
         _pacer?.Dispose();
         _udp?.Dispose();
-        _timerResolution?.Dispose();
+        _performance?.Dispose();
         if (_acceptLoop is not null) try { await _acceptLoop; } catch { }
         if (_udpDrain is not null) try { await _udpDrain; } catch { }
         Log.Info("Host encerrado e recursos liberados.");
@@ -999,6 +1097,7 @@ public sealed partial class HostSession : IAsyncDisposable
             Cipher = new PacketCipher(key, salt);
             Hello = hello;
             SpreadFec = hello.Supports(StreamModes.FeatureSpreadFec);
+            Remote = hello.Supports(StreamModes.FeatureRemoteControl);
         }
 
         public Guid Id { get; }
@@ -1013,6 +1112,11 @@ public sealed partial class HostSession : IAsyncDisposable
 
         /// <summary>Entende a paridade espalhada (1.1.1). Versões antigas recebem a paridade de pacotes seguidos.</summary>
         public bool SpreadFec { get; }
+
+        /// <summary>Tem os controles de quem assiste (1.2.0): recebe e manda as mensagens novas. As versões antigas não entendem.</summary>
+        public bool Remote { get; }
+
+        public RequestLimiter Limiter { get; } = new();
         public ulong PacketCounter;
         public volatile ViewerState State = ViewerState.Authenticating;
         public StatsMessage? LastStats { get; set; }

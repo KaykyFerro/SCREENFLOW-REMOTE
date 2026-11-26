@@ -5,6 +5,7 @@ using System.Text;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
+using ScreenFlow.Core.Protocol;
 using ScreenFlow.Core.Room;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
@@ -84,6 +85,7 @@ public static class SelfTest
 
             ok = viewer.Config?.Mode == StreamMode.AudioOnly && meter is { Updates: > 20, Level: > 0.01f } && last is { AudioKbps: > 0 } && viewers == 1;
             Line(ok ? "PASSOU: o som saiu do host, atravessou a rede local e foi decodificado no viewer." : "FALHOU: o áudio não chegou ao viewer.");
+            ok &= await RemoteControlTestAsync(host, viewer, Line);
         }
         catch (Exception exception)
         {
@@ -101,6 +103,45 @@ public static class SelfTest
         var soundOk = await PcSoundTestAsync(Line);
         Line(ok && roomOk && soundOk ? "PASSOU: tudo certo." : "FALHOU: veja as linhas acima.");
         return (ok && roomOk && soundOk, report.ToString());
+    }
+
+    /// <summary>
+    /// Controles de quem assiste (1.2.0): o host publica o que deixa fazer, a música e os apps do som; o viewer recebe,
+    /// pede para pular e para tirar um app, e o host recebe só os pedidos que valem (um ponto fora da música é recusado).
+    /// </summary>
+    private static async Task<bool> RemoteControlTestAsync(HostSession host, ViewerSession viewer, Action<string> line)
+    {
+        var received = new System.Collections.Concurrent.ConcurrentQueue<ControlMessage>();
+        host.RemoteRequested += request => received.Enqueue(request.Message);
+        host.PublishRemoteState(new RemoteStateMessage(false, true, true, [], [], [], string.Empty, 0, true));
+        host.PublishMedia(new MediaStateMessage("Autoteste", "Tom de teste", "ScreenFlow", true, 10, 120, true, true, true, true));
+        host.PublishAudioApps(new AudioAppsMessage([new RemoteAudioApp("spotify.exe", "Spotify", false, true)]));
+
+        var arrived = await WaitAsync(() => viewer.RemoteAvailable && viewer.RemoteState.CanControlMedia && viewer.Media.Title == "Tom de teste"
+                                            && viewer.AudioApps.Apps.Length == 1, 5);
+        line($"Viewer: controles {(viewer.RemoteAvailable ? "disponíveis" : "indisponíveis")}, tocando \"{viewer.Media.Title}\" em {viewer.MediaPosition:0} s, " +
+             $"{viewer.AudioApps.Apps.Length} app(s) na lista do som.");
+        if (!arrived)
+        {
+            line("FALHOU: o estado dos controles não chegou ao viewer.");
+            return false;
+        }
+
+        var sent = await viewer.SendMediaCommandAsync(MediaCommandMessage.Next)
+                   & await viewer.SendMediaCommandAsync(MediaCommandMessage.Seek, 999)
+                   & await viewer.RequestAudioAppsAsync(["spotify.exe"]);
+        // A qualidade não é oferecida na festa de música: o viewer nem manda.
+        var qualityBlocked = !await viewer.RequestQualityAsync("1080p", 60, true);
+        var got = await WaitAsync(() => received.Count >= 2, 5);
+        await Task.Delay(300);
+        var messages = received.ToArray();
+        var next = messages.OfType<MediaCommandMessage>().Count(m => m.Command == MediaCommandMessage.Next);
+        var seeks = messages.OfType<MediaCommandMessage>().Count(m => m.Command == MediaCommandMessage.Seek);
+        var apps = messages.OfType<AudioAppsRequestMessage>().FirstOrDefault();
+        line($"Host: {messages.Length} pedido(s) aceito(s): pular {next}, ponto fora da música {seeks}, apps {(apps is null ? "nenhum" : string.Join(", ", apps.Excluded))}.");
+        var ok = sent && qualityBlocked && got && next == 1 && seeks == 0 && apps?.Excluded.SequenceEqual(["spotify.exe"]) == true && messages.Length == 2;
+        line(ok ? "PASSOU: os controles de quem assiste foram e voltaram, e o pedido inválido foi recusado." : "FALHOU: os pedidos de quem assiste não chegaram como deviam.");
+        return ok;
     }
 
     /// <summary>

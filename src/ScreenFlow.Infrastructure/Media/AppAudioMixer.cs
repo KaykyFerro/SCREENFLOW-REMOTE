@@ -368,7 +368,15 @@ public static class AppAudioCatalog
         "startmenuexperiencehost.exe", "systemsettings.exe", "lockapp.exe", "dwm.exe", "widgets.exe", "gamebar.exe", "nvidia overlay.exe",
     };
 
-    public static IReadOnlyList<RunningApp> List()
+    public static IReadOnlyList<RunningApp> List() => List(windows: true, icons: true);
+
+    /// <summary>
+    /// Só os apps com som no Windows (tocando ou com o som aberto), sem ícone: leve o bastante para a lista que vai para
+    /// quem assiste a cada poucos segundos.
+    /// </summary>
+    public static IReadOnlyList<RunningApp> ListWithSound() => List(windows: false, icons: false);
+
+    private static IReadOnlyList<RunningApp> List(bool windows, bool icons)
     {
         var own = Environment.ProcessId;
         var table = ProcessTable.Snapshot();
@@ -387,15 +395,18 @@ public static class AppAudioCatalog
         }
         catch (Exception exception) { Log.Warn($"Não deu para ler quem está tocando som: {exception.Message}"); }
 
-        foreach (var process in Process.GetProcesses())
+        if (windows)
         {
-            using (process)
+            foreach (var process in Process.GetProcesses())
             {
-                try
+                using (process)
                 {
-                    if (process.MainWindowHandle != 0 && process.MainWindowTitle.Length > 0) Add(process.Id, false);
+                    try
+                    {
+                        if (process.MainWindowHandle != 0 && process.MainWindowTitle.Length > 0) Add(process.Id, false);
+                    }
+                    catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception) { }
                 }
-                catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception) { }
             }
         }
 
@@ -403,7 +414,7 @@ public static class AppAudioCatalog
         foreach (var (exe, (processId, playing)) in found)
         {
             var path = ProcessTable.ImagePath(processId);
-            apps.Add(new RunningApp(exe, DisplayName(path, exe), path, playing, Icon(path)));
+            apps.Add(new RunningApp(exe, DisplayName(path, exe), path, playing, icons ? Icon(path) : null));
         }
         return apps.OrderByDescending(a => a.PlayingSound).ThenBy(a => a.Name, StringComparer.CurrentCultureIgnoreCase).ToList();
     }
@@ -411,21 +422,29 @@ public static class AppAudioCatalog
     /// <summary>O nome que o próprio app diz ("Spotify", "Google Chrome"), ou o do executável.</summary>
     public static string DisplayName(string? path, string exe)
     {
-        if (path is not null)
+        if (path is null) return MutedApp.DefaultName(exe);
+        // O nome sai do arquivo do app: lido uma vez só (a lista de quem assiste é refeita a cada poucos segundos).
+        if (Names.TryGetValue(path, out var cached)) return cached;
+        var found = MutedApp.DefaultName(exe);
+        try
         {
-            try
+            var info = FileVersionInfo.GetVersionInfo(path);
+            foreach (var candidate in new[] { info.FileDescription, info.ProductName })
             {
-                var info = FileVersionInfo.GetVersionInfo(path);
-                foreach (var candidate in new[] { info.FileDescription, info.ProductName })
+                var name = candidate?.Trim();
+                if (!string.IsNullOrEmpty(name) && name.Length <= 60)
                 {
-                    var name = candidate?.Trim();
-                    if (!string.IsNullOrEmpty(name) && name.Length <= 60) return name;
+                    found = name;
+                    break;
                 }
             }
-            catch (Exception exception) { Log.Debug($"Sem o nome de {exe}: {exception.Message}"); }
         }
-        return MutedApp.DefaultName(exe);
+        catch (Exception exception) { Log.Debug($"Sem o nome de {exe}: {exception.Message}"); }
+        if (Names.Count < 512) Names[path] = found;
+        return found;
     }
+
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, string> Names = new(StringComparer.OrdinalIgnoreCase);
 
     private static byte[]? Icon(string? path)
     {

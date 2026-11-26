@@ -23,6 +23,12 @@
 - [x] 1.1.1: instalar o Radmin VPN pelo app (página oficial, assinatura da Famatech conferida, instalação sem janelas)
 - [x] 1.1.1: a janela volta sozinha quando a transmissão acaba ou o player fecha
 - [x] 1.1.1: ritmo de envio dos pacotes, FEC espalhado, NACK de frame inteiro e prazo pelo RTT; som com buffer adaptativo e música em quadros de 10 ms
+- [x] 1.2.0: quem assiste troca a qualidade, controla a música ou o vídeo (voltar, pausar, pular e tempo) e tira apps do som pelo player, com a chave para quem transmite desligar e um aviso com o nome de quem pediu
+- [x] 1.2.0: "Tocando agora" com a capa na festa de música, para quem ouve
+- [x] 1.2.0: mensagens novas do controle só vão para quem anunciou que entende; um tipo desconhecido é ignorado em vez de derrubar a conexão
+- [x] 1.2.0: placa de vídeo lida uma a uma, com as do Gerenciador de Dispositivos (código 43, sem driver, desativada), a versão do driver e o motivo quando o encoder dela não abre (driver antigo para o NVENC, NVENC ocupado)
+- [x] 1.2.0: o cartão da placa aparece na hora, sem esperar os encoders, e só os encoders das placas presentes são testados
+- [x] 1.2.0: com a transmissão ou o player no ar, o Windows 11 não põe o ScreenFlow no modo de eficiência (o timer de 1 ms continua valendo com a janela minimizada ou na bandeja)
 - [x] Detecção do Radmin VPN, bind no IP 26.x, instalação pelo app
 - [x] Portas configuráveis (47800 UDP mídia, 47801 TCP controle, 47802 UDP descoberta) e regras do firewall com UAC
 - [x] Descoberta de hosts por broadcast na rede do Radmin
@@ -42,8 +48,8 @@
 
 ## Testado
 
-- 233 testes automatizados: cabeçalho, FEC, NACK, descarte, mensagens, descoberta, troca de chaves, PIN, AES-GCM, Radmin, backoff, bitrates por perfil, negociação de codec, qualidade adaptativa, configuração automática, nome curto da placa de vídeo, divisão de upload, configurações, releases, sincronia de relógio, modos (tela, câmera, festa, câmera junto), segunda faixa de vídeo, perfis de áudio, medidor de espectro, redundância do áudio, pacotes e presença da sala, chat com confirmação e histórico, limites de envio, portão de voz, quais processos capturar para tirar apps do som, fila da mistura do som, recursos do tema (cada cor e estilo existe, com um tipo só, nos temas escuro e claro); na 1.1.1, festa com um app só, nomes dos apps de mídia e o tempo da música, foto de perfil e imagens na presença e no chat (com o formato antigo continuando igual), pedidos e partes dos arquivos, downloads com troca de quem manda, arquivos guardados no PC, nome e foto nas configurações e o link do instalador do Radmin.
-- Compilação de toda a solução e testes no CI do Windows; o app publicado roda o `--diagnostico` (carrega o FFmpeg), o `--autoteste` e o `--capturas` (PNG de cada tela). O autoteste faz uma festa de música de verdade no 127.0.0.1 (do encoder Opus do host até o decoder do viewer), põe duas salas da rede para conversar no chat e na voz e passar a foto do perfil e uma imagem de 1 MB de uma para a outra, e confere a separação do som do PC por app numa placa de som virtual, com dois apps tocando tons fora do ScreenFlow.
+- 271 testes automatizados: cabeçalho, FEC, NACK, descarte, mensagens, descoberta, troca de chaves, PIN, AES-GCM, Radmin, backoff, bitrates por perfil, negociação de codec, qualidade adaptativa, configuração automática, nome curto da placa de vídeo, divisão de upload, configurações, releases, sincronia de relógio, modos (tela, câmera, festa, câmera junto), segunda faixa de vídeo, perfis de áudio, medidor de espectro, redundância do áudio, pacotes e presença da sala, chat com confirmação e histórico, limites de envio, portão de voz, quais processos capturar para tirar apps do som, fila da mistura do som, recursos do tema (cada cor e estilo existe, com um tipo só, nos temas escuro e claro); na 1.1.1, festa com um app só, nomes dos apps de mídia e o tempo da música, foto de perfil e imagens na presença e no chat (com o formato antigo continuando igual), pedidos e partes dos arquivos, downloads com troca de quem manda, arquivos guardados no PC, nome e foto nas configurações e o link do instalador do Radmin; na 1.2.0, as mensagens novas do controle e as antigas lidas igual, tipos desconhecidos ignorados, o que o host aceita de quem assiste (qualidades oferecidas, comandos que o app deixa, limite de pedidos), a lista de apps tirados, quando a música é mandada de novo, a placa principal (até sem o driver), a versão do driver da NVIDIA e o motivo do encoder não abrir.
+- Compilação de toda a solução e testes no CI do Windows; o app publicado roda o `--diagnostico` (carrega o FFmpeg), o `--autoteste` e o `--capturas` (PNG de cada tela). O autoteste faz uma festa de música de verdade no 127.0.0.1 (do encoder Opus do host até o decoder do viewer) e passa nela pelos controles de quem assiste (a música e os apps chegam ao viewer, os pedidos para pular e para tirar um app chegam ao host e um ponto fora da música é recusado), põe duas salas da rede para conversar no chat e na voz e passar a foto do perfil e uma imagem de 1 MB de uma para a outra e confere a separação do som do PC por app numa placa de som virtual, com dois apps tocando tons fora do ScreenFlow.
 
 ## Ainda não testado (precisa de PCs reais)
 
@@ -53,7 +59,9 @@
 - 10 ou mais viewers ao mesmo tempo.
 - Câmera em webcams e placas de captura reais.
 - Player na GPU em placas NVIDIA, AMD e Intel (o caminho pela CPU continua de reserva).
-- Atualização ponta a ponta da 1.1.0 para a 1.1.1 pelo app.
+- Atualização ponta a ponta da 1.1.1 para a 1.2.0 pelo app.
+- Controles de quem assiste entre dois PCs reais: qualidade, música e apps, com o Spotify e o navegador.
+- Cartão da placa de vídeo numa RTX com driver antigo, com o código 43 e num notebook com duas placas.
 - Voz e chat pela rede real do Radmin, com microfones reais (o autoteste usa um tom no lugar do microfone).
 - Câmera junto com a tela: duas sessões de encoder ao mesmo tempo em GPUs reais.
 - Som do PC por app no Windows 10 e 11 de verdade, com apps como Spotify, Discord, navegadores e jogos (e a festa de um app só).

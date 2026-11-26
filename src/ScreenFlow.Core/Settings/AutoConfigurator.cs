@@ -18,6 +18,71 @@ public sealed record GpuInfo(string Name, EncoderVendor Vendor, long DedicatedVi
             return name.Length > 0 ? name : Name;
         }
     }
+
+    /// <summary>Versão do driver como o fabricante mostra ("552.22" na NVIDIA), ou a do Windows ("31.0.15.5222"). Null se não deu para ler.</summary>
+    public string? Driver { get; init; }
+
+    /// <summary>
+    /// O Windows achou a placa mas ela não está funcionando (driver com erro, desativada): o motivo, para mostrar no
+    /// cartão. Null quando está tudo certo.
+    /// </summary>
+    public string? Problem { get; init; }
+
+    /// <summary>
+    /// A placa principal: as de verdade antes das virtuais e do vídeo básico da Microsoft (que aparecem como
+    /// "Software"), e entre elas a com mais memória de vídeo (a dedicada, não a integrada).
+    /// </summary>
+    public static GpuInfo? Main(IEnumerable<GpuInfo> gpus)
+        => gpus.OrderBy(g => g.Vendor == EncoderVendor.Software).ThenByDescending(RankingMemory).ThenBy(g => g.Problem is not null).FirstOrDefault();
+
+    /// <summary>
+    /// A memória que conta para escolher a principal. Uma NVIDIA ou AMD com problema que não informa a memória (sem o driver
+    /// dela, o Windows não sabe) conta como uma dedicada de 4 GB: é ela que a pessoa espera ver no cartão, não a integrada.
+    /// </summary>
+    private static long RankingMemory(GpuInfo gpu)
+        => gpu is { Problem: not null, DedicatedVideoMemoryMb: <= 0, Vendor: EncoderVendor.Nvidia or EncoderVendor.Amd } ? 4096 : gpu.DedicatedVideoMemoryMb;
+
+    /// <summary>
+    /// A versão do driver da NVIDIA a partir da do Windows: "31.0.15.5222" vira "552.22" (os 5 últimos dígitos das duas
+    /// últimas partes). Null se o texto não tiver esse formato.
+    /// </summary>
+    public static string? NvidiaVersion(string? windowsVersion)
+    {
+        var parts = (windowsVersion ?? string.Empty).Split('.');
+        // A NVIDIA usa sempre 2 dígitos na terceira parte e 4 na última ("31.0.15.5222").
+        if (parts.Length != 4 || parts[2].Length != 2 || parts[3].Length != 4 || !parts.All(p => p.Length > 0 && p.All(char.IsAsciiDigit))) return null;
+        var digits = parts[2] + parts[3];
+        if (digits.Length < 5) return null;
+        var last = digits[^5..];
+        return $"{int.Parse(last[..3])}.{last[3..]}";
+    }
+
+    /// <summary>
+    /// Por que o encoder da placa não abriu, numa frase para o cartão, a partir das mensagens do FFmpeg ao tentar abrir.
+    /// Null quando as mensagens não dizem nada conhecido.
+    /// </summary>
+    public static string? EncoderHint(EncoderVendor vendor, IEnumerable<string> messages)
+    {
+        var text = string.Join(" ", messages);
+        if (text.Length == 0) return null;
+        if (vendor == EncoderVendor.Nvidia)
+        {
+            if (Regex.IsMatch(text, @"required nvenc API version|minimum required Nvidia driver|nvenc API version", RegexOptions.IgnoreCase))
+            {
+                var minimum = Regex.Match(text, @"driver for nvenc is (\d{3}\.\d{2})", RegexOptions.IgnoreCase);
+                return minimum.Success ? $"o driver da NVIDIA é antigo para o NVENC: atualize para o {minimum.Groups[1].Value} ou mais novo" : "o driver da NVIDIA é antigo para o NVENC: atualize o driver";
+            }
+            if (Regex.IsMatch(text, @"out of memory|incompatible client key|OpenEncodeSessionEx failed", RegexOptions.IgnoreCase))
+                return "o NVENC está ocupado por outro app (OBS, Discord, gravação da NVIDIA): feche e detecte de novo";
+            if (Regex.IsMatch(text, @"Cannot load nvcuda|Cannot load nvEncodeAPI|CUDA_ERROR", RegexOptions.IgnoreCase))
+                return "o driver da NVIDIA não carregou o NVENC: reinstale o driver";
+            if (Regex.IsMatch(text, @"No capable devices found|No NVENC capable devices", RegexOptions.IgnoreCase))
+                return "a placa não tem NVENC para esse formato";
+        }
+        if (vendor == EncoderVendor.Amd && Regex.IsMatch(text, @"amfrt|AMF", RegexOptions.IgnoreCase)) return "o driver da AMD não abriu o AMF: atualize o driver";
+        if (vendor == EncoderVendor.Intel && Regex.IsMatch(text, @"mfx|qsv|vpl", RegexOptions.IgnoreCase)) return "o driver da Intel não abriu o Quick Sync: atualize o driver";
+        return null;
+    }
 }
 
 public sealed record EncoderInfo(string FfmpegName, VideoCodec Codec, EncoderVendor Vendor, bool Hardware, int MaxWidth, int MaxHeight)
@@ -34,7 +99,33 @@ public sealed record HardwareProfile(
     int MonitorWidth,
     int MonitorHeight,
     int MonitorRefreshHz,
-    string OsVersion);
+    string OsVersion)
+{
+    /// <summary>Encoders por hardware que não abriram e as mensagens do FFmpeg de cada um ("hevc_nvenc" → mensagens).</summary>
+    public IReadOnlyDictionary<string, IReadOnlyList<string>> EncoderFailures { get; init; } = new Dictionary<string, IReadOnlyList<string>>();
+
+    /// <summary>A placa principal (veja <see cref="GpuInfo.Main"/>).</summary>
+    public GpuInfo? MainGpu => GpuInfo.Main(Gpus);
+
+    /// <summary>O encoder da placa principal (o melhor formato dela), ou null se ela não tiver um que abriu.</summary>
+    public EncoderInfo? MainGpuEncoder => MainGpu is { } gpu
+        ? Encoders.Where(e => e.Hardware && e.Vendor == gpu.Vendor).OrderByDescending(e => e.Codec).FirstOrDefault()
+        : null;
+
+    /// <summary>Por que a placa principal ficou sem encoder (para o cartão), ou null.</summary>
+    public string? MainGpuEncoderHint => MainGpu is { } gpu && MainGpuEncoder is null
+        ? GpuInfo.EncoderHint(gpu.Vendor, EncoderFailures.Where(f => VendorOf(f.Key) == gpu.Vendor).SelectMany(f => f.Value))
+        : null;
+
+    /// <summary>O fabricante pelo nome do encoder do FFmpeg ("hevc_nvenc" → NVIDIA).</summary>
+    public static EncoderVendor VendorOf(string ffmpegName) => ffmpegName switch
+    {
+        _ when ffmpegName.EndsWith("_nvenc", StringComparison.Ordinal) => EncoderVendor.Nvidia,
+        _ when ffmpegName.EndsWith("_amf", StringComparison.Ordinal) => EncoderVendor.Amd,
+        _ when ffmpegName.EndsWith("_qsv", StringComparison.Ordinal) => EncoderVendor.Intel,
+        _ => EncoderVendor.Software,
+    };
+}
 
 public sealed record NetworkProfile(string? RadminAddress, long LinkSpeedMbps, double? MeasuredMbps);
 

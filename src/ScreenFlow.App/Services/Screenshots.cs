@@ -127,6 +127,26 @@ public static class Screenshots
         window.ChatPage.ShowAttachmentDemo(null, string.Empty);
         await Shot("22-seu-perfil.png", () => Go(window, window.SettingsPage, 600), () => window.SettingsPage.ProfileCard);
 
+        PlayerWindow OpenPlayer(StreamMode mode, ConnectionState state, bool camera)
+        {
+            var session = new ViewerSession(new ViewerOptions("26.47.19.113", AppInfo.DefaultControlPort, "Capturas", null, 0.8f, [], 2560, 1440, 165, AudioOutput: false));
+            var player = new PlayerWindow(session, "26.47.19.113", mode)
+            {
+                Width = 1280,
+                Height = 720,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Left = -30000,
+                Top = -30000,
+                ShowActivated = false,
+                ShowInTaskbar = false,
+            };
+            AllowAnySize(player);
+            player.Show();
+            Resize(player, new Size(1280, 720));
+            player.ShowDemo(mode, state, camera);
+            return player;
+        }
+
         foreach (var (name, mode, state, camera) in new[]
                  {
                      ("09-player-festa-de-musica.png", StreamMode.AudioOnly, ConnectionState.Connected, false),
@@ -137,24 +157,30 @@ public static class Screenshots
             PlayerWindow? player = null;
             await Shot(name, () =>
             {
-                var session = new ViewerSession(new ViewerOptions("26.47.19.113", AppInfo.DefaultControlPort, "Capturas", null, 0.8f, [], 2560, 1440, 165, AudioOutput: false));
-                player = new PlayerWindow(session, "26.47.19.113", mode)
-                {
-                    Width = 1280,
-                    Height = 720,
-                    WindowStartupLocation = WindowStartupLocation.Manual,
-                    Left = -30000,
-                    Top = -30000,
-                    ShowActivated = false,
-                    ShowInTaskbar = false,
-                };
-                AllowAnySize(player);
-                player.Show();
-                Resize(player, new Size(1280, 720));
-                player.ShowDemo(mode, state, camera);
+                player = OpenPlayer(mode, state, camera);
                 return Task.Delay(700);
             }, () => WindowRoot(player!));
             if (player is not null) await player.ShutdownAsync();
+        }
+
+        // Controles de quem assiste (1.2.0): as janelinhas de qualidade e de apps do som, abertas pelo player.
+        PlayerWindow? remote = null;
+        await Shot("23-player-trocar-qualidade.png", () =>
+        {
+            remote = OpenPlayer(StreamMode.Screen, ConnectionState.Connected, true);
+            remote.ShowQualityDemo();
+            return Task.Delay(700);
+        }, () => (FrameworkElement)remote!.RemoteQualityPopup.Child);
+        if (remote is not null)
+        {
+            remote.RemoteQualityPopup.IsOpen = false;
+            await Shot("24-player-tirar-som-de-apps.png", () =>
+            {
+                remote.ShowAppsDemo();
+                return Task.Delay(400);
+            }, () => (FrameworkElement)remote.RemoteAppsPopup.Child);
+            remote.RemoteAppsPopup.IsOpen = false;
+            await remote.ShutdownAsync();
         }
 
         Window? dialog = null;

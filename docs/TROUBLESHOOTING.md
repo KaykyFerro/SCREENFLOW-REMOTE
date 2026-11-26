@@ -24,6 +24,24 @@ Teste a rede com `ping 26.x.x.x`. No Radmin, uma conexão indireta (relay) tem b
 - FPS real abaixo do escolhido: veja o encoder em Diagnóstico. Notebooks precisam estar na tomada e usar a GPU dedicada.
 - O monitor de origem a 60 Hz limita a captura a 60 FPS.
 - 4K a 165 FPS exige NVIDIA RTX 40/50, AMD RX 7000/9000 ou Intel Arc no host, e uns 120 Mbps de upload por pessoa.
+- Transmitindo com a janela minimizada ou na bandeja, o ScreenFlow pede ao Windows para não economizar energia com ele (o modo de eficiência do Windows 11 atrasava o envio). Se mesmo assim cair, confira se o notebook não está no modo de economia de bateria.
+
+## Placa de vídeo
+
+O cartão **Placa de vídeo** da Visão geral mostra a placa principal (a de verdade, não as virtuais nem a integrada, quando há uma dedicada) e, embaixo, o encoder que ela usa ou o motivo de não usar. Passe o mouse no nome para ver o nome completo e a versão do driver. Depois de resolver, clique em **Detectar o hardware de novo** em Configurações › Diagnóstico.
+
+| O cartão mostra | O que quer dizer | O que fazer |
+|---|---|---|
+| "Não identificada" | Nem o DXGI nem a lista de dispositivos do Windows mostraram uma placa | Veja se a placa aparece no Gerenciador de Dispositivos › Adaptadores de vídeo e mande o texto do Diagnóstico (botão de copiar) |
+| "Com problema: ... (código 43)" | O Windows parou a placa porque o driver ou a placa relatou erro | Reinstale o driver do fabricante (instalação limpa) e reinicie. Se voltar, pode ser a placa ou a alimentação dela |
+| "Placa NVIDIA sem driver" ou "Com problema: sem driver instalado (código 28)", "o driver não carregou" ou "está sem o driver do fabricante" | O driver da placa não está instalado (o Windows usa o vídeo básico da Microsoft e nem sabe o modelo) ou não carregou | Instale o driver do site da NVIDIA, da AMD ou da Intel e reinicie |
+| "Com problema: desativada no Gerenciador de Dispositivos (código 22)" | A placa foi desativada | Gerenciador de Dispositivos › botão direito na placa › **Habilitar dispositivo** |
+| "Com problema: o Windows precisa reiniciar para a placa funcionar (código 14)" | Um driver novo foi instalado e falta reiniciar | Reinicie o PC |
+| "Sem o encoder da placa: o driver da NVIDIA é antigo para o NVENC" | O FFmpeg 7.1 do ScreenFlow usa uma versão do NVENC que pede driver novo (o número mínimo aparece no aviso) | Atualize o driver pelo app da NVIDIA ou em nvidia.com |
+| "Sem o encoder da placa: o NVENC está ocupado por outro app" | OBS, Discord ou a gravação da NVIDIA estão usando todas as sessões do NVENC | Feche esses apps e detecte de novo |
+| A integrada aparece no lugar da dedicada | O Windows não mostrou a dedicada ao app | Confira o Diagnóstico: cada placa aparece com o driver e, se houver, o PROBLEMA que o Windows relata |
+
+No Diagnóstico, cada encoder que não abriu aparece com a mensagem do FFmpeg, para mandar junto se algo estiver estranho.
 
 ## Áudio
 
@@ -44,7 +62,7 @@ Teste a rede com `ping 26.x.x.x`. No Radmin, uma conexão indireta (relay) tem b
 
 ### Controles da música e do vídeo
 
-- O cartão com a música ou o vídeo aparece transmitindo uma janela ou a festa de um app só, e só para apps que usam os controles de mídia do Windows (os mesmos das teclas de mídia do teclado): Spotify, navegadores, Reprodutor de Mídia e outros.
+- O cartão com a música ou o vídeo aparece para apps que usam os controles de mídia do Windows (os mesmos das teclas de mídia do teclado): Spotify, navegadores, Reprodutor de Mídia e outros. Transmitindo uma janela ou a festa de um app só, ele mostra esse app; senão, o que as teclas de mídia controlariam.
 - A barra do tempo só aparece quando o app deixa mudar a posição (em lives, por exemplo, não dá).
 - Com mais de um app tocando, a lista no canto do cartão escolhe qual controlar.
 
@@ -68,7 +86,7 @@ Teste a rede com `ping 26.x.x.x`. No Radmin, uma conexão indireta (relay) tem b
 | Imagem do chat fica em "Baixando a imagem" | Quem mandou saiu da sala, ou a rede do Radmin está perdendo muito | A imagem vem de quem mandou ou de quem já baixou. Clique em **Tentar de novo** quando alguém que tem a imagem estiver na sala |
 | A foto de alguém não aparece | A foto ainda está chegando, ou a pessoa usa a versão 1.1.0 | A foto chega em alguns segundos e é pedida de novo a cada 30 s. Na 1.1.0 não há foto: aparece a inicial |
 | "Não deu para abrir essa imagem" | Formato que o Windows não abre (HEIC e WebP precisam das extensões da Microsoft Store) | Abra a imagem em outro programa e copie (Ctrl+C), ou salve como JPEG ou PNG |
-| Quem usa a 1.1.0 vê "📷 Imagem (atualize o ScreenFlow para ver)" | A 1.1.0 não mostra imagens | Atualize para a 1.1.1 |
+| Quem usa a 1.1.0 vê "📷 Imagem (atualize o ScreenFlow para ver)" | A 1.1.0 não mostra imagens | Atualize para a 1.1.1 ou mais nova |
 
 A voz, o chat, as imagens e as fotos de perfil não são criptografados pelo ScreenFlow: eles contam com o túnel do Radmin VPN. Use uma rede do Radmin com senha, só com quem você conhece. As fotos e imagens ficam em `%LOCALAPPDATA%\ScreenFlow\imagens` e as que não são usadas há 30 dias são apagadas sozinhas.
 
@@ -84,6 +102,18 @@ Para ouvir como a sua voz sai, use **Ouvir meu microfone** em Configurações �
 ## Player
 
 - Se a imagem ficar preta com o som funcionando, desligue **Desenhar o vídeo direto na GPU** em Configurações › Player: o vídeo passa a ir pela CPU.
+
+### Controles de quem assiste (1.2)
+
+| Sintoma | Causa provável | Solução |
+|---|---|---|
+| A barra do player não mostra a qualidade, a música nem os apps | Quem transmite usa uma versão antiga ou desligou **Quem assiste pode mexer nos controles** | Os dois precisam da 1.2 ou mais nova. Quem transmite liga a chave na tela Transmissão |
+| Só o botão da qualidade não aparece | Festa de música (não tem vídeo) | Na festa, o que dá para mudar é a música e os apps |
+| A música não aparece no player | Nada tocando nos controles de mídia do Windows de quem transmite, o app foi tirado do som, ou a festa é de outro app | O player só mostra o que quem assiste está ouvindo: o que toca num app tirado do som fica só com quem transmite |
+| O botão dos apps não aparece | **Separar o som por app** desligado, o som do PC não vai na transmissão ou a festa é de um app só | Quem transmite liga **Separar o som por app** e o som do PC |
+| Um clique não mudou nada | Cliques demais seguidos (quem transmite aceita uns poucos de uma vez e depois dois por segundo), ou a lista mudou do lado de quem transmite | Espere um segundo e clique de novo. O player mostra o que vale depois que quem transmite aplica |
+
+Tudo o que quem assiste muda vale para todo mundo que está assistindo, e quem transmite vê um aviso com o nome de quem pediu.
 
 ## Atualização
 

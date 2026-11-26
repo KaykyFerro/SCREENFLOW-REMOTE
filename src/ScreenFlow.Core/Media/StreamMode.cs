@@ -15,13 +15,22 @@ public static class StreamModes
     /// <summary>O viewer entende a paridade espalhada (1.1.1): perdas em sequência caem em grupos de FEC diferentes.</summary>
     public const string FeatureSpreadFec = "fec-spread";
 
-    public static IReadOnlyList<string> ViewerFeatures { get; } = [FeatureAudioOnly, FeatureCamera, FeatureCameraOverlay, FeatureSpreadFec];
+    /// <summary>
+    /// O viewer mostra os controles de quem assiste (1.2.0): qualidade, música e apps do som. Só ele recebe as mensagens
+    /// <c>remote</c>, <c>media</c> e <c>apps</c>; as versões antigas não entendem esses tipos.
+    /// </summary>
+    public const string FeatureRemoteControl = "remote-control";
+
+    public static IReadOnlyList<string> ViewerFeatures { get; } = [FeatureAudioOnly, FeatureCamera, FeatureCameraOverlay, FeatureSpreadFec, FeatureRemoteControl];
 
     /// <summary>Recursos anunciados pelo host na boas-vindas. Viewers antigos ignoram a lista.</summary>
     /// <remarks>"frame-nack": o host reenvia um frame inteiro quando o viewer não recebeu nada dele (NACK sem índices).</remarks>
     public const string HostFeatureFrameNack = "frame-nack";
 
-    public static IReadOnlyList<string> HostFeatures { get; } = [HostFeatureFrameNack];
+    /// <summary>O host aceita os pedidos de quem assiste (1.2.0): trocar a qualidade, controlar a música e tirar apps do som.</summary>
+    public const string HostFeatureRemoteControl = "remote-control";
+
+    public static IReadOnlyList<string> HostFeatures { get; } = [HostFeatureFrameNack, HostFeatureRemoteControl];
 
     public static string Label(StreamMode mode, bool cameraWithScreen = false) => mode switch
     {
