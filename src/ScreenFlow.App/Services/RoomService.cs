@@ -480,7 +480,12 @@ public sealed class RoomService
             row.Update(state);
             row.Photo = PhotoOf(state.Id);
         });
-        foreach (var message in Messages) message.Photo = PhotoOf(message.AuthorId);
+        var photos = new Dictionary<Guid, ImageSource?>();
+        foreach (var message in Messages)
+        {
+            if (!photos.TryGetValue(message.AuthorId, out var photo)) photos[message.AuthorId] = photo = PhotoOf(message.AuthorId);
+            message.Photo = photo;
+        }
 
         _speakingTimer.IsEnabled = room.InVoice;
         if (!room.InVoice) foreach (var row in VoiceMembers) row.Speaking = false;

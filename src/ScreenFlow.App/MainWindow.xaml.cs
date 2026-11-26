@@ -793,7 +793,9 @@ public partial class MainWindow : Window
     {
         if (AppServices.Room.IsChatInFront?.Invoke() == true) return;
         var now = DateTimeOffset.UtcNow;
-        var preview = Preview(row.Text, 110);
+        var preview = row.HasImage
+            ? (row.HasText ? $"📷 {Preview(row.Text, 100)}" : "📷 mandou uma imagem")
+            : Preview(row.Text, 110);
         if (IsInBackground)
         {
             if (now - _lastChatBalloon < TimeSpan.FromSeconds(20)) return;

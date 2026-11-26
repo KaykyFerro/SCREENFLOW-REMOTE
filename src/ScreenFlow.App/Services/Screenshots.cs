@@ -33,7 +33,8 @@ public static class Screenshots
 
         // Sala da rede de exemplo: gente online, duas pessoas na voz e uma conversa no chat.
         AppServices.Settings.Current.DeviceName = "PC da Sala";
-        AppServices.Room.SetPhoto(DemoData.ProfilePhoto(80, 470, 330));
+        // A sua foto é a paisagem inteira (aurora, montanha e mata), para não confundir com as fotos da Ana e do Bruno.
+        AppServices.Room.SetPhoto(DemoData.ProfilePhoto(690, 10, 880));
         AppServices.Room.LoadDemo(inVoice: false, unread: 2);
 
         var window = new MainWindow

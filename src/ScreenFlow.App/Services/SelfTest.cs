@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
@@ -102,12 +103,33 @@ public static class SelfTest
         return (ok && roomOk && soundOk, report.ToString());
     }
 
-    /// <summary>Dois PCs de mentira (duas salas em portas diferentes) se acham, trocam uma mensagem e conversam por voz.</summary>
+    /// <summary>
+    /// Dois PCs de mentira (duas salas em portas diferentes) se acham, trocam uma mensagem, passam a foto do perfil e uma
+    /// imagem do chat de um para o outro e conversam por voz.
+    /// </summary>
     private static async Task<bool> RoomTestAsync(Action<string> line)
     {
         line("Sala da rede: dois PCs de mentira no 127.0.0.1.");
-        var a = new NetworkRoom(Guid.NewGuid(), RoomPortA, new RoomLocalState("Autoteste A")) { BroadcastTargets = () => [], OutputEnabled = false };
-        var b = new NetworkRoom(Guid.NewGuid(), RoomPortB, new RoomLocalState("Autoteste B")) { BroadcastTargets = () => [], OutputEnabled = false };
+        // Arquivos de A: a foto do perfil (40 KB) e uma imagem do chat (1 MB, umas 870 partes).
+        var avatar = RandomNumberGenerator.GetBytes(40 * 1024);
+        var picture = RandomNumberGenerator.GetBytes(1024 * 1024);
+        var filesA = new Dictionary<string, byte[]> { [RoomBlob.IdOf(avatar)] = avatar, [RoomBlob.IdOf(picture)] = picture };
+        var filesB = new System.Collections.Concurrent.ConcurrentDictionary<string, byte[]>();
+        var a = new NetworkRoom(Guid.NewGuid(), RoomPortA, new RoomLocalState("Autoteste A", Avatar: new RoomBlobRef(RoomBlob.IdOf(avatar), avatar.Length)))
+        {
+            BroadcastTargets = () => [],
+            OutputEnabled = false,
+            BlobSource = id => filesA.GetValueOrDefault(id),
+            HasBlob = filesA.ContainsKey,
+        };
+        var b = new NetworkRoom(Guid.NewGuid(), RoomPortB, new RoomLocalState("Autoteste B"))
+        {
+            BroadcastTargets = () => [],
+            OutputEnabled = false,
+            BlobSource = id => filesB.GetValueOrDefault(id),
+            HasBlob = filesB.ContainsKey,
+        };
+        b.BlobReceived += (id, data) => filesB[id] = data;
         try
         {
             a.Start();
@@ -136,6 +158,15 @@ public static class SelfTest
             var chatOk = await Task.WhenAny(received.Task, Task.Delay(5000)) == received.Task && received.Task.Result.Text == text;
             line(chatOk ? $"Chat: B recebeu \"{received.Task.Result.Text}\" de {received.Task.Result.AuthorName}." : "FALHOU: a mensagem do chat não chegou.");
 
+            // A foto do perfil vem sozinha (está na presença de A); a imagem, quando a mensagem com ela chega.
+            var started = Stopwatch.StartNew();
+            var avatarOk = await WaitAsync(() => filesB.TryGetValue(RoomBlob.IdOf(avatar), out var got) && got.AsSpan().SequenceEqual(avatar), 10);
+            line(avatarOk ? $"Foto do perfil: B baixou a de A ({avatar.Length / 1024} KB) em {started.ElapsedMilliseconds} ms." : "FALHOU: a foto do perfil de A não chegou em B.");
+            started.Restart();
+            a.SendChat("Imagem do autoteste", new ChatImage(RoomBlob.IdOf(picture), picture.Length, 1600, 900));
+            var pictureOk = await WaitAsync(() => filesB.TryGetValue(RoomBlob.IdOf(picture), out var got) && got.AsSpan().SequenceEqual(picture), 20);
+            line(pictureOk ? $"Imagem do chat: B baixou {picture.Length / 1024} KB em {started.ElapsedMilliseconds} ms, com o hash conferido." : "FALHOU: a imagem do chat não chegou em B.");
+
             a.JoinVoice(new ToneVoiceInput());
             b.JoinVoice(new ToneVoiceInput());
             var voiceOk = await WaitAsync(() => a.Voice?.FramesDecoded > 50 && b.Voice?.FramesDecoded > 50, 10);
@@ -149,8 +180,8 @@ public static class SelfTest
             var leftOk = await WaitAsync(() => b.Peers.FirstOrDefault()?.Presence.InVoice == false, 4);
             if (!leftOk) line("FALHOU: B não viu A sair da voz.");
 
-            var ok = chatOk && voiceOk && peerInVoice && leftOk;
-            line(ok ? "PASSOU: presença, chat e voz funcionam entre dois PCs." : "FALHOU: a sala da rede não funcionou como deveria.");
+            var ok = chatOk && avatarOk && pictureOk && voiceOk && peerInVoice && leftOk;
+            line(ok ? "PASSOU: presença, chat, fotos, imagens e voz funcionam entre dois PCs." : "FALHOU: a sala da rede não funcionou como deveria.");
             return ok;
         }
         catch (Exception exception)

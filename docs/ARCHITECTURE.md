@@ -4,9 +4,9 @@
 
 | Projeto | Alvo | Conteúdo |
 |---|---|---|
-| `ScreenFlow.Core` | `net10.0` (testável em qualquer SO) | Protocolo (cabeçalho UDP, FEC, remontagem, NACK, mensagens de controle), protocolo e estado da sala da rede (presença, chat, histórico), criptografia, perfis de qualidade, controle adaptativo, configuração automática, regras do som do PC por app, configurações, leitura de releases, log |
-| `ScreenFlow.Infrastructure` | `net10.0-windows10.0.26100.0` | Captura de tela (WGC/DXGI) e de câmera (Windows.Media.Capture), conversão de cor na GPU, encoder/decoder FFmpeg, desenho do vídeo na GPU (D3D11), áudio WASAPI/Opus (com o loopback por processo), sala da rede (chat e voz), sessões host/viewer, Radmin, firewall, descoberta, hardware, atualização |
-| `ScreenFlow.App` | WPF, gera `ScreenFlow.exe` | Tema escuro/claro, menu lateral com o painel da voz, telas (Visão geral, Transmissão, Assistir, Chat da rede, Monitoramento, Configurações, Atualizações), sininho de avisos, ícone na bandeja, player, telemetria, `--diagnostico`, `--autoteste`, `--capturas` |
+| `ScreenFlow.Core` | `net10.0` (testável em qualquer SO) | Protocolo (cabeçalho UDP, FEC, remontagem, NACK, mensagens de controle), protocolo e estado da sala da rede (presença, chat, histórico, arquivos e downloads), arquivos da sala guardados no PC, criptografia, perfis de qualidade, controle adaptativo, configuração automática, regras do som do PC por app, nomes dos apps de mídia, link do instalador do Radmin, configurações, leitura de releases, log |
+| `ScreenFlow.Infrastructure` | `net10.0-windows10.0.26100.0` | Captura de tela (WGC/DXGI) e de câmera (Windows.Media.Capture), conversão de cor na GPU, encoder/decoder FFmpeg, desenho do vídeo na GPU (D3D11), áudio WASAPI/Opus (com o loopback por processo), controles de mídia do Windows, sala da rede (chat, voz e arquivos), sessões host/viewer, Radmin (e o instalador dele), firewall, descoberta, hardware, atualização |
+| `ScreenFlow.App` | WPF, gera `ScreenFlow.exe` | Tema escuro/claro, menu lateral com o painel da voz e o seu perfil, telas (Visão geral, Transmissão, Assistir, Chat da rede, Monitoramento, Configurações, Atualizações), fotos e imagens (abrir, virar, diminuir), sininho de avisos, ícone na bandeja, player, telemetria, `--diagnostico`, `--autoteste`, `--capturas` |
 | `ScreenFlow.Tests` | xUnit | Testes do Core |
 
 ## Pipeline de vídeo (host)
@@ -31,6 +31,12 @@ Packetizer ── pedaços de 1150 bytes + 1 paridade XOR a cada N
 
 A captura (e a câmera) e o encoder só rodam quando há alguém assistindo. Com a tela parada, um frame é reenviado a cada 100 ms para manter o intra-refresh. A câmera usa o formato que ela suporta mais perto da qualidade escolhida, e o Windows entrega o frame já em BGRA.
 
+Desde a 1.1.1 os pacotes de cada frame saem espalhados no tempo (no mínimo 30 Mbps ou 3 vezes o bitrate somado, com prazo de 50 ms por frame), e as retransmissões passam na frente. Para viewers 1.1.1 a paridade é **espalhada**: o grupo g junta os pacotes g, g + G, g + 2G..., então uma rajada de perdas cai em grupos diferentes e cada grupo recupera o seu pacote.
+
+### Qualidade trocada ao vivo e qualidade fixa (1.1.1)
+
+A resolução, o FPS e a qualidade fixa podem mudar com a transmissão no ar (na Transmissão ou salvando nas Configurações). O host troca as opções da sessão, renegocia o perfil com quem está assistindo e o pipeline recria o encoder com um keyframe; a captura só é recriada quando o FPS sobe (o Windows.Graphics.Capture limita o ritmo na criação) ou quando muda o formato da câmera. Com **Qualidade fixa**, o controle adaptativo fica desligado: a qualidade não baixa sozinha quando a rede aperta.
+
 ### Câmera junto com a tela (1.1.0)
 
 No modo tela, a câmera pode ir junto como uma **segunda faixa de vídeo**: device D3D11, captura e encoder próprios, no mesmo codec da tela e num tamanho de quadrinho (até 720p). Os pacotes têm tipos próprios (`CameraVideo` e `CameraFec`), com FEC, NACK e pedido de keyframe separados, então a tela nunca espera a câmera. Se a câmera falhar (em uso por outro app, desligada, bloqueada pela privacidade do Windows), a tela continua e a câmera tenta de novo com espera crescente. O viewer tem um decoder só para a câmera e desenha o quadrinho no canto pela CPU (é pequeno). O host só manda a câmera para quem avisou no `hello` que sabe mostrá-la (`camera-overlay`), então um viewer 1.0.x vê só a tela.
@@ -38,11 +44,11 @@ No modo tela, a câmera pode ir junto como uma **segunda faixa de vídeo**: devi
 ## Pipeline do viewer
 
 ```
-UDP → AES-GCM → FrameReassembler (FEC, NACK após 8 ms, descarte após 120 ms)
+UDP → AES-GCM → FrameReassembler (FEC, NACK quando o frame para de chegar, prazo de 120 a 500 ms pelo RTT)
    → fila de 8 frames → FFmpeg D3D11VA (textura NV12 na GPU)
    → D3D11 Video Processor (NV12→RGB e escala) → swapchain flip com tearing na janela do player
      (reserva: NV12→BGRA na CPU → WriteableBitmap, quando a GPU falha ou a opção está desligada)
-UDP áudio → Opus → WASAPI (tela/câmera: buffer de 40 a 150 ms, descarta áudio >80 ms atrás do vídeo)
+UDP áudio → Opus → WASAPI (tela/câmera: buffer que começa em 25 ms e só cresce até 90 ms se o som falhar)
 ```
 
 O decoder é criado no mesmo device D3D11 do presenter, então o frame não é copiado entre devices nem passa pela CPU. Como o WPF não desenha por cima de uma janela nativa, a barra de controles e as estatísticas ficam em janelas transparentes sobrepostas ao player.
@@ -50,9 +56,10 @@ O decoder é criado no mesmo device D3D11 do presenter, então o frame não é c
 ## Festa de música (só áudio)
 
 - O host não liga captura nem encoder de vídeo e pula a negociação de codec, então entra até quem não tem decoder de vídeo.
-- Opus 48 kHz estéreo com quadros de 20 ms, modo "audio" e VBR restrito, de 128 a 320 kbps (acima disso o pacote passa do MTU do Radmin).
+- Opus 48 kHz estéreo com quadros de 10 ms (20 ms até a 1.1.0), modo "audio" e VBR restrito, de 128 a 320 kbps (acima disso o pacote passa do MTU do Radmin).
 - Cada pacote leva o quadro atual e o anterior: uma perda isolada é recuperada sem buraco no som.
-- O viewer toca com buffer de 120 a 400 ms, em troca de som sem cortes. O player mostra o espectro do som decodificado.
+- O viewer começa com 40 ms de buffer e só aumenta (até 160 ms) se o som falhar, com correção suave do atraso e do relógio. O player mostra o espectro do som decodificado.
+- **Um app só** (1.1.1): em "O que toca na festa" dá para escolher um app (o Spotify, por exemplo). Aí vai só o som dele, capturado pelo loopback por processo ("só este processo e os filhos"). Quem decide os processos é o `AppAudioPlan.ChooseOnly`: o executável escolhido, nunca o ScreenFlow nem os ancestrais dele.
 - A descoberta anuncia o modo (tela, câmera ou festa), e a tela Assistir mostra cada sessão com o modo.
 
 ## Som do PC
@@ -65,6 +72,10 @@ O som do PC é capturado por WASAPI e vira Opus 48 kHz estéreo. Desde a 1.1.0 e
 
 A escolha dos apps vale na hora, durante a transmissão. Os apps são identificados pelo nome do executável, então um app que toca por outro processo com outro nome (o `steamwebhelper` do Steam, por exemplo) aparece separado na lista.
 
+## Controles de mídia (1.1.1)
+
+Transmitindo uma janela, ou a festa de um app só, a tela Transmissão mostra a música ou o vídeo desse app pelos controles de mídia do Windows (`GlobalSystemMediaTransportControlsSessionManager`, os mesmos das teclas de mídia): capa, título, artista, tempo e os botões voltar, pausar e pular, além da barra para mudar o tempo quando o app deixa. O app de mídia é ligado ao executável da janela ou da festa pelo `MediaApps` (no Core, com testes: "Spotify.exe", "Chrome", ids da Microsoft Store e os ids em hash do Firefox). Sem um app ligado, aparece o que as teclas de mídia controlariam. A lista é relida quando um app avisa que mudou e a cada 2 segundos; entre os avisos o tempo anda com o relógio.
+
 ## Sala da rede (UDP 47802)
 
 Todo mundo com o ScreenFlow 1.1 aberto na mesma rede do Radmin se vê, conversa no chat e pode entrar na voz. Não há servidor: tudo passa pela porta de descoberta, que o instalador já libera.
@@ -72,8 +83,15 @@ Todo mundo com o ScreenFlow 1.1 aberto na mesma rede do Radmin se vê, conversa 
 - **Pacotes** binários com cabeçalho de 20 bytes (`SR`, versão, tipo e o id de quem mandou) e no máximo 1400 bytes: presença, saída, chat, confirmação do chat, voz e pedido de histórico. Os anúncios em JSON das transmissões das versões 1.0.x chegam na mesma porta e alimentam a tela Assistir.
 - **Presença** por broadcast nos adaptadores do Radmin a cada 2 s (e direto para quem já é conhecido ou foi adicionado pelo IP), com o nome, se está na voz, mudo, sem som e se está ao vivo (tela, som, câmera). Quem some por 7 s sai da lista.
 - **Chat** direto para cada PC, com confirmação e até 6 tentativas. O histórico guarda as últimas 300 mensagens só na memória; quem chega pede o histórico aos outros.
-- **Voz** direto para quem está na voz: Opus 32 kbps, 48 kHz mono, quadros de 20 ms, com portão de voz (só manda enquanto você fala) e cada quadro levando o anterior para cobrir uma perda isolada. Cada pessoa tem um buffer de jitter e todas são mixadas numa saída só. Sem som (ensurdecer) também desliga o microfone.
-- **Segurança**: os pacotes da sala **não** são criptografados nem autenticados pelo ScreenFlow. Eles contam com o túnel do Radmin VPN, e qualquer um na mesma rede do Radmin com o ScreenFlow aberto ouve a voz e lê o chat. A transmissão de tela continua com ECDH + AES-GCM.
+- **Voz** direto para quem está na voz: Opus 32 kbps, 48 kHz mono, quadros de 20 ms, com portão de voz (só manda enquanto você fala) e cada quadro levando o anterior para cobrir uma perda isolada. Cada pessoa tem um buffer de jitter (de 40 a 240 ms) e todas são mixadas numa saída só. Sem som (ensurdecer) também desliga o microfone. **Ouvir meu microfone** (Configurações) toca o microfone no fone com um buffer curto, sem passar pela rede.
+- **Perfil** (1.1.1): o nome vem de **Seu perfil** (no começo, o nome do PC). A foto vai na presença como uma referência (id e tamanho) num campo novo no fim do pacote, que as versões antigas ignoram; quem vê uma foto que ainda não tem baixa de quem anunciou.
+- **Arquivos** (1.1.1): as fotos de perfil (JPEG 192×192, até 96 KB) e as imagens do chat (JPEG de até 1920 px, em torno de 600 KB, no máximo 2 MB) passam pela mesma porta. O id de um arquivo são os 16 primeiros bytes do SHA-256 do conteúdo. Quem quer pede (`BlobRequest`) tudo ou só as partes que faltam (até 600 por pedido); quem tem manda partes (`BlobChunk`) de 1200 bytes, em lotes, só para quem está na sala e no endereço de onde ela fala, com limite de pedidos por pessoa e de envios ao mesmo tempo (um pedido pequeno não vira uma enxurrada para outro endereço). O `RoomBlobDownloads` (no Core, com testes) pede de novo o que falta depois de 400 ms sem partes novas, com espera crescente; depois de 5 tentativas sem nada passa para a próxima pessoa que tem o arquivo (o autor da mensagem, quem repassou o histórico, os outros da sala) e desiste em 60 s. No fim, o hash precisa conferir. Os arquivos ficam em `%LOCALAPPDATA%\ScreenFlow\imagens` (`RoomBlobStore`: gravação atômica, conferência do hash ao ler, 24 MB na memória, limpeza do que não é usado há 30 dias ou passa de 300 MB, a sua foto fica sempre).
+- **Imagens no chat**: a mensagem leva a imagem (id, tamanho, largura e altura) num campo novo; o texto vira a legenda. Sem legenda, o texto é "📷 Imagem (atualize o ScreenFlow para ver)", o que as versões 1.1.0 mostram. Quem manda abre o arquivo (qualquer formato que o Windows abre), vira conforme o EXIF, diminui e grava em JPEG (o que tira a localização e os outros dados da foto). Quem recebe só abre JPEG ou PNG, confere o tamanho antes (até 8192 de lado e 24 milhões de pixels) e abre já diminuído para mostrar.
+- **Segurança**: os pacotes da sala **não** são criptografados nem autenticados pelo ScreenFlow. Eles contam com o túnel do Radmin VPN, e qualquer um na mesma rede do Radmin com o ScreenFlow aberto ouve a voz, lê o chat e vê as imagens. A transmissão de tela continua com ECDH + AES-GCM.
+
+## Instalar o Radmin VPN (1.1.1)
+
+Sem o Radmin VPN, a Visão geral e a Transmissão oferecem **Instalar o Radmin VPN**. O `RadminInstaller` lê a página oficial e pega o link do instalador mais novo (`RadminDownload`, no Core, com testes: só HTTPS, só os endereços da Famatech e só um arquivo `Radmin_VPN_x.y.z.exe`; se a página mudar, usa a última versão conhecida). Baixa com barra de progresso, confere a assinatura Authenticode com o `WinVerifyTrust` (arquivo íntegro, certificado confiável) e exige que quem assinou seja a Famatech; se não conferir, apaga o arquivo. Depois roda o instalador (Inno Setup) com `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP-` como administrador (o Windows pede permissão), explica o código de saída e abre o Radmin VPN para a pessoa entrar numa rede. Com o Radmin já instalado e sem rede, o botão vira **Abrir o Radmin VPN** (o programa é achado pelo registro de desinstalação).
 
 ## Canal de controle (TCP 47801)
 
@@ -98,6 +116,6 @@ O instalador cria as regras (UDP 47800, TCP 47801, UDP 47802 e o próprio `Scree
 
 ## Bandeja e encerramento
 
-- Fechar ou minimizar a janela (com **Configurações › Fechar e minimizar levam o ScreenFlow para a bandeja**, ligado por padrão) só esconde a janela: a transmissão, a voz e o chat continuam. A dica do ícone mostra se está ao vivo e o que está indo (tela, som, câmera), quantas pessoas assistem e a voz; o menu do botão direito tem abrir, transmitir ou encerrar, os controles da voz, o chat e **Sair do ScreenFlow**.
+- Fechar ou minimizar a janela (com **Configurações › Fechar e minimizar levam o ScreenFlow para a bandeja**, ligado por padrão) só esconde a janela: a transmissão, a voz e o chat continuam. Quando a transmissão acaba ou o player fecha, a janela volta sozinha (dá para desligar nas Configurações). A dica do ícone mostra se está ao vivo e o que está indo (tela, som, câmera), quantas pessoas assistem e a voz; o menu do botão direito tem abrir, transmitir ou encerrar, os controles da voz, o chat e **Sair do ScreenFlow**.
 - Só uma cópia do app roda por vez (mutex `Local\ScreenFlow.Instancia`). Abrir de novo mostra a janela que já estava aberta.
 - **Sair do ScreenFlow** (ou fechar com a bandeja desligada, ou o Windows desligando) encerra a sessão (manda `bye`, para áudio, pipeline, sockets, libera encoder/decoder/texturas/device D3D11), sai da sala da rede e só então fecha.
