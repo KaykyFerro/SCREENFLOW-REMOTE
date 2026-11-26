@@ -11,7 +11,7 @@ using ScreenFlow.Infrastructure.Network;
 
 namespace ScreenFlow.Infrastructure.Room;
 
-/// <summary>O que este PC mostra para a sala: nome e se está ao vivo (e o quê).</summary>
+/// <summary>O que este PC mostra para a sala: nome, foto e se está ao vivo (e o quê).</summary>
 public sealed record RoomLocalState(
     string Name,
     bool Live = false,
@@ -22,7 +22,8 @@ public sealed record RoomLocalState(
     bool PinRequired = false,
     IPAddress? LiveAddress = null,
     bool Watching = false,
-    int ControlPort = AppInfo.DefaultControlPort);
+    int ControlPort = AppInfo.DefaultControlPort,
+    RoomBlobRef? Avatar = null);
 
 /// <summary>
 /// Sala da rede: todo mundo com o ScreenFlow aberto na mesma rede do Radmin se vê, conversa no chat e pode entrar na
@@ -41,6 +42,11 @@ public sealed class NetworkRoom : IAsyncDisposable
     private readonly RateLimiter<Guid> _chatLimit = new(burst: 8, perSecond: 1);
     private readonly RateLimiter<Guid> _replyLimit = new(burst: 2, perSecond: 0.5);
     private readonly RateLimiter<Guid> _historyLimit = new(burst: 1, perSecond: 0.1);
+    private readonly RateLimiter<Guid> _blobLimit = new(burst: 12, perSecond: 4);
+    private readonly RoomBlobDownloads _downloads = new();
+    private readonly ConcurrentDictionary<(Guid Peer, string Id), byte> _uploading = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _blobTried = new();
+    private readonly SemaphoreSlim _uploadSlots = new(3);
     private readonly ConcurrentDictionary<Guid, DateTimeOffset> _historyAsked = new();
     private readonly ConcurrentDictionary<string, DiscoveredHost> _hosts = new();
     private readonly ConcurrentDictionary<IPEndPoint, byte> _manual = new();
@@ -86,6 +92,18 @@ public sealed class NetworkRoom : IAsyncDisposable
 
     /// <summary>Sons de entrar, sair e mudo na voz (como no Discord).</summary>
     public bool SoundsEnabled { get; set; } = true;
+
+    /// <summary>Arquivos que este PC tem para mandar (a própria foto e as imagens do chat). Null: não tem o arquivo.</summary>
+    public Func<string, byte[]?>? BlobSource { get; init; }
+
+    /// <summary>Este PC já tem o arquivo (não precisa baixar).</summary>
+    public Func<string, bool>? HasBlob { get; init; }
+
+    /// <summary>Um arquivo chegou inteiro e conferido (chamado fora da thread da interface).</summary>
+    public event Action<string, byte[]>? BlobReceived;
+
+    /// <summary>Ninguém mandou o arquivo.</summary>
+    public event Action<string>? BlobFailed;
 
     /// <summary>Por que a sala não abriu (porta ocupada, por exemplo). Null quando está funcionando.</summary>
     public string? Error { get; private set; }
@@ -227,12 +245,17 @@ public sealed class NetworkRoom : IAsyncDisposable
 
     // ───────────────────────── Chat ─────────────────────────
 
-    /// <summary>Manda uma mensagem para todo mundo da sala. Retorna a mensagem (já no histórico) ou null se vazia.</summary>
-    public RoomChatMessage? SendChat(string text)
+    /// <summary>
+    /// Manda uma mensagem para todo mundo da sala, com uma imagem se quiser (o arquivo dela precisa estar em
+    /// <see cref="BlobSource"/>: quem recebe pede os pedaços). Retorna a mensagem (já no histórico) ou null se vazia.
+    /// </summary>
+    public RoomChatMessage? SendChat(string text, ChatImage? image = null)
     {
         text = RoomPacket.CleanText(text);
-        if (text.Length == 0) return null;
-        var message = new RoomChatMessage(SelfId, _local.Name, BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)), DateTimeOffset.UtcNow, text);
+        if (text.Length == 0 && image is null) return null;
+        if (text.Length == 0) text = RoomPacket.ImagePlaceholder;
+        var message = new RoomChatMessage(SelfId, _local.Name, BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)), DateTimeOffset.UtcNow, text,
+            Image: image);
         _history.Add(message);
         var packet = RoomPacket.Chat(SelfId, message);
         var peers = _peers.Snapshot();
@@ -368,7 +391,7 @@ public sealed class NetworkRoom : IAsyncDisposable
         if (local.Watching) flags |= PresenceFlags.Watching;
         if (wantsReply) flags |= PresenceFlags.WantsReply;
         return new RoomPresence(local.Name, AppInfo.DisplayVersion, flags, local.LiveMode, local.Viewers, local.ControlPort,
-            local.Live ? local.LiveAddress : null, Interlocked.Increment(ref _presenceSequence));
+            local.Live ? local.LiveAddress : null, Interlocked.Increment(ref _presenceSequence), local.Avatar);
     }
 
     private byte[] PresencePacket(bool wantsReply) => RoomPacket.Presence(SelfId, LocalPresence(wantsReply));
@@ -430,6 +453,14 @@ public sealed class NetworkRoom : IAsyncDisposable
                     }
                     foreach (var (peerId, packet) in _outbox.Due(now))
                         if (_peers.Find(peerId) is { } peer) Send(packet, peer.EndPoint);
+                    var (asks, failed) = _downloads.Due(now);
+                    foreach (var ask in asks)
+                        if (_peers.Find(ask.Source) is { } source) Send(RoomPacket.BlobRequest(SelfId, ask.Id, ask.Missing), source.EndPoint);
+                    foreach (var id in failed)
+                    {
+                        Log.Info($"Sala da rede: ninguém mandou o arquivo {id}.");
+                        BlobFailed?.Invoke(id);
+                    }
                     if (now - lastExpire >= TimeSpan.FromSeconds(1))
                     {
                         lastExpire = now;
@@ -503,6 +534,12 @@ public sealed class NetworkRoom : IAsyncDisposable
             case RoomPacketType.HistoryRequest:
                 OnHistoryRequest(sender, from, now);
                 break;
+            case RoomPacketType.BlobRequest:
+                OnBlobRequest(sender, body, from, now);
+                break;
+            case RoomPacketType.BlobChunk:
+                OnBlobChunk(sender, body, from, now);
+                break;
         }
     }
 
@@ -540,6 +577,7 @@ public sealed class NetworkRoom : IAsyncDisposable
             else if (_inVoice && update.IsNew && presence.InVoice) PlayCue(VoiceCue.Join);
         }
         if (presence.Live && previous is { Live: false }) PeerWentLive?.Invoke(peer);
+        if (presence.Avatar is { } avatar) MaybeFetch(avatar, now, sender);
 
         if (update.IsNew || previous is null || (previous with { Sequence = 0 }) != (presence with { Sequence = 0 }))
             PeersChanged?.Invoke();
@@ -549,6 +587,7 @@ public sealed class NetworkRoom : IAsyncDisposable
     {
         Log.Info($"Sala da rede: {peer.Presence.Name} {reason}.");
         _outbox.Forget(peer.Id);
+        _downloads.Forget(peer.Id, DateTimeOffset.UtcNow);
         if (peer.Presence.InVoice)
         {
             _voice?.RemovePeer(peer.Id);
@@ -581,6 +620,8 @@ public sealed class NetworkRoom : IAsyncDisposable
             };
         }
         if (_history.Add(message) < 0) return;
+        // A imagem vem de quem escreveu ou, se ele já saiu (histórico), de quem repassou a mensagem.
+        if (message.Image is { } image) MaybeFetch(image.Blob, now, message.AuthorId, sender);
         MessageReceived?.Invoke(message);
     }
 
@@ -601,6 +642,76 @@ public sealed class NetworkRoom : IAsyncDisposable
         if (peer is null || !peer.Presence.InVoice) return;
         peer.RecordVoice(level, now);
         if (_inVoice && !_deafened) _voice?.Receive(sender, sequence, current, previous);
+    }
+
+    // ───────────────────────── Arquivos (foto do perfil e imagens do chat) ─────────────────────────
+
+    /// <summary>Baixa um arquivo de quem tem (na ordem de <paramref name="sources"/>), se este PC ainda não tiver.</summary>
+    public void FetchBlob(RoomBlobRef blob, params Guid[] sources)
+    {
+        if (HasBlob?.Invoke(blob.Id) != false || _cancellation.IsCancellationRequested) return;
+        if (_downloads.Start(blob.Id, blob.Size, sources.Where(s => s != SelfId), DateTimeOffset.UtcNow))
+            Log.Debug($"Sala da rede: baixando o arquivo {blob.Id} ({blob.Size / 1024.0:0.#} KB).");
+    }
+
+    /// <summary>Baixa se ainda não tem e não tentou há pouco (uma foto que não veio é tentada de novo a cada 30 s).</summary>
+    private void MaybeFetch(RoomBlobRef blob, DateTimeOffset now, params Guid[] sources)
+    {
+        if (_downloads.IsActive(blob.Id)) return;
+        if (_blobTried.TryGetValue(blob.Id, out var tried) && now - tried < TimeSpan.FromSeconds(30)) return;
+        if (HasBlob?.Invoke(blob.Id) != false) return;
+        if (_blobTried.Count > 512) _blobTried.Clear();
+        _blobTried[blob.Id] = now;
+        FetchBlob(blob, sources);
+    }
+
+    /// <summary>
+    /// Alguém pediu um arquivo: manda os pedaços pedidos, em lotes (sem encher a fila da rede de uma vez). Só responde a
+    /// quem está na sala, pelo endereço em que ele está, e com limite: um pedido pequeno não vira uma enxurrada para
+    /// outro endereço.
+    /// </summary>
+    private void OnBlobRequest(Guid sender, ReadOnlySpan<byte> body, IPEndPoint from, DateTimeOffset now)
+    {
+        if (!RoomPacket.TryReadBlobRequest(body, out var id, out var missing)) return;
+        var peer = _peers.Find(sender);
+        if (peer is null || !peer.EndPoint.Address.Equals(from.Address) || !_blobLimit.TryTake(sender, now)) return;
+        if (!RoomBlob.TryParseId(id, out var hash) || BlobSource?.Invoke(id) is not { Length: > 0 and <= RoomBlob.MaxImageBytes } data) return;
+        if (!_uploading.TryAdd((sender, id), 0)) return;
+        var count = RoomBlob.ChunkCount(data.Length);
+        var indexes = missing.Length == 0 ? Enumerable.Range(0, count).ToArray() : missing.Where(i => i < count).Distinct().ToArray();
+        var token = _cancellation.Token;
+        _ = Task.Run(async () =>
+        {
+            var slot = false;
+            try
+            {
+                await _uploadSlots.WaitAsync(token).ConfigureAwait(false);
+                slot = true;
+                var buffer = new byte[RoomPacket.MaximumSize];
+                for (var i = 0; i < indexes.Length && !token.IsCancellationRequested; i++)
+                {
+                    var length = RoomPacket.WriteBlobChunk(buffer, SelfId, hash, data, indexes[i]);
+                    Send(buffer.AsSpan(0, length), from);
+                    if (i % 24 == 23) await Task.Delay(2, token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception exception) { Log.Debug($"Envio do arquivo {id}: {exception.Message}"); }
+            finally
+            {
+                if (slot) _uploadSlots.Release();
+                _uploading.TryRemove((sender, id), out _);
+            }
+        }, token);
+    }
+
+    private void OnBlobChunk(Guid sender, ReadOnlySpan<byte> body, IPEndPoint from, DateTimeOffset now)
+    {
+        if (!RoomPacket.TryReadBlobChunk(body, out var id, out var size, out var index, out var data)) return;
+        _peers.Touch(sender, from, now);
+        if (_downloads.Accept(id, sender, size, index, data, now) is not { } blob) return;
+        Log.Debug($"Sala da rede: arquivo {id} chegou ({blob.Length / 1024.0:0.#} KB).");
+        BlobReceived?.Invoke(id, blob);
     }
 
     // ───────────────────────── Rede ─────────────────────────

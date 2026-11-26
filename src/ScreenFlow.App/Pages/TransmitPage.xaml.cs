@@ -7,6 +7,7 @@ using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using ScreenFlow.App.Services;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
@@ -36,6 +37,14 @@ public partial class TransmitPage : UserControl, IShellPage
     private bool _starting;
     private Task? _camerasLoading;
     private bool _camerasFound;
+    private readonly DispatcherTimer _mediaTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
+    private MediaControls? _media;
+    private string? _mediaId;
+    private bool _mediaPinned;
+    private bool _mediaSeeking;
+    private bool _fillingMediaSessions;
+    private string? _mediaArtKey;
+    private string? _liveWindowExe;
 
     public TransmitPage(MainWindow shell)
     {
@@ -53,6 +62,8 @@ public partial class TransmitPage : UserControl, IShellPage
         CameraQualityCombo.SelectionChanged += (_, _) => QualityChanged();
         MusicCombo.SelectionChanged += (_, _) => UpdateProfileHint();
         PartyAppCombo.SelectionChanged += (_, _) => PartyApp_Changed();
+        MediaSessionCombo.SelectionChanged += (_, _) => MediaSession_Changed();
+        _mediaTimer.Tick += (_, _) => UpdateMedia();
         AudioToggle.Checked += (_, _) => UpdateAudioCard();
         AudioToggle.Unchecked += (_, _) => UpdateAudioCard();
         Spectrum.Source = () => _session?.AudioMeter;
@@ -532,7 +543,9 @@ public partial class TransmitPage : UserControl, IShellPage
             session.BandwidthMeasured += (name, mbps) => Dispatcher.BeginInvoke(() => OnBandwidthMeasured(name, mbps));
             await Task.Run(session.Start);
             _liveAddress = adapter.Address;
+            _liveWindowExe = target.Kind == CaptureKind.Window ? WindowDiscovery.ProcessExe(target.Handle) : null;
             _session = session;
+            _ = StartMediaAsync();
 
             LockWhileLive(true);
             StartButton.Visibility = Visibility.Collapsed;
@@ -574,6 +587,7 @@ public partial class TransmitPage : UserControl, IShellPage
         foreach (var pending in _approvals.ToList()) pending.Completion.TrySetResult(false);
         if (session is not null) await session.DisposeAsync();
         if (!Dispatcher.CheckAccess()) return;
+        StopMedia();
         _approvals.Clear();
         ApprovalCard.Visibility = Visibility.Collapsed;
         _viewerRows.Clear();
@@ -593,6 +607,138 @@ public partial class TransmitPage : UserControl, IShellPage
         UpdateAudioCard();
         _shell.NotifyLiveStateChanged();
         if (session is not null) _shell.ShowAfterSessionEnded(this);
+    }
+
+    // ───────────────────────── O que está tocando (controles de mídia do Windows) ─────────────────────────
+
+    private async Task StartMediaAsync()
+    {
+        if (AppServices.DemoMode) return;
+        var media = await MediaControls.OpenAsync();
+        if (media is null) return;
+        if (_session is null || _media is not null)
+        {
+            media.Dispose();
+            return;
+        }
+        _media = media;
+        _mediaTimer.Start();
+        UpdateMedia();
+    }
+
+    private void StopMedia()
+    {
+        _mediaTimer.Stop();
+        var media = _media;
+        _media = null;
+        media?.Dispose();
+        _mediaId = null;
+        _mediaPinned = false;
+        _mediaSeeking = false;
+        _mediaArtKey = null;
+        MediaCard.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>O app que está sendo transmitido: o dono da janela ou o app da festa (para mostrar a mídia dele).</summary>
+    private string? SharedAppExe() => _session?.Mode == StreamMode.AudioOnly ? Settings.PartyApp?.Exe : _liveWindowExe;
+
+    private void UpdateMedia()
+    {
+        if (_media is not { } media || _session is null)
+        {
+            MediaCard.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var sessions = media.Sessions;
+        if (media.Pick(SharedAppExe(), _mediaPinned ? _mediaId : null) is not { } info)
+        {
+            MediaCard.Visibility = Visibility.Collapsed;
+            return;
+        }
+        _mediaId = info.Id;
+        FillMediaSessions(sessions, info.Id);
+        ShowMedia(info, DateTimeOffset.UtcNow);
+    }
+
+    private void ShowMedia(MediaSessionInfo info, DateTimeOffset now)
+    {
+        MediaCard.Visibility = Visibility.Visible;
+        MediaApp.Text = $"{info.AppName} · {(info.Playing ? "tocando agora" : "pausado")}";
+        MediaTitle.Text = info.Title.Length > 0 ? info.Title : info.AppName;
+        MediaArtist.Text = info.Artist;
+        MediaArtist.Visibility = info.Artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        MediaPlayGlyph.Text = info.Playing ? "\uE769" : "\uE768";
+        MediaPlayPause.ToolTip = info.Playing ? "Pausar" : "Tocar";
+        MediaPrevious.IsEnabled = info.CanPrevious;
+        MediaNext.IsEnabled = info.CanNext;
+        MediaPlayPause.IsEnabled = info.CanPlayPause;
+
+        var duration = info.Timeline.Duration;
+        MediaSeekRow.Visibility = duration > TimeSpan.Zero ? Visibility.Visible : Visibility.Collapsed;
+        MediaSeek.IsEnabled = info.CanSeek;
+        MediaDuration.Text = MediaApps.FormatTime(duration);
+        if (!_mediaSeeking)
+        {
+            var position = info.Timeline.PositionAt(now);
+            MediaSeek.Maximum = Math.Max(1, duration.TotalSeconds);
+            MediaSeek.Value = Math.Min(MediaSeek.Maximum, position.TotalSeconds);
+            MediaPosition.Text = MediaApps.FormatTime(position);
+        }
+
+        var artKey = info.Thumbnail is null ? null : $"{info.Id}\n{info.Title}\n{info.Artist}\n{info.Thumbnail.Length}";
+        if (artKey == _mediaArtKey) return;
+        _mediaArtKey = artKey;
+        var image = ToImage(info.Thumbnail);
+        MediaArt.Background = image is null ? null : new ImageBrush(image) { Stretch = Stretch.UniformToFill };
+        MediaArt.Visibility = image is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>Com mais de um app tocando, uma lista para escolher qual controlar.</summary>
+    private void FillMediaSessions(IReadOnlyList<MediaSessionInfo> sessions, string selected)
+    {
+        MediaSessionCombo.Visibility = sessions.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        var choices = sessions.Select((s, i) => new Choice<string>(s.Id, sessions.Take(i).Any(o => o.AppName == s.AppName) ? $"{s.AppName} ({i + 1})" : s.AppName)).ToList();
+        _fillingMediaSessions = true;
+        if (!choices.SequenceEqual(MediaSessionCombo.Items.OfType<Choice<string>>())) MediaSessionCombo.Fill(choices);
+        MediaSessionCombo.SelectValue(selected);
+        _fillingMediaSessions = false;
+    }
+
+    private void MediaSession_Changed()
+    {
+        if (_fillingMediaSessions || MediaSessionCombo.Value<string>() is not { } id) return;
+        _mediaId = id;
+        _mediaPinned = true;
+        _mediaArtKey = null;
+        UpdateMedia();
+    }
+
+    private async void MediaPrevious_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.Previous);
+    private async void MediaPlayPause_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.PlayPause);
+    private async void MediaNext_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.Next);
+
+    private async Task MediaCommandAsync(MediaCommand command)
+    {
+        if (_media is not { } media || _mediaId is not { } id) return;
+        if (!await media.SendAsync(id, command)) _shell.Toast("O app não aceitou o comando. Alguns apps não deixam pular ou voltar.", ToastKind.Warning);
+    }
+
+    private void MediaSeek_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (MediaSeek.IsEnabled) _mediaSeeking = true;
+    }
+
+    private async void MediaSeek_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (!_mediaSeeking) return;
+        _mediaSeeking = false;
+        if (_media is not { } media || _mediaId is not { } id) return;
+        if (!await media.SeekAsync(id, TimeSpan.FromSeconds(MediaSeek.Value))) _shell.Toast("O app não deixou mudar o ponto da música ou do vídeo.", ToastKind.Warning);
+    }
+
+    private void MediaSeek_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_mediaSeeking) MediaPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(e.NewValue));
     }
 
     private void ShowError(string message)
@@ -881,6 +1027,9 @@ public partial class TransmitPage : UserControl, IShellPage
         NoViewers.Visibility = Visibility.Collapsed;
         ViewerCount.Text = "3 pessoas";
         UpdateAudioCard();
+        var now = DateTimeOffset.UtcNow;
+        ShowMedia(new MediaSessionInfo("Spotify.exe", "Spotify.exe", "Spotify", "Noite de Sexta", "Banda da Rede",
+            new PlaybackTimeline(TimeSpan.FromSeconds(83), TimeSpan.FromSeconds(214), now, true), true, true, true, true, null), now);
     }
 
     /// <summary>Abre "Tirar o som de apps" com apps de exemplo (para a captura de tela).</summary>

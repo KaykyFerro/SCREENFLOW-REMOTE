@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using ScreenFlow.Core.Media;
 
@@ -10,7 +11,11 @@ namespace ScreenFlow.Core.Room;
 /// ScreenFlow aberto na mesma rede do Radmin. Começam com "SR", então as versões antigas (que só entendem o anúncio em
 /// JSON das transmissões) descartam sem erro.
 /// </summary>
-public enum RoomPacketType : byte { Presence = 1, Leave = 2, Chat = 3, ChatAck = 4, Voice = 5, HistoryRequest = 6 }
+/// <remarks>
+/// 1.1.1: <see cref="BlobRequest"/> e <see cref="BlobChunk"/> levam a foto do perfil e as imagens do chat. As versões
+/// antigas descartam os tipos que não conhecem.
+/// </remarks>
+public enum RoomPacketType : byte { Presence = 1, Leave = 2, Chat = 3, ChatAck = 4, Voice = 5, HistoryRequest = 6, BlobRequest = 7, BlobChunk = 8 }
 
 [Flags]
 public enum PresenceFlags : ushort
@@ -29,7 +34,16 @@ public enum PresenceFlags : ushort
     WantsReply = 256,
 }
 
-/// <summary>Como um PC aparece na sala: nome, se está na voz (e mudo), se está ao vivo e o quê.</summary>
+/// <summary>Um arquivo da sala (a foto do perfil ou uma imagem do chat): o id (hash do conteúdo) e o tamanho em bytes.</summary>
+public sealed record RoomBlobRef(string Id, int Size);
+
+/// <summary>Imagem de uma mensagem do chat: o arquivo e o tamanho da imagem em pixels.</summary>
+public sealed record ChatImage(string Id, int Size, int Width, int Height)
+{
+    public RoomBlobRef Blob => new(Id, Size);
+}
+
+/// <summary>Como um PC aparece na sala: nome, foto, se está na voz (e mudo), se está ao vivo e o quê.</summary>
 public sealed record RoomPresence(
     string Name,
     string Version,
@@ -38,7 +52,8 @@ public sealed record RoomPresence(
     int Viewers = 0,
     int ControlPort = AppInfo.DefaultControlPort,
     IPAddress? LiveAddress = null,
-    uint Sequence = 0)
+    uint Sequence = 0,
+    RoomBlobRef? Avatar = null)
 {
     public bool InVoice => Flags.HasFlag(PresenceFlags.InVoice);
     public bool Muted => Flags.HasFlag(PresenceFlags.Muted);
@@ -50,8 +65,17 @@ public sealed record RoomPresence(
     public string LiveSummary => Live ? StreamModes.Summary(LiveMode, Flags.HasFlag(PresenceFlags.LiveAudio), Flags.HasFlag(PresenceFlags.LiveCamera)) : string.Empty;
 }
 
-/// <summary>Mensagem do chat da rede. <see cref="History"/> marca mensagens antigas repassadas para quem acabou de chegar.</summary>
-public sealed record RoomChatMessage(Guid AuthorId, string AuthorName, ulong MessageId, DateTimeOffset Time, string Text, bool History = false);
+/// <summary>
+/// Mensagem do chat da rede. <see cref="History"/> marca mensagens antigas repassadas para quem acabou de chegar.
+/// <see cref="Image"/> é a imagem anexada (o texto é a legenda, ou <see cref="RoomPacket.ImagePlaceholder"/> sem legenda,
+/// que é o que as versões antigas mostram).
+/// </summary>
+public sealed record RoomChatMessage(Guid AuthorId, string AuthorName, ulong MessageId, DateTimeOffset Time, string Text, bool History = false,
+    ChatImage? Image = null)
+{
+    /// <summary>A legenda da imagem (vazia quando o texto é só o aviso para as versões antigas).</summary>
+    public string Caption => Image is not null && Text == RoomPacket.ImagePlaceholder ? string.Empty : Text;
+}
 
 public static class RoomPacket
 {
@@ -64,6 +88,13 @@ public static class RoomPacket
     public const int MaxTextBytes = 1100;
     public const int MaxVoiceFrameBytes = 400;
 
+    /// <summary>Texto de uma imagem sem legenda (as versões antigas mostram só ele).</summary>
+    public const string ImagePlaceholder = "📷 Imagem (atualize o ScreenFlow para ver)";
+
+    private const byte HistoryFlag = 1;
+    private const byte ImageFlag = 2;
+    private const byte AvatarField = 1;
+
     // ───────────────────────── Cabeçalho ─────────────────────────
 
     public static bool TryReadHeader(ReadOnlySpan<byte> data, out RoomPacketType type, out Guid sender)
@@ -73,7 +104,7 @@ public static class RoomPacket
         if (data.Length < HeaderSize || data.Length > MaximumSize) return false;
         if (BinaryPrimitives.ReadUInt16BigEndian(data) != Magic || data[2] != Version) return false;
         type = (RoomPacketType)data[3];
-        if (type is < RoomPacketType.Presence or > RoomPacketType.HistoryRequest) return false;
+        if (type is < RoomPacketType.Presence or > RoomPacketType.BlobChunk) return false;
         sender = new Guid(data.Slice(4, 16), bigEndian: true);
         return sender != Guid.Empty;
     }
@@ -104,6 +135,14 @@ public static class RoomPacket
         address.CopyTo(buffer, offset); offset += 4;
         offset += WriteShortString(buffer.AsSpan(offset), CleanName(presence.Name), MaxNameLength * 4);
         offset += WriteShortString(buffer.AsSpan(offset), Truncate(presence.Version, 24), 64);
+        // Campos novos vão depois da versão, como [tipo][tamanho][valor]: as versões antigas param de ler antes deles.
+        if (presence.Avatar is { } avatar && RoomBlob.TryParseId(avatar.Id, out var hash) && avatar.Size is > 0 and <= RoomBlob.MaxAvatarBytes)
+        {
+            buffer[offset++] = AvatarField;
+            buffer[offset++] = RoomBlob.IdBytes + 4;
+            hash.CopyTo(buffer, offset); offset += RoomBlob.IdBytes;
+            BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(offset), avatar.Size); offset += 4;
+        }
         return buffer[..offset];
     }
 
@@ -122,8 +161,23 @@ public static class RoomPacket
         if (!TryReadShortString(body, ref offset, out var name) || !TryReadShortString(body, ref offset, out var version)) return false;
         name = CleanName(name);
         if (name.Length == 0) return false;
+        RoomBlobRef? avatar = null;
+        while (offset + 2 <= body.Length)
+        {
+            var field = body[offset];
+            var length = body[offset + 1];
+            offset += 2;
+            if (offset + length > body.Length) break;
+            var value = body.Slice(offset, length);
+            offset += length;
+            if (field == AvatarField && length == RoomBlob.IdBytes + 4)
+            {
+                var size = BinaryPrimitives.ReadInt32BigEndian(value[RoomBlob.IdBytes..]);
+                if (size is > 0 and <= RoomBlob.MaxAvatarBytes) avatar = new RoomBlobRef(RoomBlob.IdText(value[..RoomBlob.IdBytes]), size);
+            }
+        }
         presence = new RoomPresence(name, Truncate(version, 24), flags, mode, viewers, port,
-            address.Equals(IPAddress.Any) ? null : address, sequence);
+            address.Equals(IPAddress.Any) ? null : address, sequence, avatar);
         return true;
     }
 
@@ -150,14 +204,28 @@ public static class RoomPacket
         BinaryPrimitives.WriteUInt64BigEndian(buffer.AsSpan(offset), message.MessageId); offset += 8;
         message.AuthorId.TryWriteBytes(buffer.AsSpan(offset, 16), bigEndian: true, out _); offset += 16;
         BinaryPrimitives.WriteInt64BigEndian(buffer.AsSpan(offset), message.Time.ToUnixTimeMilliseconds()); offset += 8;
-        buffer[offset++] = (byte)(message.History ? 1 : 0);
+        var image = message.Image is { } attached && RoomBlob.TryParseId(attached.Id, out var hash) && IsValidImage(attached) ? (attached, hash) : default;
+        buffer[offset++] = (byte)((message.History ? HistoryFlag : 0) | (image.attached is not null ? ImageFlag : 0));
         offset += WriteShortString(buffer.AsSpan(offset), CleanName(message.AuthorName), MaxNameLength * 4);
-        var text = Encoding.UTF8.GetBytes(CleanText(message.Text));
-        if (text.Length > MaxTextBytes) text = Encoding.UTF8.GetBytes(TrimToBytes(CleanText(message.Text), MaxTextBytes));
+        var clean = CleanText(message.Text);
+        if (clean.Length == 0 && image.attached is not null) clean = ImagePlaceholder;
+        var text = Encoding.UTF8.GetBytes(clean);
+        if (text.Length > MaxTextBytes) text = Encoding.UTF8.GetBytes(TrimToBytes(clean, MaxTextBytes));
         BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)text.Length); offset += 2;
         text.CopyTo(buffer, offset); offset += text.Length;
+        // A imagem vai depois do texto: as versões antigas leem só o texto.
+        if (image.attached is { } picture)
+        {
+            image.hash.CopyTo(buffer, offset); offset += RoomBlob.IdBytes;
+            BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(offset), picture.Size); offset += 4;
+            BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)picture.Width); offset += 2;
+            BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)picture.Height); offset += 2;
+        }
         return buffer[..offset];
     }
+
+    private static bool IsValidImage(ChatImage image)
+        => image.Size is > 0 and <= RoomBlob.MaxImageBytes && image.Width is > 0 and <= RoomBlob.MaxImageSide && image.Height is > 0 and <= RoomBlob.MaxImageSide;
 
     public static bool TryReadChat(ReadOnlySpan<byte> body, out RoomChatMessage message)
     {
@@ -166,7 +234,8 @@ public static class RoomPacket
         var id = BinaryPrimitives.ReadUInt64BigEndian(body);
         var author = new Guid(body.Slice(8, 16), bigEndian: true);
         var unixMs = BinaryPrimitives.ReadInt64BigEndian(body[24..]);
-        var history = (body[32] & 1) != 0;
+        var history = (body[32] & HistoryFlag) != 0;
+        var hasImage = (body[32] & ImageFlag) != 0;
         var offset = 33;
         if (author == Guid.Empty || !TryReadShortString(body, ref offset, out var name)) return false;
         if (offset + 2 > body.Length) return false;
@@ -174,12 +243,22 @@ public static class RoomPacket
         offset += 2;
         if (length == 0 || length > MaxTextBytes || offset + length > body.Length) return false;
         var text = CleanText(Encoding.UTF8.GetString(body.Slice(offset, length)));
+        offset += length;
         name = CleanName(name);
         if (text.Length == 0 || name.Length == 0) return false;
         DateTimeOffset time;
         try { time = DateTimeOffset.FromUnixTimeMilliseconds(unixMs); }
         catch (ArgumentOutOfRangeException) { return false; }
-        message = new RoomChatMessage(author, name, id, time, text, history);
+        ChatImage? image = null;
+        if (hasImage && offset + RoomBlob.IdBytes + 8 <= body.Length)
+        {
+            var picture = new ChatImage(RoomBlob.IdText(body.Slice(offset, RoomBlob.IdBytes)),
+                BinaryPrimitives.ReadInt32BigEndian(body[(offset + RoomBlob.IdBytes)..]),
+                BinaryPrimitives.ReadUInt16BigEndian(body[(offset + RoomBlob.IdBytes + 4)..]),
+                BinaryPrimitives.ReadUInt16BigEndian(body[(offset + RoomBlob.IdBytes + 6)..]));
+            if (IsValidImage(picture)) image = picture;
+        }
+        message = new RoomChatMessage(author, name, id, time, text, history, image);
         return true;
     }
 
@@ -234,6 +313,66 @@ public static class RoomPacket
         current = body.Slice(7, length);
         previous = body[(7 + length)..];
         if (previous.Length > MaxVoiceFrameBytes) previous = default;
+        return true;
+    }
+
+    // ───────────────────────── Arquivos (foto do perfil e imagens do chat) ─────────────────────────
+
+    /// <summary>Pede um arquivo: todos os pedaços (<paramref name="missing"/> vazio) ou só os que faltaram.</summary>
+    public static byte[] BlobRequest(Guid sender, string id, IReadOnlyList<int>? missing = null)
+    {
+        if (!RoomBlob.TryParseId(id, out var hash)) throw new ArgumentException("Id de arquivo inválido.", nameof(id));
+        var count = Math.Min(missing?.Count ?? 0, RoomBlob.MaxMissingPerRequest);
+        var buffer = new byte[HeaderSize + RoomBlob.IdBytes + 2 + count * 2];
+        var offset = WriteHeader(buffer, RoomPacketType.BlobRequest, sender);
+        hash.CopyTo(buffer, offset); offset += RoomBlob.IdBytes;
+        BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)count); offset += 2;
+        for (var i = 0; i < count; i++, offset += 2) BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)missing![i]);
+        return buffer;
+    }
+
+    public static bool TryReadBlobRequest(ReadOnlySpan<byte> body, out string id, out int[] missing)
+    {
+        id = string.Empty;
+        missing = [];
+        if (body.Length < RoomBlob.IdBytes + 2) return false;
+        id = RoomBlob.IdText(body[..RoomBlob.IdBytes]);
+        var count = BinaryPrimitives.ReadUInt16BigEndian(body[RoomBlob.IdBytes..]);
+        if (count > RoomBlob.MaxMissingPerRequest || RoomBlob.IdBytes + 2 + count * 2 > body.Length) return false;
+        missing = new int[count];
+        for (var i = 0; i < count; i++) missing[i] = BinaryPrimitives.ReadUInt16BigEndian(body[(RoomBlob.IdBytes + 2 + i * 2)..]);
+        return true;
+    }
+
+    /// <summary>Um pedaço de um arquivo (até <see cref="RoomBlob.ChunkBytes"/> bytes).</summary>
+    public static int WriteBlobChunk(Span<byte> destination, Guid sender, ReadOnlySpan<byte> hash, ReadOnlySpan<byte> data, int index)
+    {
+        var count = RoomBlob.ChunkCount(data.Length);
+        if (hash.Length != RoomBlob.IdBytes || index < 0 || index >= count) throw new ArgumentOutOfRangeException(nameof(index));
+        var chunk = data.Slice(index * RoomBlob.ChunkBytes, RoomBlob.ChunkLength(data.Length, index));
+        var offset = WriteHeader(destination, RoomPacketType.BlobChunk, sender);
+        hash.CopyTo(destination[offset..]); offset += RoomBlob.IdBytes;
+        BinaryPrimitives.WriteInt32BigEndian(destination[offset..], data.Length); offset += 4;
+        BinaryPrimitives.WriteUInt16BigEndian(destination[offset..], (ushort)index); offset += 2;
+        BinaryPrimitives.WriteUInt16BigEndian(destination[offset..], (ushort)count); offset += 2;
+        chunk.CopyTo(destination[offset..]);
+        return offset + chunk.Length;
+    }
+
+    public static bool TryReadBlobChunk(ReadOnlySpan<byte> body, out string id, out int size, out int index, out ReadOnlySpan<byte> data)
+    {
+        id = string.Empty;
+        size = index = 0;
+        data = default;
+        const int fixedPart = RoomBlob.IdBytes + 8;
+        if (body.Length <= fixedPart) return false;
+        size = BinaryPrimitives.ReadInt32BigEndian(body[RoomBlob.IdBytes..]);
+        index = BinaryPrimitives.ReadUInt16BigEndian(body[(RoomBlob.IdBytes + 4)..]);
+        var count = BinaryPrimitives.ReadUInt16BigEndian(body[(RoomBlob.IdBytes + 6)..]);
+        if (size is <= 0 or > RoomBlob.MaxImageBytes || count != RoomBlob.ChunkCount(size) || index >= count) return false;
+        data = body[fixedPart..];
+        if (data.Length != RoomBlob.ChunkLength(size, index)) return false;
+        id = RoomBlob.IdText(body[..RoomBlob.IdBytes]);
         return true;
     }
 
@@ -308,4 +447,37 @@ public static class RoomPacket
         offset += 1 + length;
         return true;
     }
+}
+
+/// <summary>
+/// Arquivos da sala: a foto do perfil e as imagens do chat. O id é o começo do SHA-256 do conteúdo (16 bytes, em hexa),
+/// então quem recebe confere se chegou o arquivo certo, e o mesmo arquivo nunca é baixado duas vezes.
+/// </summary>
+public static class RoomBlob
+{
+    public const int IdBytes = 16;
+    public const int ChunkBytes = 1200;
+    public const int MaxAvatarBytes = 96 * 1024;
+    public const int MaxImageBytes = 2 * 1024 * 1024;
+    public const int MaxImageSide = 8192;
+    public const int MaxMissingPerRequest = 600;
+
+    public static string IdOf(ReadOnlySpan<byte> data) => IdText(SHA256.HashData(data).AsSpan(0, IdBytes));
+
+    public static string IdText(ReadOnlySpan<byte> hash) => Convert.ToHexString(hash).ToLowerInvariant();
+
+    /// <summary>Id válido: 32 caracteres hexadecimais em minúsculas (é também o nome do arquivo no disco).</summary>
+    public static bool IsValidId(string? id) => id is { Length: IdBytes * 2 } && id.All(c => c is (>= '0' and <= '9') or (>= 'a' and <= 'f'));
+
+    public static bool TryParseId(string? id, out byte[] hash)
+    {
+        hash = [];
+        if (!IsValidId(id)) return false;
+        hash = Convert.FromHexString(id!);
+        return true;
+    }
+
+    public static int ChunkCount(int size) => size <= 0 ? 0 : (size + ChunkBytes - 1) / ChunkBytes;
+
+    public static int ChunkLength(int size, int index) => Math.Clamp(size - index * ChunkBytes, 0, ChunkBytes);
 }

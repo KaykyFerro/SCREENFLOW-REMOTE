@@ -209,6 +209,49 @@
                         </StackPanel>
                     </Border>
 
+                    <!-- O que está tocando no PC (os controles de mídia do Windows): voltar, pausar, pular e ir para um ponto -->
+                    <Border x:Name="MediaCard" Style="{StaticResource Card}" Visibility="Collapsed">
+                        <StackPanel>
+                            <DockPanel>
+                                <ComboBox x:Name="MediaSessionCombo" DockPanel.Dock="Right" MinWidth="150" MaxWidth="220" VerticalAlignment="Top" Margin="12,0,0,0"
+                                          Visibility="Collapsed" ToolTip="Mais de um app está tocando: escolha qual controlar"/>
+                                <Grid Width="60" Height="60" VerticalAlignment="Center">
+                                    <Border CornerRadius="14" Background="{DynamicResource BrandGradient}">
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE8D6;" FontSize="22" Foreground="{DynamicResource OnAccent}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <Border x:Name="MediaArt" CornerRadius="14" Visibility="Collapsed"/>
+                                </Grid>
+                                <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock x:Name="MediaApp" Style="{StaticResource Caption}" Text="Tocando agora"/>
+                                    <TextBlock x:Name="MediaTitle" FontWeight="SemiBold" FontSize="15.5" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                                    <TextBlock x:Name="MediaArtist" Style="{StaticResource Muted}" FontSize="13" TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+                            </DockPanel>
+                            <Grid x:Name="MediaSeekRow" Margin="0,14,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="MediaPosition" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="38" Text="0:00"/>
+                                <Slider x:Name="MediaSeek" Grid.Column="1" Margin="10,0" Minimum="0" Maximum="1" ToolTip="Arraste para ir a outro ponto"
+                                        PreviewMouseLeftButtonDown="MediaSeek_PreviewMouseLeftButtonDown" PreviewMouseLeftButtonUp="MediaSeek_PreviewMouseLeftButtonUp"
+                                        ValueChanged="MediaSeek_ValueChanged"/>
+                                <TextBlock x:Name="MediaDuration" Grid.Column="2" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="38"
+                                           TextAlignment="Right" Text="0:00"/>
+                            </Grid>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
+                                <Button x:Name="MediaPrevious" Style="{StaticResource IconButton}" Content="&#xE892;" ToolTip="Voltar" Click="MediaPrevious_Click"/>
+                                <Button x:Name="MediaPlayPause" Style="{StaticResource PrimaryButton}" Width="52" Height="44" Padding="0" Margin="16,0"
+                                        HorizontalContentAlignment="Center" ToolTip="Pausar" Click="MediaPlayPause_Click">
+                                    <TextBlock x:Name="MediaPlayGlyph" Style="{StaticResource Icon}" Text="&#xE769;" FontSize="16"/>
+                                </Button>
+                                <Button x:Name="MediaNext" Style="{StaticResource IconButton}" Content="&#xE893;" ToolTip="Pular" Click="MediaNext_Click"/>
+                            </StackPanel>
+                        </StackPanel>
+                    </Border>
+
                     <Border x:Name="AudioCard" Style="{StaticResource Card}">
                         <StackPanel>
                             <DockPanel>
