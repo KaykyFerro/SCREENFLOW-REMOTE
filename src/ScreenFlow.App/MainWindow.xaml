@@ -1,6 +1,7 @@
 <Window x:Class="ScreenFlow.App.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:ScreenFlow.App.Controls"
         Title="ScreenFlow" Width="1320" Height="860" MinWidth="1000" MinHeight="660"
         WindowStartupLocation="CenterScreen" Icon="Assets/screenflow.ico"
         Background="{DynamicResource Background}" Foreground="{DynamicResource Text}"
@@ -36,15 +37,13 @@
                     </StackPanel>
                 </StackPanel>
 
-                <!-- Este computador -->
+                <!-- Você: foto, nome e o Radmin (clique para trocar o nome e a foto) -->
                 <Border x:Name="MachineCard" DockPanel.Dock="Bottom" Background="{DynamicResource SurfaceSunken}" BorderBrush="{DynamicResource Border}" BorderThickness="1"
-                        CornerRadius="14" Padding="12">
+                        CornerRadius="14" Padding="12" Cursor="Hand" ToolTip="Trocar seu nome e sua foto" MouseLeftButtonUp="MachineCard_MouseLeftButtonUp">
                     <DockPanel>
-                        <Border Style="{StaticResource IconTile}" Width="38" Height="38" CornerRadius="10" TextElement.FontSize="16" VerticalAlignment="Center">
-                            <TextBlock Style="{StaticResource Icon}" Text="&#xE7F4;"/>
-                        </Border>
+                        <controls:AvatarView x:Name="ProfileAvatar" Width="38" Height="38" TextElement.FontSize="15" VerticalAlignment="Center"/>
                         <StackPanel x:Name="MachinePanel" Margin="12,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="Este computador" FontWeight="SemiBold" FontSize="13"/>
+                            <TextBlock x:Name="ProfileName" FontWeight="SemiBold" FontSize="13" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
                             <TextBlock x:Name="MachineText" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" Margin="0,1,0,0"/>
                             <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
                                 <Ellipse x:Name="RadminDot" Width="7" Height="7" Fill="{DynamicResource TextSubtle}" VerticalAlignment="Center"/>
@@ -91,9 +90,7 @@
                                         <DockPanel>
                                             <Grid Width="24" Height="24">
                                                 <Ellipse x:Name="Ring" Margin="-3" Stroke="{DynamicResource Success}" StrokeThickness="2" Opacity="0"/>
-                                                <Ellipse Fill="{Binding Avatar.Background}"/>
-                                                <TextBlock Text="{Binding Initial}" Foreground="{Binding Avatar.Foreground}" FontSize="11" FontWeight="Bold"
-                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                <controls:AvatarView Colors="{Binding Avatar}" Initial="{Binding Initial}" Photo="{Binding Photo}" TextElement.FontSize="11"/>
                                             </Grid>
                                             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
                                                 <Grid Width="16" Height="16" Margin="4,0,0,0" ToolTip="Microfone desligado"

@@ -52,7 +52,7 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         VersionText.Text = $"Versão {AppInfo.DisplayVersion}";
-        MachineText.Text = $"{AppServices.Settings.Current.DeviceName} · {AppServices.OsName}";
+        MachineText.Text = AppServices.OsName;
         foreach (RadioButton item in Nav.Children) _navLabels[item] = (string)item.Content;
         UpdateThemeButton();
         ThemeManager.Changed += UpdateThemeButton;
@@ -67,6 +67,8 @@ public partial class MainWindow : Window
         room.UnreadChanged += UpdateChatBadge;
         room.MessageArrived += OnRoomMessage;
         room.PersonWentLive += OnPersonWentLive;
+        room.ProfileChanged += UpdateProfile;
+        UpdateProfile();
         room.IsChatInFront = () => Host.Content is Pages.ChatPage && IsVisible && IsActive && WindowState != WindowState.Minimized;
         Activated += (_, _) =>
         {
@@ -120,6 +122,9 @@ public partial class MainWindow : Window
 
     /// <summary>Adaptador do Radmin com IP 26.x (null sem Radmin). Atualizado quando a rede muda.</summary>
     public NetworkAdapterInfo? Radmin => _radmin;
+
+    /// <summary>O Radmin VPN está instalado (mesmo que sem rede ativa).</summary>
+    public bool RadminInstalled => _radminInstalled;
 
     /// <summary>A rede mudou (Radmin conectou ou caiu).</summary>
     public event Action? NetworkStatusChanged;
@@ -412,7 +417,7 @@ public partial class MainWindow : Window
             var (radmin, installed) = await Task.Run(() =>
             {
                 var found = AppServices.FindRadmin();
-                return (found, found is not null || AppServices.DemoMode || RadminNetwork.IsRadminInstalled());
+                return (found, found is not null || RadminSetup.IsInstalled());
             });
             _radmin = radmin;
             _radminInstalled = installed;
@@ -462,6 +467,7 @@ public partial class MainWindow : Window
         SidebarColumn.Width = new GridLength(_compact ? 86 : 260);
         BrandText.Visibility = MachinePanel.Visibility = _compact ? Visibility.Collapsed : Visibility.Visible;
         MachineCard.Padding = new Thickness(_compact ? 6 : 12); // só o ícone cabe no menu recolhido
+        UpdateProfile();
         foreach (var (item, label) in _navLabels)
         {
             item.Content = _compact ? null : label;
@@ -741,6 +747,20 @@ public partial class MainWindow : Window
         ChatButtonBox.Visibility = _compact ? Visibility.Collapsed : Visibility.Visible;
         UpdateTray();
     }
+
+    /// <summary>A sua foto e o seu nome no canto do menu.</summary>
+    private void UpdateProfile()
+    {
+        var room = AppServices.Room;
+        var name = AppServices.Settings.Current.DeviceName;
+        ProfileAvatar.Colors = AvatarColors.For(room.SelfId);
+        ProfileAvatar.Initial = AvatarColors.Initial(name);
+        ProfileAvatar.Photo = room.SelfPhoto;
+        ProfileName.Text = name;
+        MachineCard.ToolTip = _compact ? $"{name} · trocar seu nome e sua foto" : "Trocar seu nome e sua foto";
+    }
+
+    private void MachineCard_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e) => Navigate(SettingsPage);
 
     private void UpdateChatBadge()
     {

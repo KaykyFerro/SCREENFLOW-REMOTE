@@ -3,6 +3,7 @@ using Microsoft.Win32;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
+using ScreenFlow.Core.Room;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Capture;
 using ScreenFlow.Infrastructure.Hardware;
@@ -20,6 +21,9 @@ public static class AppServices
     public static SettingsStore Settings { get; private set; } = null!;
     public static UpdateService Updates { get; } = new();
 
+    /// <summary>Instalar o Radmin VPN pelo app (o andamento aparece na Visão geral e na Transmissão).</summary>
+    public static RadminSetup RadminSetup { get; } = new();
+
     private static RoomService? _room;
 
     /// <summary>Sala da rede: quem está com o ScreenFlow aberto na rede, a voz e o chat. Criada na thread da interface.</summary>
@@ -27,6 +31,13 @@ public static class AppServices
 
     /// <summary>Modo das capturas de tela do CI: telas com dados de exemplo, sem tocar em rede nem em hardware.</summary>
     public static bool DemoMode { get; set; }
+
+    private static RoomBlobStore? _blobs;
+
+    /// <summary>Fotos do perfil e imagens do chat guardadas neste PC (as do modo de exemplo ficam numa pasta temporária).</summary>
+    public static RoomBlobStore Blobs => _blobs ??= new RoomBlobStore(DemoMode
+        ? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ScreenFlow-exemplo", "imagens")
+        : System.IO.Path.Combine(AppInfo.DataDirectory, "imagens"));
 
     public static void Initialize(string? settingsPath = null) => Settings = settingsPath is null ? new SettingsStore() : new SettingsStore(settingsPath);
 

@@ -10,7 +10,10 @@ public enum AppTheme { Dark, Light }
 public sealed class AppSettings
 {
     public AppTheme Theme { get; set; } = AppTheme.Dark;
+    /// <summary>Seu nome: aparece no chat, na voz e para quem assiste (no começo é o nome do PC).</summary>
     public string DeviceName { get; set; } = Environment.MachineName;
+    /// <summary>A sua foto do perfil (id do arquivo guardado na pasta de imagens). Null: aparece a inicial do nome.</summary>
+    public string? AvatarId { get; set; }
 
     // Rede
     public int MediaPort { get; set; } = AppInfo.DefaultMediaPort;
@@ -125,7 +128,10 @@ public sealed class AppSettings
         UploadMbps = Math.Clamp(UploadMbps, 0, 100_000);
         Volume = Math.Clamp(Volume, 0, 1);
         if (!Security.SessionCrypto.IsValidPin(Pin)) Pin = null;
-        if (string.IsNullOrWhiteSpace(DeviceName)) DeviceName = Environment.MachineName;
+        DeviceName = (DeviceName ?? string.Empty).Trim();
+        if (DeviceName.Length > Room.RoomPacket.MaxNameLength) DeviceName = DeviceName[..Room.RoomPacket.MaxNameLength].TrimEnd();
+        if (DeviceName.Length == 0) DeviceName = Environment.MachineName;
+        if (!Room.RoomBlob.IsValidId(AvatarId)) AvatarId = null;
         RecentHosts ??= [];
         if (InstanceId is null || !Guid.TryParseExact(InstanceId, "N", out _)) InstanceId = Guid.NewGuid().ToString("N");
         if (string.IsNullOrWhiteSpace(MicrophoneId)) MicrophoneId = null;

@@ -72,6 +72,7 @@ public partial class SettingsPage : UserControl, IShellPage
         UploadBox.Text = s.UploadMbps > 0 ? s.UploadMbps.ToString("0", CultureInfo.CurrentCulture) : string.Empty;
         MaxViewersBox.Text = s.MaxViewers.ToString();
         NameBox.Text = s.DeviceName;
+        UpdateProfilePreview();
         PinBox.Text = s.Pin ?? string.Empty;
         ApproveToggle.IsChecked = s.ApproveEachViewer;
         TrayToggle.IsChecked = s.MinimizeToTray;
@@ -138,7 +139,8 @@ public partial class SettingsPage : UserControl, IShellPage
         s.DiscoveryPort = int.TryParse(DiscoveryPortBox.Text, out var dp) ? dp : s.DiscoveryPort;
         s.UploadMbps = TryNumber(UploadBox.Text, out var up) ? up : 0;
         s.MaxViewers = int.TryParse(MaxViewersBox.Text, out var mv) ? mv : s.MaxViewers;
-        s.DeviceName = NameBox.Text.Trim();
+        var name = NameBox.Text.Trim();
+        s.DeviceName = name.Length == 0 ? Environment.MachineName : name;
         s.Pin = pinText.Length == 0 ? null : pinText;
         s.ApproveEachViewer = ApproveToggle.IsChecked == true;
         s.MinimizeToTray = TrayToggle.IsChecked == true;
@@ -159,7 +161,8 @@ public partial class SettingsPage : UserControl, IShellPage
         if (separateChanged) _shell.TransmitPage.OnAudioSettingsChanged();
         if (theme != ThemeManager.Current) ThemeManager.Apply(theme);
         SavedText.Text = $"Salvo às {DateTime.Now:HH:mm}";
-        _shell.Toast(_shell.IsTransmitting ? "Configurações salvas. As mudanças de qualidade valem na próxima transmissão." : "Configurações salvas.", ToastKind.Success);
+        // Com a transmissão no ar, a qualidade nova vale na hora (a tela da Transmissão avisa); o resto já está salvo.
+        if (!_shell.IsTransmitting || !_shell.TransmitPage.ApplySettingsQualityLive()) _shell.Toast("Configurações salvas.", ToastKind.Success);
         _ = LoadAsync();
 
         if (portsBefore != (s.MediaPort, s.ControlPort, s.DiscoveryPort))
@@ -172,6 +175,52 @@ public partial class SettingsPage : UserControl, IShellPage
 
     private static bool TryNumber(string text, out double value)
         => double.TryParse(text.Trim().Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out value) && value > 0;
+
+    // ───────────────────────── Seu perfil ─────────────────────────
+
+    private void UpdateProfilePreview()
+    {
+        var room = AppServices.Room;
+        var name = NameBox.Text.Trim();
+        ProfilePhoto.Colors = AvatarColors.For(room.SelfId);
+        ProfilePhoto.Initial = AvatarColors.Initial(name.Length == 0 ? Settings.DeviceName : name);
+        ProfilePhoto.Photo = room.SelfPhoto;
+        var hasPhoto = Settings.AvatarId is not null;
+        ChoosePhotoLabel.Text = hasPhoto ? "Trocar a foto" : "Escolher foto";
+        RemovePhotoButton.Visibility = hasPhoto ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void NameBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (IsInitialized) UpdateProfilePreview();
+    }
+
+    /// <summary>A foto vale na hora (sem precisar salvar): quem está na rede baixa a nova em alguns segundos.</summary>
+    private void ChoosePhoto_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog { Title = "Escolha a sua foto", Filter = ImageTools.FileFilter };
+        if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
+        try
+        {
+            var image = ImageTools.LoadFile(dialog.FileName, ImageTools.AvatarSide * 3, limitShortSide: true);
+            AppServices.Room.SetPhoto(ImageTools.MakeAvatar(image));
+            UpdateProfilePreview();
+            _shell.Toast("Foto trocada. Quem está na rede vê a nova em alguns segundos.", ToastKind.Success);
+        }
+        catch (System.IO.InvalidDataException exception) { _shell.Toast(exception.Message, ToastKind.Warning); }
+        catch (Exception exception)
+        {
+            Log.Warn($"Foto do perfil: {exception}");
+            _shell.Toast("Não deu para usar essa imagem como foto.", ToastKind.Warning);
+        }
+    }
+
+    private void RemovePhoto_Click(object sender, RoutedEventArgs e)
+    {
+        AppServices.Room.SetPhoto(null);
+        UpdateProfilePreview();
+        _shell.Toast("Foto tirada. Agora aparece a inicial do seu nome.", ToastKind.Success);
+    }
 
     // ───────────────────────── Automático ─────────────────────────
 

@@ -75,7 +75,9 @@ public partial class TransmitPage : UserControl, IShellPage
         shell.NetworkStatusChanged += () =>
         {
             if (_session is null && _loaded) RefreshNetwork();
+            else UpdateRadminPanel();
         };
+        AppServices.RadminSetup.Changed += UpdateRadminPanel;
     }
 
     public bool IsRunning => _session is not null;
@@ -232,21 +234,42 @@ public partial class TransmitPage : UserControl, IShellPage
     private void QualityChanged()
     {
         UpdateProfileHint();
-        ApplyLiveQuality();
+        if (!_syncingQuality) ApplyLiveQuality();
+    }
+
+    private bool _syncingQuality;
+
+    /// <summary>
+    /// A qualidade foi salva nas Configurações: com a transmissão no ar, vale na hora (uma troca só). true quando mudou
+    /// (e o aviso já apareceu).
+    /// </summary>
+    public bool ApplySettingsQualityLive()
+    {
+        if (_session is not { HasVideo: true }) return false;
+        _syncingQuality = true;
+        try
+        {
+            QualityCombo.SelectValue(Resolution.FromLabel(Settings.Resolution));
+            FpsCombo.SelectValue(Settings.Fps, f => f);
+            CameraQualityCombo.SelectValue((Resolution.FromLabel(Settings.CameraResolution), Settings.CameraFps));
+            FixedQualityToggle.IsChecked = !Settings.AdaptiveQuality;
+        }
+        finally { _syncingQuality = false; }
+        return ApplyLiveQuality();
     }
 
     /// <summary>
     /// Qualidade trocada com a transmissão no ar (resolução, FPS ou qualidade fixa): vale na hora para quem está
     /// assistindo e fica salva para a próxima vez.
     /// </summary>
-    private void ApplyLiveQuality()
+    private bool ApplyLiveQuality()
     {
-        if (!IsInitialized || _session is not { HasVideo: true } session) return;
+        if (!IsInitialized || _session is not { HasVideo: true } session) return false;
         Resolution? resolution;
         int fps;
         if (session.Mode == StreamMode.Camera)
         {
-            if (CameraQualityCombo.SelectedItem is not Choice<(Resolution Resolution, int Fps)> camera) return;
+            if (CameraQualityCombo.SelectedItem is not Choice<(Resolution Resolution, int Fps)> camera) return false;
             (resolution, fps) = camera.Value;
         }
         else
@@ -254,9 +277,9 @@ public partial class TransmitPage : UserControl, IShellPage
             resolution = QualityCombo.Value<Resolution>();
             fps = FpsCombo.SelectedItem is Choice<int> f ? f.Value : 0;
         }
-        if (resolution is null || fps <= 0) return;
+        if (resolution is null || fps <= 0) return false;
         var adaptive = FixedQualityToggle.IsChecked != true;
-        if (!session.ChangeQuality(resolution, fps, adaptive)) return;
+        if (!session.ChangeQuality(resolution, fps, adaptive)) return false;
 
         if (session.Mode == StreamMode.Camera)
         {
@@ -273,6 +296,7 @@ public partial class TransmitPage : UserControl, IShellPage
         _shell.Toast(adaptive
             ? $"Qualidade agora: {resolution.Label} a {fps} FPS. Quem está assistindo já recebe assim."
             : $"Qualidade fixa em {resolution.Label} a {fps} FPS. Quem está assistindo já recebe assim.", ToastKind.Success);
+        return true;
     }
 
     /// <summary>
@@ -342,6 +366,26 @@ public partial class TransmitPage : UserControl, IShellPage
         AdapterCombo.SelectValue(adapters.FirstOrDefault(a => a.Address.Equals(previous?.Address)) ?? radmin ?? adapters.FirstOrDefault()!);
         RadminMissing.Visibility = radmin is null ? Visibility.Visible : Visibility.Collapsed;
         UpdateIp();
+        UpdateRadminPanel();
+    }
+
+    /// <summary>Sem o Radmin: instalar pelo app (com o andamento aqui) ou, já instalado, abrir para entrar numa rede.</summary>
+    private void UpdateRadminPanel()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(UpdateRadminPanel);
+            return;
+        }
+        var setup = AppServices.RadminSetup;
+        var installed = _shell.RadminInstalled;
+        RadminMissingText.Text = setup.Busy || (setup.Status is not null && !installed) ? setup.Status
+            : installed ? "O Radmin VPN está instalado, mas sem rede ativa. Abra o Radmin, entre na mesma rede que os outros e clique em Tentar de novo."
+            : "O Radmin VPN não está instalado. O ScreenFlow baixa do site oficial e instala para você (o Windows vai pedir permissão).";
+        RadminProgress.Visibility = setup.Progress is null ? Visibility.Collapsed : Visibility.Visible;
+        RadminProgress.Value = setup.Progress ?? 0;
+        RadminActionButton.Content = installed && !setup.Busy ? "Abrir o Radmin VPN" : "Instalar o Radmin VPN";
+        RadminActionButton.IsEnabled = !setup.Busy;
     }
 
     private void UpdateIp()
@@ -360,7 +404,15 @@ public partial class TransmitPage : UserControl, IShellPage
 
     private void Adapter_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateIp();
     private void RefreshNetwork_Click(object sender, RoutedEventArgs e) => RefreshNetwork();
-    private void InstallRadmin_Click(object sender, RoutedEventArgs e) => MainWindow.OpenUrl(AppInfo.RadminDownloadUrl);
+    private async void RadminAction_Click(object sender, RoutedEventArgs e)
+    {
+        if (_shell.RadminInstalled)
+        {
+            if (!RadminSetup.OpenApp()) _shell.Toast("Abra o Radmin VPN pelo menu Iniciar e entre na mesma rede que os outros.", ToastKind.Info);
+            return;
+        }
+        if (await AppServices.RadminSetup.InstallAsync(_shell)) RefreshNetwork();
+    }
 
     private void RefreshSources()
     {
