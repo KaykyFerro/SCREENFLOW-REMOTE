@@ -4,7 +4,7 @@
 
 | Projeto | Alvo | Conteúdo |
 |---|---|---|
-| `ScreenFlow.Core` | `net10.0` (testável em qualquer SO) | Protocolo (cabeçalho UDP, FEC, remontagem, NACK, mensagens de controle), protocolo e estado da sala da rede (presença, chat, histórico, arquivos e downloads), arquivos da sala guardados no PC, criptografia, perfis de qualidade, controle adaptativo, configuração automática, regras do som do PC por app, nomes dos apps de mídia, link do instalador do Radmin, configurações, leitura de releases, log |
+| `ScreenFlow.Core` | `net10.0` (testável em qualquer SO) | Protocolo (cabeçalho UDP, FEC, remontagem, NACK, mensagens de controle, regras dos controles de quem assiste), protocolo e estado da sala da rede (presença, chat, histórico, arquivos e downloads), arquivos da sala guardados no PC, criptografia, perfis de qualidade, controle adaptativo, configuração automática, regras do som do PC por app, nomes dos apps de mídia, link do instalador do Radmin, configurações, leitura de releases, log |
 | `ScreenFlow.Infrastructure` | `net10.0-windows10.0.26100.0` | Captura de tela (WGC/DXGI) e de câmera (Windows.Media.Capture), conversão de cor na GPU, encoder/decoder FFmpeg, desenho do vídeo na GPU (D3D11), áudio WASAPI/Opus (com o loopback por processo), controles de mídia do Windows, sala da rede (chat, voz e arquivos), sessões host/viewer, Radmin (e o instalador dele), firewall, descoberta, hardware, atualização |
 | `ScreenFlow.App` | WPF, gera `ScreenFlow.exe` | Tema escuro/claro, menu lateral com o painel da voz e o seu perfil, telas (Visão geral, Transmissão, Assistir, Chat da rede, Monitoramento, Configurações, Atualizações), fotos e imagens (abrir, virar, diminuir), sininho de avisos, ícone na bandeja, player, telemetria, `--diagnostico`, `--autoteste`, `--capturas` |
 | `ScreenFlow.Tests` | xUnit | Testes do Core |
@@ -76,6 +76,31 @@ A escolha dos apps vale na hora, durante a transmissão. Os apps são identifica
 
 Transmitindo uma janela, ou a festa de um app só, a tela Transmissão mostra a música ou o vídeo desse app pelos controles de mídia do Windows (`GlobalSystemMediaTransportControlsSessionManager`, os mesmos das teclas de mídia): capa, título, artista, tempo e os botões voltar, pausar e pular, além da barra para mudar o tempo quando o app deixa. O app de mídia é ligado ao executável da janela ou da festa pelo `MediaApps` (no Core, com testes: "Spotify.exe", "Chrome", ids da Microsoft Store e os ids em hash do Firefox). Sem um app ligado, aparece o que as teclas de mídia controlariam. A lista é relida quando um app avisa que mudou e a cada 2 segundos; entre os avisos o tempo anda com o relógio.
 
+## Controles de quem assiste (1.2.0)
+
+Pelo player, quem assiste troca a qualidade, controla a música ou o vídeo e tira apps do som. Tudo vale para a transmissão inteira, como se quem transmite tivesse feito, e a tela Transmissão mostra um aviso com o nome de quem pediu.
+
+- **Quem entende**: o viewer anuncia `remote-control` no `hello` e o host anuncia `remote-control` no `welcome`. Só entre os dois as mensagens novas passam; um viewer ou um host 1.1.x continua conectando como antes e não vê nada disso.
+- **Host → viewer**: `remote` (o que dá para fazer, as resoluções e os FPS oferecidos, ou os pares da câmera, e a qualidade de agora), `media` (app, título, artista, tocando ou não, tempo, duração, o que o app deixa fazer e a capa num JPEG de até 160 px) e `apps` (os apps com som no PC, sem ícones, relidos a cada 6 s enquanto há alguém com os controles).
+- **Viewer → host**: `setquality`, `mediacmd` (voltar, pausar, pular, ir para um ponto) e `setapps` (a lista inteira de apps que ficam fora).
+- **O host confere tudo**: o `RemoteControl` (no Core, com testes) só aceita uma qualidade da lista oferecida, um comando que o app deixa e um ponto dentro da música, e cada pessoa tem um `RequestLimiter` (8 pedidos seguidos e depois 2 por segundo). O que passa é aplicado na tela Transmissão pelos mesmos caminhos dos botões de quem transmite: `ChangeQuality`, os controles de mídia do Windows e a lista de apps tirados. Quem assiste só mexe nos apps da lista publicada; um app que quem transmite tirou e não está na lista continua fora.
+- **Privacidade**: a música só vai para quem assiste se o som dela vai junto. Um app tirado do som, ou fora da festa de um app só, não aparece e não é controlado.
+- **Pouco tráfego**: a mídia é mandada de novo só quando muda a música ou o estado, quando a posição foge do relógio por mais de 2 s (alguém mudou o ponto) ou a cada 15 s; entre uma e outra o player anda o tempo sozinho. Os textos são cortados em 160 caracteres e a capa em 64 KB. Quem entra recebe o estado de agora, com o tempo já adiantado.
+- **Desligar**: com **Quem assiste pode mexer nos controles** desligado, o host manda `remote` sem nada liberado, o player esconde os controles e todo pedido é recusado.
+- **Versões futuras**: um tipo de mensagem desconhecido vira `UnknownControlMessage` e é ignorado, em vez de derrubar a conexão. Um tipo conhecido com um campo errado continua sendo erro.
+
+## Placa de vídeo (1.2.0)
+
+- As placas vêm do DXGI, cada adaptador lido à parte (um adaptador virtual que falha não esconde os outros), e da lista de dispositivos de vídeo do Windows (SetupAPI e cfgmgr32). Uma placa que o DXGI não mostra porque o Windows parou o driver (código 43), está sem driver (28), com o driver que não carregou (31 e 39), desativada (22) ou esperando reiniciar (14) aparece mesmo assim, com o motivo. Sem o driver do fabricante, o Windows usa o "Vídeo Básico da Microsoft" (o serviço `BasicDisplay`) e não sabe o modelo: a placa aparece como "Placa NVIDIA sem driver", por exemplo, com o motivo.
+- A versão do driver vem do DXGI ou do registro da classe de vídeo; na NVIDIA ela é mostrada como no site ("31.0.15.5222" vira 552.22).
+- A placa principal (`GpuInfo.Main`) é a de verdade com mais memória: as virtuais (Parsec, monitores virtuais, área de trabalho remota) e o vídeo básico ficam por último, e uma placa com problema continua sendo a principal (para o motivo aparecer). Uma NVIDIA ou AMD com problema que não informa a memória conta como uma dedicada de 4 GB, para não perder para a integrada.
+- Só os encoders dos fabricantes presentes são testados (uma placa com problema também conta, porque o encoder dela pode funcionar mesmo assim). Enquanto cada um abre, o `FFmpegLog` guarda os erros e avisos do FFmpeg (no máximo 24 linhas, fora do caminho do vídeo), e o `GpuInfo.EncoderHint` transforma isso no motivo: driver da NVIDIA antigo para o NVENC (com a versão mínima), NVENC ocupado por outro app, driver que não carregou o NVENC, AMF ou Quick Sync.
+- O cartão da Visão geral mostra a placa logo (sem esperar os encoders) e depois o encoder ou o motivo. O Diagnóstico lista cada placa com o driver, qual é a principal, o problema e a mensagem de cada encoder que não abriu.
+
+## Desempenho da sessão (1.2.0)
+
+Enquanto uma transmissão ou um player está no ar, o `SessionPerformance` pede ao Windows o timer de 1 ms (`timeBeginPeriod`), tira o processo do modo de eficiência do Windows 11 (EcoQoS, que com a janela minimizada ou na bandeja atrasava o ritmo de envio e ignorava o timer de 1 ms), sobe a prioridade do processo para acima do normal e põe o coletor de lixo no modo de baixa latência. Tudo volta ao normal quando a última sessão acaba.
+
 ## Sala da rede (UDP 47802)
 
 Todo mundo com o ScreenFlow 1.1 aberto na mesma rede do Radmin se vê, conversa no chat e pode entrar na voz. Não há servidor: tudo passa pela porta de descoberta, que o instalador já libera.
@@ -101,7 +126,7 @@ Mensagens JSON com 4 bytes de tamanho.
 2. Host → `challenge` (chave pública, nonce, se pede PIN)
 3. Viewer → `auth` (HMAC derivado do segredo ECDH + PIN)
 4. Host → `pending` (se aprovação manual) → `welcome` (salt, porta de mídia, perfil) ou `rejected`
-5. Depois: `ping`/`pong` (relógio e RTT), `stats` (perda, RTT, banda, FPS decodificado, latência), `nack`, `keyframe`, `config`, `bwtest`/`bwresult`, `bye`.
+5. Depois: `ping`/`pong` (relógio e RTT), `stats` (perda, RTT, banda, FPS decodificado, latência), `nack`, `keyframe`, `config`, `bwtest`/`bwresult`, `bye`; e, entre os que anunciam `remote-control`, `remote`, `media`, `apps`, `setquality`, `mediacmd` e `setapps`.
 
 ## Qualidade adaptativa e vários viewers
 

@@ -14,6 +14,28 @@ public static partial class DemoData
     /// <summary>Uma webcam de exemplo (640×360) para o quadrinho da câmera.</summary>
     public static BitmapSource CameraFrame() => Render(640, 360, DrawWebcam);
 
+    /// <summary>Uma capa de disco de exemplo, em JPEG base64, como chega de quem transmite.</summary>
+    public static string AlbumCover()
+    {
+        var encoder = new JpegBitmapEncoder { QualityLevel = 85 };
+        encoder.Frames.Add(BitmapFrame.Create(new FormatConvertedBitmap(Render(160, 160, DrawCover), PixelFormats.Bgr24, null, 0)));
+        using var output = new System.IO.MemoryStream();
+        encoder.Save(output);
+        return Convert.ToBase64String(output.ToArray());
+    }
+
+    private static void DrawCover(DrawingContext dc, double w, double h)
+    {
+        dc.DrawRectangle(Gradient(135, ("#FF4D8D", 0), ("#7B5CFF", 0.55), ("#1FD1F9", 1)), null, new Rect(0, 0, w, h));
+        dc.DrawEllipse(Solid("#FFE7A3"), null, new Point(w * 0.27, h * 0.27), w * 0.11, w * 0.11);
+        var disc = new Point(w * 0.62, h * 0.62);
+        dc.DrawEllipse(Solid("#F0101326"), null, disc, w * 0.34, w * 0.34);
+        foreach (var ring in new[] { 0.29, 0.23, 0.17 })
+            dc.DrawEllipse(null, new Pen(Solid("#2EFFFFFF"), 1.2), disc, w * ring, w * ring);
+        dc.DrawEllipse(Solid("#FF4D8D"), null, disc, w * 0.08, w * 0.08);
+        dc.DrawEllipse(Solid("#101326"), null, disc, w * 0.018, w * 0.018);
+    }
+
     private static BitmapSource Render(int width, int height, Action<DrawingContext, double, double> draw)
     {
         var visual = new DrawingVisual();

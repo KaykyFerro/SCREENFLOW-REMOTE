@@ -12,6 +12,7 @@ using ScreenFlow.App.Services;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
+using ScreenFlow.Core.Protocol;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Capture;
 using ScreenFlow.Infrastructure.Media;
@@ -45,6 +46,12 @@ public partial class TransmitPage : UserControl, IShellPage
     private bool _fillingMediaSessions;
     private string? _mediaArtKey;
     private string? _liveWindowExe;
+    private readonly DispatcherTimer _remoteAppsTimer = new() { Interval = TimeSpan.FromSeconds(6) };
+    private MediaStateMessage? _publishedMedia;
+    private long _publishedMediaAt;
+    private byte[]? _coverSource;
+    private string? _cover;
+    private int _remoteAppsVersion;
 
     public TransmitPage(MainWindow shell)
     {
@@ -64,6 +71,10 @@ public partial class TransmitPage : UserControl, IShellPage
         PartyAppCombo.SelectionChanged += (_, _) => PartyApp_Changed();
         MediaSessionCombo.SelectionChanged += (_, _) => MediaSession_Changed();
         _mediaTimer.Tick += (_, _) => UpdateMedia();
+        _remoteAppsTimer.Tick += (_, _) =>
+        {
+            if (_session is { HasRemoteViewers: true }) _ = PublishAudioAppsAsync();
+        };
         AudioToggle.Checked += (_, _) => UpdateAudioCard();
         AudioToggle.Unchecked += (_, _) => UpdateAudioCard();
         Spectrum.Source = () => _session?.AudioMeter;
@@ -123,6 +134,7 @@ public partial class TransmitPage : UserControl, IShellPage
         FixedQualityToggle.IsChecked = !Settings.AdaptiveQuality;
         CameraWithScreenToggle.IsChecked = Settings.CameraWithScreen;
         ApproveToggle.IsChecked = Settings.ApproveEachViewer;
+        ViewerControlsToggle.IsChecked = Settings.ViewerControls;
         PinBox.Text = Settings.Pin ?? string.Empty;
         (Settings.Mode switch
         {
@@ -262,7 +274,7 @@ public partial class TransmitPage : UserControl, IShellPage
     /// Qualidade trocada com a transmissão no ar (resolução, FPS ou qualidade fixa): vale na hora para quem está
     /// assistindo e fica salva para a próxima vez.
     /// </summary>
-    private bool ApplyLiveQuality()
+    private bool ApplyLiveQuality(string? requestedBy = null)
     {
         if (!IsInitialized || _session is not { HasVideo: true } session) return false;
         Resolution? resolution;
@@ -293,9 +305,15 @@ public partial class TransmitPage : UserControl, IShellPage
         }
         Settings.AdaptiveQuality = adaptive;
         AppServices.Settings.Save();
-        _shell.Toast(adaptive
-            ? $"Qualidade agora: {resolution.Label} a {fps} FPS. Quem está assistindo já recebe assim."
-            : $"Qualidade fixa em {resolution.Label} a {fps} FPS. Quem está assistindo já recebe assim.", ToastKind.Success);
+        PublishRemoteState();
+        if (requestedBy is not null)
+            _shell.Toast(adaptive
+                ? $"{requestedBy} trocou a qualidade para {resolution.Label} a {fps} FPS. Vale para todo mundo que está assistindo."
+                : $"{requestedBy} deixou a qualidade fixa em {resolution.Label} a {fps} FPS. Vale para todo mundo que está assistindo.", ToastKind.Info);
+        else
+            _shell.Toast(adaptive
+                ? $"Qualidade agora: {resolution.Label} a {fps} FPS. Quem está assistindo já recebe assim."
+                : $"Qualidade fixa em {resolution.Label} a {fps} FPS. Quem está assistindo já recebe assim.", ToastKind.Success);
         return true;
     }
 
@@ -593,10 +611,14 @@ public partial class TransmitPage : UserControl, IShellPage
             session.ViewersChanged += () => Dispatcher.BeginInvoke(RefreshViewers);
             session.StatisticsUpdated += stats => Dispatcher.BeginInvoke(() => ShowStatistics(stats));
             session.BandwidthMeasured += (name, mbps) => Dispatcher.BeginInvoke(() => OnBandwidthMeasured(name, mbps));
+            session.RemoteRequested += request => Dispatcher.BeginInvoke(() => OnRemoteRequested(request));
             await Task.Run(session.Start);
             _liveAddress = adapter.Address;
             _liveWindowExe = target.Kind == CaptureKind.Window ? WindowDiscovery.ProcessExe(target.Handle) : null;
             _session = session;
+            PublishRemoteState();
+            _ = PublishAudioAppsAsync();
+            _remoteAppsTimer.Start();
             _ = StartMediaAsync();
 
             LockWhileLive(true);
@@ -640,6 +662,10 @@ public partial class TransmitPage : UserControl, IShellPage
         if (session is not null) await session.DisposeAsync();
         if (!Dispatcher.CheckAccess()) return;
         StopMedia();
+        _remoteAppsTimer.Stop();
+        _publishedMedia = null;
+        _coverSource = null;
+        _cover = null;
         _approvals.Clear();
         ApprovalCard.Visibility = Visibility.Collapsed;
         _viewerRows.Clear();
@@ -705,11 +731,13 @@ public partial class TransmitPage : UserControl, IShellPage
         if (media.Pick(SharedAppExe(), _mediaPinned ? _mediaId : null) is not { } info)
         {
             MediaCard.Visibility = Visibility.Collapsed;
+            PublishMedia(null);
             return;
         }
         _mediaId = info.Id;
         FillMediaSessions(sessions, info.Id);
         ShowMedia(info, DateTimeOffset.UtcNow);
+        PublishMedia(info);
     }
 
     private void ShowMedia(MediaSessionInfo info, DateTimeOffset now)
@@ -843,12 +871,19 @@ public partial class TransmitPage : UserControl, IShellPage
         var audioOnly = _session.Mode == StreamMode.AudioOnly;
         var current = _session.Viewers.Where(v => v.State == ViewerState.Streaming).ToList();
         foreach (var gone in _viewerRows.Where(r => current.All(v => v.Id != r.Id)).ToList()) _viewerRows.Remove(gone);
+        var joined = false;
         foreach (var info in current)
         {
             var row = _viewerRows.FirstOrDefault(r => r.Id == info.Id);
-            if (row is null) _viewerRows.Add(row = new ViewerRow(info.Id, info.Name, info.Address));
+            if (row is null)
+            {
+                _viewerRows.Add(row = new ViewerRow(info.Id, info.Name, info.Address));
+                joined = true;
+            }
             row.Update(info, audioOnly);
         }
+        // Quem entrou já recebeu a lista de apps do som guardada; uma lida nova vai logo em seguida.
+        if (joined) _ = PublishAudioAppsAsync();
         var changed = StatViewers.Text != _viewerRows.Count.ToString();
         NoViewers.Visibility = _viewerRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         ViewerCount.Text = _viewerRows.Count switch { 0 => string.Empty, 1 => "1 pessoa", var n => $"{n} pessoas" };
@@ -973,7 +1008,15 @@ public partial class TransmitPage : UserControl, IShellPage
     /// <summary>As opções do som do PC mudaram (aqui ou nas Configurações): vale na hora para a transmissão no ar.</summary>
     public void OnAudioSettingsChanged()
     {
-        if (_session is { } session) session.ConfigureAudio(AudioOptions(session.Mode));
+        if (_session is { } session)
+        {
+            session.ConfigureAudio(AudioOptions(session.Mode));
+            // Quem assiste vê na hora o que mudou (e se ainda pode escolher os apps).
+            PublishRemoteState();
+            RepublishAudioApps(session);
+            _publishedMedia = null;
+            UpdateMedia();
+        }
         UpdateMutedApps();
     }
 
@@ -1043,6 +1086,267 @@ public partial class TransmitPage : UserControl, IShellPage
         }
 
         public event PropertyChangedEventHandler? PropertyChanged;
+    }
+
+    // ───────────────────────── Controles de quem assiste (1.2.0) ─────────────────────────
+
+    private void ViewerControls_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsInitialized) return;
+        var on = ViewerControlsToggle.IsChecked == true;
+        if (on == Settings.ViewerControls) return;
+        Settings.ViewerControls = on;
+        AppServices.Settings.Save();
+        if (_session is not { } session) return;
+        PublishRemoteState();
+        RepublishAudioApps(session);
+        _publishedMedia = null;
+        if (_media is not null) UpdateMedia();
+        else PublishMedia(null);
+        if (on) _ = PublishAudioAppsAsync();
+        _shell.Toast(on
+            ? "Quem assiste já pode trocar a qualidade, pausar e pular a música e tirar apps do som."
+            : "Agora só você mexe na qualidade, na música e no som da transmissão.", ToastKind.Success);
+    }
+
+    /// <summary>Manda para quem assiste o que pode ser feito pelo player e a qualidade de agora.</summary>
+    private void PublishRemoteState()
+    {
+        if (_session is { } session) session.PublishRemoteState(RemoteStateFor(session));
+    }
+
+    /// <summary>As qualidades oferecidas são as mesmas das listas daqui; quem assiste escolhe uma delas.</summary>
+    private RemoteStateMessage RemoteStateFor(HostSession session)
+    {
+        if (!Settings.ViewerControls) return RemoteStateMessage.Disabled;
+        var video = session.HasVideo;
+        var camera = session.Mode == StreamMode.Camera;
+        var options = session.Options;
+        return new RemoteStateMessage(
+            CanChangeQuality: video,
+            CanControlMedia: true,
+            CanChooseApps: CanViewersChooseApps(session),
+            Resolutions: video && !camera ? [.. Resolution.All.Select(r => r.Label)] : [],
+            FrameRates: video && !camera ? [.. Quality.FrameRates] : [],
+            CameraQualities: camera ? [.. OverviewPage.CameraQualities.Select(c => new RemoteQuality(c.Value.Resolution.Label, c.Value.Fps))] : [],
+            Resolution: video ? options.Resolution.Label : string.Empty,
+            Fps: video ? options.Fps : 0,
+            Adaptive: session.AdaptiveQuality);
+    }
+
+    /// <summary>Tirar apps só faz sentido com o som do PC indo junto e separado por app (e a festa tocando todo o som).</summary>
+    private bool CanViewersChooseApps(HostSession session)
+        => Settings.ViewerControls && session.AudioEnabled && Settings.SeparateAppAudio && ProcessLoopbackSupported
+           && !(session.Mode == StreamMode.AudioOnly && Settings.PartyApp is not null);
+
+    /// <summary>
+    /// O que está tocando vai para quem assiste só se o som dele vai junto: um app tirado do som (ou fora da festa de um
+    /// app só) continua sendo só de quem transmite, e ninguém controla.
+    /// </summary>
+    private bool ShareableMedia(HostSession session, MediaSessionInfo info)
+    {
+        if (!Settings.ViewerControls || !session.AudioEnabled) return false;
+        if (Settings.MutedApps.Any(app => MediaApps.Matches(info.AppId, app.Exe))) return false;
+        return !(session.Mode == StreamMode.AudioOnly && Settings.PartyApp is { } party && !MediaApps.Matches(info.AppId, party.Exe));
+    }
+
+    /// <summary>Publica o que está tocando quando algo muda (a posição anda sozinha do lado de quem assiste).</summary>
+    private void PublishMedia(MediaSessionInfo? info)
+    {
+        if (_session is not { } session) return;
+        if (info is not null && !ShareableMedia(session, info)) info = null;
+        var next = info is null
+            ? MediaStateMessage.None
+            : new MediaStateMessage(info.AppName, info.Title, info.Artist, info.Playing, info.Timeline.PositionAt(DateTimeOffset.UtcNow).TotalSeconds,
+                info.Timeline.Duration.TotalSeconds, info.CanPrevious, info.CanNext, info.CanPlayPause, info.CanSeek, CoverFor(info.Thumbnail));
+        var now = Environment.TickCount64;
+        if (!RemoteControl.ShouldPublish(_publishedMedia, (now - _publishedMediaAt) / 1000.0, next)) return;
+        _publishedMedia = next;
+        _publishedMediaAt = now;
+        session.PublishMedia(next);
+    }
+
+    /// <summary>A capa vai num JPEG pequeno, feito uma vez por capa.</summary>
+    private string? CoverFor(byte[]? thumbnail)
+    {
+        if (thumbnail is null) return null;
+        if (ReferenceEquals(thumbnail, _coverSource)) return _cover;
+        _coverSource = thumbnail;
+        _cover = SmallCover(thumbnail);
+        return _cover;
+    }
+
+    /// <summary>A capa em JPEG de até 160 px de largura, em base64. Null se a imagem não abrir.</summary>
+    internal static string? SmallCover(byte[] image)
+    {
+        try
+        {
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.StreamSource = new System.IO.MemoryStream(image);
+            bitmap.DecodePixelWidth = 160;
+            bitmap.EndInit();
+            bitmap.Freeze();
+            var encoder = new JpegBitmapEncoder { QualityLevel = 82 };
+            encoder.Frames.Add(BitmapFrame.Create(new FormatConvertedBitmap(bitmap, PixelFormats.Bgr24, null, 0)));
+            using var output = new System.IO.MemoryStream();
+            encoder.Save(output);
+            return output.Length <= RemoteControl.MaxCoverBytes ? Convert.ToBase64String(output.GetBuffer(), 0, (int)output.Length) : null;
+        }
+        catch (Exception exception) when (exception is NotSupportedException or InvalidOperationException or ArgumentException or System.IO.IOException)
+        {
+            Log.Debug($"Capa da música não abriu: {exception.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>Os apps com som (e os que já estão fora) para a lista de quem assiste. Leve: sem ícones.</summary>
+    private async Task PublishAudioAppsAsync()
+    {
+        if (_session is not { } session) return;
+        if (!CanViewersChooseApps(session))
+        {
+            if (session.PublishedAudioApps.Apps.Length > 0) session.PublishAudioApps(new AudioAppsMessage([]));
+            return;
+        }
+        var version = ++_remoteAppsVersion;
+        IReadOnlyList<RunningApp> running;
+        try { running = await Task.Run(AppAudioCatalog.ListWithSound); }
+        catch (Exception exception)
+        {
+            Log.Debug($"Não deu para listar os apps com som para quem assiste: {exception.Message}");
+            return;
+        }
+        if (version != _remoteAppsVersion || !ReferenceEquals(_session, session)) return;
+        var next = AudioAppsFor(running);
+        if (!next.Apps.SequenceEqual(session.PublishedAudioApps.Apps)) session.PublishAudioApps(next);
+    }
+
+    /// <summary>Mesma lista de antes com o que está fora agora (depois de uma troca, sem esperar a próxima leitura).</summary>
+    private void RepublishAudioApps(HostSession session)
+    {
+        if (!CanViewersChooseApps(session))
+        {
+            if (session.PublishedAudioApps.Apps.Length > 0) session.PublishAudioApps(new AudioAppsMessage([]));
+            return;
+        }
+        session.PublishAudioApps(AudioAppsFor(session.PublishedAudioApps.Apps.Select(a => new RunningApp(a.Exe, a.Name, null, a.Playing, null)).ToList()));
+    }
+
+    private AudioAppsMessage AudioAppsFor(IReadOnlyList<RunningApp> running)
+    {
+        var muted = Settings.MutedApps;
+        var mutedExes = muted.Select(m => m.Exe).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var runningExes = running.Select(r => r.Exe).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var apps = running.Select(a => new RemoteAudioApp(a.Exe, a.Name, mutedExes.Contains(a.Exe), a.PlayingSound))
+            .Concat(muted.Where(m => !runningExes.Contains(m.Exe)).Select(m => new RemoteAudioApp(m.Exe, m.Name, true, false)))
+            .OrderByDescending(a => a.Playing).ThenByDescending(a => a.Excluded).ThenBy(a => a.Name, StringComparer.CurrentCultureIgnoreCase)
+            .Take(RemoteControl.MaxApps)
+            .ToArray();
+        return new AudioAppsMessage(apps);
+    }
+
+    /// <summary>Um pedido de quem assiste, já conferido pela sessão: aplica como se fosse daqui e avisa quem pediu.</summary>
+    private void OnRemoteRequested(RemoteRequest request)
+    {
+        if (_session is not { } session || !Settings.ViewerControls) return;
+        switch (request.Message)
+        {
+            case QualityRequestMessage quality:
+                ApplyRemoteQuality(session, request.ViewerName, quality);
+                break;
+            case MediaCommandMessage command:
+                _ = RemoteMediaAsync(request.ViewerName, command);
+                break;
+            case AudioAppsRequestMessage apps:
+                ApplyRemoteApps(session, request.ViewerName, apps);
+                break;
+        }
+    }
+
+    private void ApplyRemoteQuality(HostSession session, string viewer, QualityRequestMessage request)
+    {
+        var resolution = Resolution.All.FirstOrDefault(r => string.Equals(r.Label, request.Resolution, StringComparison.OrdinalIgnoreCase));
+        if (!session.HasVideo || resolution is null) return;
+        _syncingQuality = true;
+        try
+        {
+            if (session.Mode == StreamMode.Camera) CameraQualityCombo.SelectValue((resolution, request.Fps));
+            else
+            {
+                QualityCombo.SelectValue(resolution);
+                FpsCombo.SelectValue(request.Fps, f => f);
+            }
+            FixedQualityToggle.IsChecked = !request.Adaptive;
+        }
+        finally { _syncingQuality = false; }
+        UpdateProfileHint();
+        // Nada mudou (já era essa): quem pediu recebe o estado de novo e o player volta a mostrar a de agora.
+        if (!ApplyLiveQuality(viewer)) PublishRemoteState();
+    }
+
+    private async Task RemoteMediaAsync(string viewer, MediaCommandMessage command)
+    {
+        if (_media is not { } media || _mediaId is not { } id) return;
+        var what = _publishedMedia is { Title.Length: > 0 } playing ? $"“{(playing.Title.Length > 60 ? playing.Title[..60] + "…" : playing.Title)}”" : "o que está tocando";
+        var (ok, done) = command.Command switch
+        {
+            MediaCommandMessage.PlayPause => (await media.SendAsync(id, MediaCommand.PlayPause), _publishedMedia?.Playing == true ? $"{viewer} pausou {what}." : $"{viewer} deu play em {what}."),
+            MediaCommandMessage.Previous => (await media.SendAsync(id, MediaCommand.Previous), $"{viewer} voltou para a anterior."),
+            MediaCommandMessage.Next => (await media.SendAsync(id, MediaCommand.Next), $"{viewer} pulou para a próxima."),
+            MediaCommandMessage.Seek => (await media.SeekAsync(id, TimeSpan.FromSeconds(command.PositionSeconds)), $"{viewer} mudou o ponto de {what}."),
+            _ => (false, string.Empty),
+        };
+        if (ok) _shell.Toast(done);
+        else Log.Info($"O app não aceitou o comando de {viewer} ({command.Command}).");
+        UpdateMedia();
+    }
+
+    private void ApplyRemoteApps(HostSession session, string viewer, AudioAppsRequestMessage request)
+    {
+        if (!CanViewersChooseApps(session)) return;
+        var published = session.PublishedAudioApps;
+        var before = Settings.MutedApps;
+        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var app in before) names.TryAdd(app.Exe, app.Name);
+        foreach (var app in published.Apps) names.TryAdd(app.Exe, app.Name);
+        var muted = MutedApp.Normalize(RemoteControl.Exclusion(published, before.Select(a => a.Exe), request)
+            .Select(exe => new MutedApp(exe, names.GetValueOrDefault(exe) ?? MutedApp.DefaultName(exe))));
+        var added = muted.Where(m => before.All(b => b.Exe != m.Exe)).Select(m => m.Name).ToList();
+        var removed = before.Where(b => muted.All(m => m.Exe != b.Exe)).Select(b => b.Name).ToList();
+        if (added.Count == 0 && removed.Count == 0)
+        {
+            RepublishAudioApps(session);
+            return;
+        }
+        Settings.MutedApps = muted;
+        AppServices.Settings.Save();
+        SyncAppRows();
+        OnAudioSettingsChanged();
+        _shell.Toast((added.Count, removed.Count) switch
+        {
+            (> 0, 0) => $"{viewer} tirou o som de {MutedApp.JoinNames(added)} da transmissão.",
+            (0, _) => $"{viewer} devolveu o som de {MutedApp.JoinNames(removed)} à transmissão.",
+            _ => $"{viewer} tirou o som de {MutedApp.JoinNames(added)} e devolveu o de {MutedApp.JoinNames(removed)}.",
+        });
+    }
+
+    /// <summary>
+    /// Quem assiste mudou os apps: a janelinha daqui (se estiver aberta) mostra o que mudou, para não desfazer a troca
+    /// ao fechar; fechada, ela é montada de novo na próxima vez.
+    /// </summary>
+    private void SyncAppRows()
+    {
+        if (!AppsPopup.IsOpen)
+        {
+            _apps.Clear();
+            return;
+        }
+        var muted = Settings.MutedApps;
+        foreach (var row in _apps) row.Muted = muted.Any(m => m.Exe == row.Exe);
+        foreach (var app in muted.Where(m => _apps.All(r => r.Exe != m.Exe)).ToList())
+            _apps.Add(new AppChoice(app.Exe, app.Name, "Tirado por quem assiste", null, true));
     }
 
     // ───────────────────────── Capturas de tela (CI) ─────────────────────────

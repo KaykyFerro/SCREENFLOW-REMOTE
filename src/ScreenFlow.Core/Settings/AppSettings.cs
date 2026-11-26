@@ -59,6 +59,11 @@ public sealed class AppSettings
     public string? Pin { get; set; }
     public bool ApproveEachViewer { get; set; } = true;
     public int MaxViewers { get; set; } = 20;
+    /// <summary>
+    /// Quem assiste (1.2.0 ou mais nova) pode trocar a qualidade, pausar e pular a música e tirar apps do som, pelo
+    /// player. Vale para a transmissão inteira; dá para desligar com ela no ar.
+    /// </summary>
+    public bool ViewerControls { get; set; } = true;
 
     /// <summary>Upload do host em Mbps (medido pelo teste de banda ou digitado). 0 = desconhecido.</summary>
     public double UploadMbps { get; set; }

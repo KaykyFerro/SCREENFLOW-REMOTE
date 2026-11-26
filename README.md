@@ -10,6 +10,8 @@ Três jeitos de transmitir:
 
 Transmitindo uma janela ou a festa de um app só, um cartão na Transmissão controla a música ou o vídeo desse app: voltar, pausar, pular e mudar o tempo. A qualidade pode ser trocada com a transmissão no ar, ou ficar fixa, sem adaptar.
 
+Quem assiste também mexe, pelo próprio player: troca a qualidade, volta, pausa e pula a música ou o vídeo que toca no PC de quem transmite e tira o som de um app da transmissão. Vale para todo mundo que está assistindo, quem transmite vê um aviso com o nome de quem pediu e uma chave desliga tudo isso.
+
 E para quem está na mesma rede do Radmin:
 
 - **Voz da rede**, no estilo do Discord: o painel fica no menu lateral, logo acima do seu perfil. Entrar, sair, desligar o microfone ou o som de todo mundo com um clique.
@@ -62,10 +64,11 @@ Baixe `ScreenFlow-Setup-win-x64.exe` na página de [Releases](https://github.com
 3. Na tela: o monitor ou a janela, a qualidade (720p, 1080p, 1440p, 4K), o FPS (30, 60, 120, 144, 165), o som do PC e, se quiser, **Mandar a câmera junto**. Na câmera: qual câmera e a qualidade. Na festa: **O que toca na festa** (o som do PC todo ou só um app) e a qualidade do som (128 a 320 kbps). A qualidade pode ser trocada no meio da transmissão; com **Qualidade fixa** ligada, ela não baixa sozinha quando a rede aperta.
 4. Transmitindo uma janela (ou a festa com um app só), aparece um cartão com o que está tocando nesse app: capa, título e tempo da música ou do vídeo, com voltar, pausar, pular e a barra para mudar o tempo. Funciona com o que aparece nos controles de mídia do Windows (Spotify, YouTube no navegador, Reprodutor de Mídia...).
 5. No cartão **Som do PC**, o botão **Escolher apps** mostra os apps abertos: marque os que quem assiste não deve ouvir. A voz da rede e os sons do ScreenFlow já ficam de fora. Vale na hora, até no meio da transmissão, e o app lembra a escolha.
-6. Opcional: defina um **PIN** e/ou deixe ligado **Aprovar cada pessoa**. Qualquer pessoa na mesma rede Radmin alcança o seu IP.
-7. A captura e o encoder só ligam quando alguém entra. O visualizador do som já mexe antes, para você conferir o áudio.
-8. Em **Quem está assistindo** você vê ping, latência, perda e banda de cada pessoa, pode **Testar banda** e remover alguém. O **Monitoramento** mostra os gráficos dos últimos 90 segundos.
-9. Pode fechar ou minimizar a janela: o ScreenFlow vai para a bandeja e a transmissão continua. Quando a transmissão acaba (ou o player fecha), a janela volta sozinha; dá para desligar isso em **Configurações**. Para fechar de vez, clique com o botão direito no ícone e escolha **Sair do ScreenFlow**.
+6. Com **Quem assiste pode mexer nos controles** ligado (o padrão), quem assiste troca a qualidade, controla a música ou o vídeo e tira apps do som pelo player, e cada pedido aparece num aviso com o nome de quem pediu. Desligue para ninguém mexer; dá para trocar com a transmissão no ar. O que toca num app tirado do som (ou fora da festa de um app só) não aparece para quem assiste.
+7. Opcional: defina um **PIN** e/ou deixe ligado **Aprovar cada pessoa**. Qualquer pessoa na mesma rede Radmin alcança o seu IP.
+8. A captura e o encoder só ligam quando alguém entra. O visualizador do som já mexe antes, para você conferir o áudio.
+9. Em **Quem está assistindo** você vê ping, latência, perda e banda de cada pessoa, pode **Testar banda** e remover alguém. O **Monitoramento** mostra os gráficos dos últimos 90 segundos.
+10. Pode fechar ou minimizar a janela: o ScreenFlow vai para a bandeja e a transmissão continua. Quando a transmissão acaba (ou o player fecha), a janela volta sozinha; dá para desligar isso em **Configurações**. Para fechar de vez, clique com o botão direito no ícone e escolha **Sair do ScreenFlow**.
 
 ### 4. Assistir
 
@@ -74,7 +77,11 @@ Baixe `ScreenFlow-Setup-win-x64.exe` na página de [Releases](https://github.com
 3. Se o host pedir PIN, o app pergunta. Se ele aprovar cada pessoa, você vê "Esperando aprovação".
 4. No player: **duplo clique**, **F** ou **F11** para tela cheia, **F3** para as estatísticas (FPS, bitrate, latência, perda, codec, resolução, GPU ou CPU), **M** para mudo e as setas para o volume.
 5. Se o host mandar a câmera junto, ela aparece num quadrinho no canto: clique nele para trocar de canto e **C** para esconder ou mostrar.
-6. Se a conexão cair, o player reconecta sozinho.
+6. Se quem transmite deixar, a barra do player traz mais três controles, que valem para todo mundo que está assistindo:
+   - **Qualidade**: a resolução e o FPS (ou a qualidade da câmera), entre os que quem transmite oferece, e se a qualidade fica fixa.
+   - **Música ou vídeo**: o que está tocando no PC de quem transmite, com voltar, pausar e pular. Na festa de música aparece o cartão **Tocando agora**, com a capa, o tempo e a barra para mudar o ponto.
+   - **Tirar apps do som**: os apps com som no PC de quem transmite; marque os que ninguém deve ouvir.
+7. Se a conexão cair, o player reconecta sozinho.
 
 ### 5. Falar com a rede (voz e chat)
 
@@ -120,9 +127,9 @@ As portas podem ser trocadas em **Configurações › Rede e firewall** (os dois
 
 ## Diagnóstico
 
-Em **Configurações › Diagnóstico** (ou `ScreenFlow.exe --diagnostico` no terminal) aparecem: IP do Radmin e adaptadores, portas e firewall, GPUs, encoders e decoders por hardware, câmeras, versão do FFmpeg e o perfil recomendado. O teste de banda até um viewer fica na tela Transmissão.
+Em **Configurações › Diagnóstico** (ou `ScreenFlow.exe --diagnostico` no terminal) aparecem: IP do Radmin e adaptadores, portas e firewall, as placas de vídeo (com a versão do driver, qual é a principal e o problema que o Windows relata, se houver), encoders e decoders por hardware (e por que o da placa principal não abriu), câmeras, versão do FFmpeg e o perfil recomendado. O teste de banda até um viewer fica na tela Transmissão.
 
-`ScreenFlow.exe --autoteste` confere, no próprio PC: uma festa de música no 127.0.0.1 (o som chega ao viewer e é decodificado); duas salas da rede conversando no chat e na voz e passando a foto do perfil e uma imagem de 1 MB de uma para a outra; e, se o PC tiver saída de som, a separação do som do PC por app e a festa com um app só (o som do ScreenFlow e o do app tirado ficam fora, o resto vai). O CI roda isso a cada mudança, com uma placa de som virtual.
+`ScreenFlow.exe --autoteste` confere, no próprio PC: uma festa de música no 127.0.0.1 (o som chega ao viewer e é decodificado) e, nela, os controles de quem assiste (a música e os apps chegam ao viewer, os pedidos para pular e para tirar um app chegam ao host e um pedido inválido é recusado); duas salas da rede conversando no chat e na voz e passando a foto do perfil e uma imagem de 1 MB de uma para a outra; e, se o PC tiver saída de som, a separação do som do PC por app e a festa com um app só (o som do ScreenFlow e o do app tirado ficam fora, o resto vai). O CI roda isso a cada mudança, com uma placa de som virtual.
 
 Logs ficam em `%LOCALAPPDATA%\ScreenFlow\logs` (botão **Abrir logs**). As fotos de perfil e as imagens do chat ficam em `%LOCALAPPDATA%\ScreenFlow\imagens`; as que não são usadas há 30 dias são apagadas sozinhas.
 
@@ -130,7 +137,7 @@ Logs ficam em `%LOCALAPPDATA%\ScreenFlow\logs` (botão **Abrir logs**). As fotos
 
 O app procura uma versão nova ao abrir e a cada 6 horas (dá para desligar em **Atualizações**). Quando sai uma, o **sininho** da barra de cima avisa. Ao clicar em **Atualizar agora**, ele baixa o instalador do último release, confere o SHA-256, instala em silêncio e reabre.
 
-Para publicar uma versão, crie um release no GitHub com a tag nova `v1.1.1` na `main` (ou rode `git tag v1.1.1 && git push origin v1.1.1`). O workflow `release.yml` compila, gera o instalador e o `.sha256` e anexa ao release.
+Para publicar uma versão, crie um release no GitHub com a tag nova `v1.2.0` na `main` (ou rode `git tag v1.2.0 && git push origin v1.2.0`). O workflow `release.yml` compila, gera o instalador e o `.sha256` e anexa ao release.
 
 ## Solução de problemas
 
@@ -148,7 +155,9 @@ Para publicar uma versão, crie um release no GitHub com a tag nova `v1.1.1` na 
 | Ninguém me ouve na voz | Veja se o Windows deixa apps usarem o microfone (Configurações do Windows › Privacidade e segurança › Microfone) e use **Testar microfone** em Configurações › Voz da rede. |
 | Câmera não aparece | Feche outros apps que usam a câmera e clique em atualizar ao lado da lista. |
 | Imagem do chat fica em "Baixando" | A imagem vem de quem mandou (ou de quem já baixou). Se essa pessoa saiu da sala, clique em **Tentar de novo** quando ela voltar. Quem usa o ScreenFlow 1.1.0 vê só o aviso "📷 Imagem (atualize o ScreenFlow para ver)". |
-| Os controles da música não aparecem | Eles aparecem transmitindo uma janela ou a festa de um app só, e só para apps que usam os controles de mídia do Windows (os mesmos das teclas de mídia). |
+| Os controles da música não aparecem | Eles aparecem para apps que usam os controles de mídia do Windows (os mesmos das teclas de mídia), como o Spotify e o YouTube no navegador. Para quem assiste, o som desse app também precisa estar indo na transmissão. |
+| Quem assiste não vê os botões de qualidade, música ou apps | Os dois PCs precisam da 1.2 ou mais nova, e quem transmite precisa deixar ligado **Quem assiste pode mexer nos controles**. |
+| A placa de vídeo não aparece ou aparece "Com problema" | O cartão da Visão geral diz o motivo (driver antigo para o NVENC, placa parada pelo Windows com o código 43, sem driver). Veja a tabela em [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md#placa-de-vídeo) e mande o texto do Diagnóstico se continuar. |
 | "Versões diferentes do ScreenFlow" | Atualize os dois PCs para a mesma versão. |
 
 Mais detalhes em [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
