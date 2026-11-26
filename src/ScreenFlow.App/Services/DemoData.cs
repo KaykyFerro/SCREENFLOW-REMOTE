@@ -3,6 +3,7 @@ using ScreenFlow.Core;
 using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Protocol;
 using ScreenFlow.Core.Settings;
+using ScreenFlow.Infrastructure.Media;
 using ScreenFlow.Infrastructure.Network;
 using ScreenFlow.Infrastructure.Session;
 
@@ -86,6 +87,14 @@ public static partial class DemoData
     }
 
     /// <summary>Transmissões "encontradas na rede" para a tela Assistir.</summary>
+    /// <summary>Apps abertos para "O que toca na festa".</summary>
+    public static IReadOnlyList<RunningApp> PartyApps { get; } =
+    [
+        new("spotify.exe", "Spotify", null, true, null),
+        new("chrome.exe", "Google Chrome", null, true, null),
+        new("discord.exe", "Discord", null, false, null),
+    ];
+
     public static IReadOnlyList<DiscoveryAnnouncement> Sessions { get; } =
     [
         new(AppInfo.Name, AppInfo.ProtocolVersion, "PC-do-Lucas", "26.40.18.100", AppInfo.DefaultControlPort, AppInfo.DisplayVersion, false, 3, StreamMode.Screen, CameraOverlay: true),
@@ -121,7 +130,12 @@ public static partial class DemoData
     /// <summary>Estatísticas de quem assiste, para o player e o Monitoramento.</summary>
     public static ViewerStatistics ViewerStats(StreamMode mode = StreamMode.Screen) => mode == StreamMode.AudioOnly
         ? new ViewerStatistics(0, 0, 0, 24, 0.001, "Opus", 0, 0, "Opus 256 kbps", 0, 0, "rede estável", StreamMode.AudioOnly, 62, 3, 512, false)
-        : new ViewerStatistics(164.6, 38.2, 21, 24, 0.0004, "HEVC", 2560, 1440, "NVDEC (D3D11VA)", 2, 17, "rede estável", mode, 58, 0, 160, true);
+        : new ViewerStatistics(164.6, 38.2, 21, 24, 0.0004, "HEVC", 2560, 1440, "NVDEC (D3D11VA)", 2, 17, "rede estável", mode, 58, 0, 160, true)
+        {
+            TotalLossRate = 0.0011,
+            FramesExpired = 2,
+            NackRecovered = 41,
+        };
 
     private static double Wave(int second, double period) => Math.Sin(second / period) * 0.6 + Math.Sin(second / (period * 0.37) + 1.3) * 0.4;
 }

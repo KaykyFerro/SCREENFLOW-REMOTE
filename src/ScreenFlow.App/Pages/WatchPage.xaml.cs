@@ -290,6 +290,7 @@ public partial class WatchPage : UserControl, IShellPage
         UpdateNowCard();
         RefreshSessions();
         _shell.NotifyLiveStateChanged();
+        _shell.ShowAfterSessionEnded(this);
     }
 
     private void ShowState(string message, string brush, bool canCancel)

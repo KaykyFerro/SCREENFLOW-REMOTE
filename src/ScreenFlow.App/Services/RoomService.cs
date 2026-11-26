@@ -25,6 +25,10 @@ public sealed class RoomService
     private readonly DispatcherTimer _speakingTimer;
     private readonly Dictionary<Guid, RoomPeer> _peers = [];
     private readonly Dictionary<Guid, DateTimeOffset> _liveNoticed = [];
+    /// <summary>Fotos do perfil já abertas (id do arquivo → imagem; null quando o arquivo não é uma imagem).</summary>
+    private readonly Dictionary<string, ImageSource?> _photos = [];
+    /// <summary>A última foto que cada pessoa mostrou (fica para as mensagens de quem já saiu).</summary>
+    private readonly Dictionary<Guid, string?> _avatars = [];
     private NetworkRoom? _room;
     private int _refreshQueued;
     private int _unread;
@@ -51,6 +55,12 @@ public sealed class RoomService
 
     public Guid SelfId { get; private set; }
     public string SelfName => AppServices.Settings.Current.DeviceName;
+
+    /// <summary>A sua foto do perfil (null sem foto).</summary>
+    public ImageSource? SelfPhoto => PhotoFor(AppServices.Settings.Current.AvatarId);
+
+    /// <summary>O seu nome ou a sua foto mudaram (o menu lateral se atualiza).</summary>
+    public event Action? ProfileChanged;
 
     /// <summary>A sala abriu e está funcionando (ou são os dados de exemplo das capturas).</summary>
     public bool IsAvailable => _demo || _room?.IsRunning == true;
@@ -93,17 +103,29 @@ public sealed class RoomService
         var settings = AppServices.Settings.Current;
         settings.Normalize();
         SelfId = Guid.ParseExact(settings.InstanceId!, "N");
-        var room = new NetworkRoom(SelfId, settings.DiscoveryPort, new RoomLocalState(settings.DeviceName))
+        var blobs = AppServices.Blobs;
+        var keep = settings.AvatarId;
+        _ = Task.Run(() => blobs.Trim([keep]));
+        var room = new NetworkRoom(SelfId, settings.DiscoveryPort, new RoomLocalState(settings.DeviceName, Avatar: SelfAvatarRef()))
         {
             MicrophoneId = settings.MicrophoneId,
             Volume = (float)settings.VoiceVolume,
             Sensitivity = settings.VoiceSensitivity,
             SoundsEnabled = settings.VoiceSounds,
+            // Quem pede um arquivo que este PC tem (a sua foto, uma imagem do chat) recebe daqui.
+            BlobSource = blobs.Get,
+            HasBlob = blobs.Has,
         };
         room.SetMuted(settings.VoiceMuted);
         room.PeersChanged += QueueRefresh;
         room.VoiceChanged += QueueRefresh;
         room.MessageReceived += message => _dispatcher.BeginInvoke(() => OnMessage(message));
+        room.BlobReceived += (id, data) =>
+        {
+            blobs.Save(id, data);
+            _dispatcher.BeginInvoke(() => OnBlobArrived(id));
+        };
+        room.BlobFailed += id => _dispatcher.BeginInvoke(() => OnBlobFailed(id));
         room.PeerWentLive += peer => _dispatcher.BeginInvoke(() => OnPeerWentLive(peer.Id));
         room.HostsChanged += () => _dispatcher.BeginInvoke(() => HostsChanged?.Invoke());
         _room = room;
@@ -132,11 +154,17 @@ public sealed class RoomService
             _dispatcher.BeginInvoke(() => OnSettingsSaved(settings));
             return;
         }
+        ProfileChanged?.Invoke();
         if (_room is not { } room) return;
         room.Volume = (float)settings.VoiceVolume;
         room.Sensitivity = settings.VoiceSensitivity;
         room.SoundsEnabled = settings.VoiceSounds;
-        if (room.Local.Name != settings.DeviceName) room.UpdateLocal(room.Local with { Name = settings.DeviceName });
+        var avatar = SelfAvatarRef();
+        if (room.Local.Name != settings.DeviceName || room.Local.Avatar != avatar)
+        {
+            room.UpdateLocal(room.Local with { Name = settings.DeviceName, Avatar = avatar });
+            Refresh();
+        }
         if (room.MicrophoneId != settings.MicrophoneId)
         {
             room.MicrophoneId = settings.MicrophoneId;
@@ -150,11 +178,58 @@ public sealed class RoomService
         if (await JoinVoiceAsync() is { } error) Log.Warn($"Troca de microfone: {error}");
     }
 
-    /// <summary>O que este PC mostra para a sala (transmissão, assistindo). O nome vem sempre das configurações.</summary>
+    /// <summary>O que este PC mostra para a sala (transmissão, assistindo). O nome e a foto vêm sempre das configurações.</summary>
     public void UpdateLocal(RoomLocalState state)
     {
         if (_room is not { } room) return;
-        room.UpdateLocal(state with { Name = SelfName });
+        room.UpdateLocal(state with { Name = SelfName, Avatar = SelfAvatarRef() });
+    }
+
+    // ───────────────────────── Perfil ─────────────────────────
+
+    /// <summary>Troca a sua foto (null tira). Vale na hora: quem está na sala baixa a nova.</summary>
+    public void SetPhoto(byte[]? avatar)
+    {
+        var settings = AppServices.Settings.Current;
+        settings.AvatarId = avatar is null ? null : AppServices.Blobs.Put(avatar);
+        AppServices.Settings.Save();
+        if (_demo) ProfileChanged?.Invoke();
+    }
+
+    /// <summary>A sua foto como a sala anuncia (id e tamanho), se o arquivo dela estiver aqui.</summary>
+    private static RoomBlobRef? SelfAvatarRef()
+    {
+        var id = AppServices.Settings.Current.AvatarId;
+        return id is not null && AppServices.Blobs.SizeOf(id) is { } size and <= RoomBlob.MaxAvatarBytes ? new RoomBlobRef(id, size) : null;
+    }
+
+    /// <summary>A foto do perfil com este id, se o arquivo já estiver neste PC (senão null: aparece a inicial).</summary>
+    public ImageSource? PhotoFor(string? id)
+    {
+        if (id is null) return null;
+        if (_photos.TryGetValue(id, out var cached)) return cached;
+        if (AppServices.Blobs.Get(id) is not { } data) return null; // ainda não chegou: tenta de novo quando chegar
+        var photo = ImageTools.Decode(data, ImageTools.AvatarSide);
+        if (_photos.Count >= 256) _photos.Clear();
+        _photos[id] = photo;
+        return photo;
+    }
+
+    private ImageSource? PhotoOf(Guid person) => PhotoFor(person == SelfId ? AppServices.Settings.Current.AvatarId : _avatars.GetValueOrDefault(person));
+
+    /// <summary>Um arquivo chegou: pode ser a foto de alguém ou uma imagem do chat.</summary>
+    private void OnBlobArrived(string id)
+    {
+        _photos.Remove(id);
+        Refresh();
+        foreach (var row in Messages)
+            if (row.Image?.Id == id) LoadPicture(row);
+    }
+
+    private void OnBlobFailed(string id)
+    {
+        foreach (var row in Messages)
+            if (row.Image?.Id == id && row.Picture is null) row.ImageState = ChatImageState.Failed;
     }
 
     // ───────────────────────── Voz ─────────────────────────
@@ -253,17 +328,53 @@ public sealed class RoomService
 
     // ───────────────────────── Chat ─────────────────────────
 
-    /// <summary>Manda para todo mundo da sala. false quando a sala está desligada ou o texto está vazio.</summary>
-    public bool Send(string text)
+    /// <summary>
+    /// Manda para todo mundo da sala, com uma imagem se quiser (quem recebe baixa a imagem deste PC). false quando a
+    /// sala está desligada ou não há nada para mandar.
+    /// </summary>
+    public bool Send(string text, PreparedImage? image = null)
     {
+        ChatImage? attached = null;
+        if (image is not null)
+        {
+            var id = AppServices.Blobs.Put(image.Data);
+            attached = new ChatImage(id, image.Data.Length, image.Width, image.Height);
+        }
         if (_demo)
         {
             var clean = RoomPacket.CleanText(text);
-            if (clean.Length == 0) return false;
-            AddMessage(new RoomChatMessage(SelfId, SelfName, (ulong)Random.Shared.NextInt64(), DateTimeOffset.Now, clean));
+            if (clean.Length == 0 && attached is null) return false;
+            AddMessage(new RoomChatMessage(SelfId, SelfName, (ulong)Random.Shared.NextInt64(), DateTimeOffset.Now,
+                clean.Length == 0 ? RoomPacket.ImagePlaceholder : clean, Image: attached));
             return true;
         }
-        return _room is { IsRunning: true } room && room.SendChat(text) is not null;
+        return _room is { IsRunning: true } room && room.SendChat(text, attached) is not null;
+    }
+
+    /// <summary>A imagem não veio: pede de novo, a quem mandou e a todo mundo da sala (quem já baixou também tem).</summary>
+    public void RetryImage(ChatRow row)
+    {
+        if (row.Image is not { } image || _room is not { } room) return;
+        row.ImageState = ChatImageState.Loading;
+        if (AppServices.Blobs.Has(image.Id))
+        {
+            LoadPicture(row);
+            return;
+        }
+        room.FetchBlob(image.Blob, [row.AuthorId, .. People.Select(p => p.Id).Where(id => id != row.AuthorId)]);
+    }
+
+    /// <summary>Abre a imagem (já baixada) de uma mensagem para mostrar.</summary>
+    private void LoadPicture(ChatRow row)
+    {
+        if (row.Image is not { } image) return;
+        if (AppServices.Blobs.Get(image.Id) is not { } data)
+        {
+            if (row.ImageState != ChatImageState.Failed) row.ImageState = ChatImageState.Loading;
+            return;
+        }
+        row.Picture = ImageTools.Decode(data, Math.Min(image.Width, ChatRow.PictureDecodeWidth));
+        row.ImageState = row.Picture is null ? ChatImageState.Failed : ChatImageState.Ready;
     }
 
     public void MarkRead()
@@ -289,7 +400,8 @@ public sealed class RoomService
     {
         foreach (var existing in Messages)
             if (existing.AuthorId == message.AuthorId && existing.MessageId == message.MessageId) return null;
-        var row = new ChatRow(message, message.AuthorId == SelfId);
+        var row = new ChatRow(message, message.AuthorId == SelfId) { Photo = PhotoOf(message.AuthorId) };
+        LoadPicture(row);
         var index = Messages.Count;
         while (index > 0 && Messages[index - 1].Time > row.Time) index--;
         Messages.Insert(index, row);
@@ -347,15 +459,33 @@ public sealed class RoomService
         if (_room is not { } room) return;
         var peers = room.Peers;
         _peers.Clear();
-        foreach (var peer in peers) _peers[peer.Id] = peer;
-        Sync(People, peers.Select(p => (p.Id, p)), id => new RoomPersonRow(id), (row, peer) => row.Update(peer));
+        foreach (var peer in peers)
+        {
+            _peers[peer.Id] = peer;
+            _avatars[peer.Id] = peer.Presence.Avatar?.Id;
+        }
+        Sync(People, peers.Select(p => (p.Id, p)), id => new RoomPersonRow(id), (row, peer) =>
+        {
+            row.Update(peer);
+            row.Photo = PhotoFor(peer.Presence.Avatar?.Id);
+        });
 
         var voice = peers.Where(p => p.Presence.InVoice)
             .Select(p => new VoiceMemberState(p.Id, p.Presence.Name, p.Presence.Muted, p.Presence.Deafened, false))
             .ToList();
         if (room.InVoice) voice.Add(new VoiceMemberState(SelfId, SelfName, room.Muted || room.Deafened, room.Deafened, true));
         voice.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase));
-        Sync(VoiceMembers, voice.Select(v => (v.Id, v)), id => new VoiceMemberRow(id), (row, state) => row.Update(state));
+        Sync(VoiceMembers, voice.Select(v => (v.Id, v)), id => new VoiceMemberRow(id), (row, state) =>
+        {
+            row.Update(state);
+            row.Photo = PhotoOf(state.Id);
+        });
+        var photos = new Dictionary<Guid, ImageSource?>();
+        foreach (var message in Messages)
+        {
+            if (!photos.TryGetValue(message.AuthorId, out var photo)) photos[message.AuthorId] = photo = PhotoOf(message.AuthorId);
+            message.Photo = photo;
+        }
 
         _speakingTimer.IsEnabled = room.InVoice;
         if (!room.InVoice) foreach (var row in VoiceMembers) row.Speaking = false;
@@ -427,15 +557,18 @@ public sealed class RoomService
         var bruno = new Guid("9a2c7e14-3f5b-4d8a-b6e1-7c4f2a9d3e51");
         var carla = new Guid("4e8b1c63-7a2d-4f9e-8c5b-1d6a3f7e2b5f");
         var diego = new Guid("c3a9e275-1b6f-4a8d-9e2c-6f1b8d4a7c73");
+        var (anaPhoto, brunoPhoto, wallpaper) = DemoImages();
+        _avatars[ana] = anaPhoto;
+        _avatars[bruno] = brunoPhoto;
         People.Clear();
-        People.Add(RoomPersonRow.Demo(ana, "Ana Lu", "Ao vivo · tela, câmera e áudio", true, StreamMode.Screen, "26.47.19.113", false));
-        People.Add(RoomPersonRow.Demo(bruno, "Bruno", "Na voz", false, StreamMode.Screen, null, true));
+        People.Add(RoomPersonRow.Demo(ana, "Ana Lu", "Ao vivo · tela, câmera e áudio", true, StreamMode.Screen, "26.47.19.113", false, PhotoOf(ana)));
+        People.Add(RoomPersonRow.Demo(bruno, "Bruno", "Na voz", false, StreamMode.Screen, null, true, PhotoOf(bruno)));
         People.Add(RoomPersonRow.Demo(carla, "Carla-PC", "Assistindo Ana Lu", false, StreamMode.Screen, null, true));
         People.Add(RoomPersonRow.Demo(diego, "Diego", "Online", false, StreamMode.Screen, null, false));
         VoiceMembers.Clear();
-        VoiceMembers.Add(VoiceMemberRow.Demo(bruno, "Bruno", speaking: inVoice, muted: false));
+        VoiceMembers.Add(VoiceMemberRow.Demo(bruno, "Bruno", speaking: inVoice, muted: false, photo: PhotoOf(bruno)));
         VoiceMembers.Add(VoiceMemberRow.Demo(carla, "Carla-PC", speaking: false, muted: true));
-        if (inVoice) VoiceMembers.Insert(2, VoiceMemberRow.Demo(SelfId, SelfName, speaking: false, muted: false, isMe: true));
+        if (inVoice) VoiceMembers.Insert(2, VoiceMemberRow.Demo(SelfId, SelfName, speaking: false, muted: false, isMe: true, photo: SelfPhoto));
         Messages.Clear();
         var today = DateTimeOffset.Now.Date;
         var at = (int h, int m) => new DateTimeOffset(today.AddHours(h).AddMinutes(m));
@@ -444,10 +577,30 @@ public sealed class RoomService
         AddMessage(new RoomChatMessage(bruno, "Bruno", 3, at(20, 3), "o som tá saindo bem aqui"));
         AddMessage(new RoomChatMessage(SelfId, SelfName, 4, at(20, 5), "Tô entrando. Ana, liga a câmera junto com a tela?"));
         AddMessage(new RoomChatMessage(ana, "Ana Lu", 5, at(20, 6), "Liguei! Agora vai tela, câmera e áudio ao mesmo tempo 🎮"));
+        if (wallpaper is not null)
+            AddMessage(new RoomChatMessage(ana, "Ana Lu", 7, at(20, 6), "O fundo que eu fiz pra live de hoje", Image: wallpaper));
         AddMessage(new RoomChatMessage(carla, "Carla-PC", 6, at(20, 7), "Já estou assistindo, ficou ótimo"));
         _unread = unread;
         Changed?.Invoke();
         UnreadChanged?.Invoke();
+        ProfileChanged?.Invoke();
+    }
+
+    /// <summary>Fotos e uma imagem de exemplo (recortes do fundo do app), guardadas como se tivessem chegado pela rede.</summary>
+    private static (string? Ana, string? Bruno, ChatImage? Wallpaper) DemoImages()
+    {
+        try
+        {
+            var picture = DemoData.ChatPicture();
+            var id = AppServices.Blobs.Put(picture.Data);
+            return (AppServices.Blobs.Put(DemoData.ProfilePhoto(860, 40, 300)), AppServices.Blobs.Put(DemoData.ProfilePhoto(880, 430, 320)),
+                new ChatImage(id, picture.Data.Length, picture.Width, picture.Height));
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"Imagens de exemplo: {exception.Message}");
+            return (null, null, null);
+        }
     }
 }
 
@@ -517,11 +670,14 @@ public sealed class RoomPersonRow(Guid id) : RoomRowBase, IRoomRow
     private bool _muted;
     private StreamMode _mode;
     private string? _watchAddress;
+    private ImageSource? _photo;
 
     public Guid Id { get; } = id;
     public AvatarColors Avatar { get; } = AvatarColors.For(id);
     public string Name { get => _name; private set => Set(ref _name, value, nameof(Name), nameof(Initial)); }
     public string Initial => AvatarColors.Initial(_name);
+    /// <summary>A foto do perfil (null: sem foto, ou ainda baixando).</summary>
+    public ImageSource? Photo { get => _photo; set => Set(ref _photo, value, nameof(Photo)); }
     public string StatusText { get => _status; private set => Set(ref _status, value, nameof(StatusText)); }
     public bool IsLive { get => _live; private set => Set(ref _live, value, nameof(IsLive), nameof(ActionText)); }
     public bool InVoice { get => _inVoice; private set => Set(ref _inVoice, value, nameof(InVoice)); }
@@ -547,11 +703,8 @@ public sealed class RoomPersonRow(Guid id) : RoomRowBase, IRoomRow
         StatusText = status;
     }
 
-    internal static RoomPersonRow Demo(Guid id, string name, string status, bool live, StreamMode mode, string? address, bool inVoice)
-    {
-        var row = new RoomPersonRow(id) { Name = name, StatusText = status, IsLive = live, LiveMode = mode, WatchAddress = address, InVoice = inVoice };
-        return row;
-    }
+    internal static RoomPersonRow Demo(Guid id, string name, string status, bool live, StreamMode mode, string? address, bool inVoice, ImageSource? photo = null)
+        => new(id) { Name = name, StatusText = status, IsLive = live, LiveMode = mode, WatchAddress = address, InVoice = inVoice, Photo = photo };
 }
 
 public readonly record struct VoiceMemberState(Guid Id, string Name, bool Muted, bool Deafened, bool IsMe);
@@ -564,11 +717,13 @@ public sealed class VoiceMemberRow(Guid id) : RoomRowBase, IRoomRow
     private bool _deafened;
     private bool _speaking;
     private bool _isMe;
+    private ImageSource? _photo;
 
     public Guid Id { get; } = id;
     public AvatarColors Avatar { get; } = AvatarColors.For(id);
     public string Name { get => _name; private set => Set(ref _name, value, nameof(Name), nameof(Initial), nameof(DisplayName)); }
     public string Initial => AvatarColors.Initial(_name);
+    public ImageSource? Photo { get => _photo; set => Set(ref _photo, value, nameof(Photo)); }
     public string DisplayName => _isMe ? $"{_name} (você)" : _name;
     public bool IsMe { get => _isMe; private set => Set(ref _isMe, value, nameof(IsMe), nameof(DisplayName)); }
     public bool Muted { get => _muted; private set => Set(ref _muted, value, nameof(Muted), nameof(ShowMuted)); }
@@ -586,24 +741,43 @@ public sealed class VoiceMemberRow(Guid id) : RoomRowBase, IRoomRow
         if (state.Muted || state.Deafened) Speaking = false;
     }
 
-    internal static VoiceMemberRow Demo(Guid id, string name, bool speaking, bool muted, bool isMe = false)
-        => new(id) { Name = name, Speaking = speaking, Muted = muted, IsMe = isMe };
+    internal static VoiceMemberRow Demo(Guid id, string name, bool speaking, bool muted, bool isMe = false, ImageSource? photo = null)
+        => new(id) { Name = name, Speaking = speaking, Muted = muted, IsMe = isMe, Photo = photo };
 }
+
+public enum ChatImageState { None, Loading, Ready, Failed }
 
 /// <summary>Uma mensagem do chat da rede.</summary>
 public sealed class ChatRow : RoomRowBase
 {
+    /// <summary>A caixa da imagem na conversa (a imagem diminui para caber, sem mudar o formato).</summary>
+    public const double PictureMaxWidth = 340;
+    public const double PictureMaxHeight = 280;
+    /// <summary>Largura em pixels com que a imagem é aberta para mostrar (nítida até 150% de escala, sem gastar memória à toa).</summary>
+    public const int PictureDecodeWidth = 720;
+
     private bool _showHeader = true;
+    private ImageSource? _photo;
+    private ImageSource? _picture;
+    private ChatImageState _imageState;
 
     public ChatRow(RoomChatMessage message, bool isMine)
     {
         AuthorId = message.AuthorId;
         MessageId = message.MessageId;
         Author = message.AuthorName;
-        Text = message.Text;
+        Text = message.Caption;
+        Image = message.Image;
         Time = message.Time;
         IsMine = isMine;
         Avatar = AvatarColors.For(message.AuthorId);
+        _imageState = Image is null ? ChatImageState.None : ChatImageState.Loading;
+        if (Image is { } image)
+        {
+            var scale = Math.Min(1, Math.Min(PictureMaxWidth / Math.Max(1, image.Width), PictureMaxHeight / Math.Max(1, image.Height)));
+            PictureWidth = Math.Max(48, Math.Round(image.Width * scale));
+            PictureHeight = Math.Max(48, Math.Round(image.Height * scale));
+        }
     }
 
     public Guid AuthorId { get; }
@@ -611,10 +785,31 @@ public sealed class ChatRow : RoomRowBase
     public string Author { get; }
     public string Initial => AvatarColors.Initial(Author);
     public string AuthorText => IsMine ? $"{Author} (você)" : Author;
+    /// <summary>O texto (a legenda, quando tem imagem; vazio quando a imagem foi sozinha).</summary>
     public string Text { get; }
+    public bool HasText => Text.Length > 0;
     public DateTimeOffset Time { get; }
     public bool IsMine { get; }
     public AvatarColors Avatar { get; }
+    public ImageSource? Photo { get => _photo; set => Set(ref _photo, value, nameof(Photo)); }
+
+    public ChatImage? Image { get; }
+    public bool HasImage => Image is not null;
+    public double PictureWidth { get; }
+    public double PictureHeight { get; }
+    public ImageSource? Picture { get => _picture; set => Set(ref _picture, value, nameof(Picture)); }
+
+    public ChatImageState ImageState
+    {
+        get => _imageState;
+        set => Set(ref _imageState, value, nameof(ImageState), nameof(ImageLoading), nameof(ImageFailed));
+    }
+
+    public bool ImageLoading => _imageState == ChatImageState.Loading;
+    public bool ImageFailed => _imageState == ChatImageState.Failed;
+
+    /// <summary>"1920 × 1080 · 320 KB" (na dica da imagem).</summary>
+    public string ImageInfo => Image is { } image ? $"{image.Width} × {image.Height} · {image.Size / 1024.0:0} KB" : string.Empty;
 
     /// <summary>"20:05" hoje; "24/11 20:05" em outro dia.</summary>
     public string TimeText

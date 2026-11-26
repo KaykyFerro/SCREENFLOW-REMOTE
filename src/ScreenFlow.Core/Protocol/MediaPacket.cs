@@ -31,8 +31,13 @@ public static class VideoTrack
     };
 }
 
+/// <summary>
+/// <see cref="SpreadFec"/> (1.1.1) marca a paridade espalhada: o grupo g junta os pacotes g, g + G, g + 2G... (G grupos)
+/// em vez de pacotes seguidos, então uma rajada de perdas cai em grupos diferentes e o FEC recupera todos. Só vai para
+/// quem anuncia "fec-spread"; os outros recebem a paridade de pacotes seguidos, como antes.
+/// </summary>
 [Flags]
-public enum MediaPacketFlags : byte { None = 0, Keyframe = 1, Retransmit = 2 }
+public enum MediaPacketFlags : byte { None = 0, Keyframe = 1, Retransmit = 2, SpreadFec = 4 }
 
 /// <summary>
 /// Cabeçalho de 32 bytes de cada datagrama UDP (porta 47800). Vai em claro, mas autenticado como AAD do AES-GCM.
@@ -123,6 +128,8 @@ public sealed class MediaChunk
 /// <summary>
 /// Divide um frame codificado em pacotes e adiciona paridade XOR (FEC) a cada grupo de N pacotes.
 /// Um pacote perdido por grupo é recuperado sem retransmissão; perdas maiores usam NACK.
+/// A paridade vai no meio dos dados (depois de cada N pacotes), e não toda no fim: uma rajada no fim do frame não leva
+/// a paridade de todos os grupos junto.
 /// </summary>
 public static class Packetizer
 {
@@ -130,7 +137,13 @@ public static class Packetizer
     public const int DefaultPayloadSize = 1150;
     public const int MaximumPacketsPerFrame = ushort.MaxValue;
 
+    /// <summary>Pacotes de dados e paridade, já na ordem de envio.</summary>
     public static List<MediaChunk> Packetize(MediaPacketType type, uint frameId, ReadOnlyMemory<byte> frame, long timestampUs,
+        bool keyframe, int payloadSize = DefaultPayloadSize, int fecGroupSize = 10, bool spreadFec = false)
+        => WithFec(Split(type, frameId, frame, timestampUs, keyframe, payloadSize, fecGroupSize), fecGroupSize, spreadFec);
+
+    /// <summary>Só os pacotes de dados, em ordem de índice (é o que o cache de retransmissão guarda).</summary>
+    public static List<MediaChunk> Split(MediaPacketType type, uint frameId, ReadOnlyMemory<byte> frame, long timestampUs,
         bool keyframe, int payloadSize = DefaultPayloadSize, int fecGroupSize = 10)
     {
         if (payloadSize is < 64 or > 8000) throw new ArgumentOutOfRangeException(nameof(payloadSize));
@@ -139,7 +152,7 @@ public static class Packetizer
         if (count > MaximumPacketsPerFrame) throw new InvalidDataException("Frame grande demais para o protocolo.");
 
         var flags = keyframe ? MediaPacketFlags.Keyframe : MediaPacketFlags.None;
-        var result = new List<MediaChunk>(count + (fecGroupSize > 0 ? count / fecGroupSize + 1 : 0));
+        var result = new List<MediaChunk>(count);
         for (var i = 0; i < count; i++)
         {
             var offset = i * payloadSize;
@@ -150,34 +163,77 @@ public static class Packetizer
                 Payload = frame.Slice(offset, length),
             });
         }
+        return result;
+    }
 
-        if (fecGroupSize > 1 && VideoTrack.FecType(type) is { } fecType)
+    /// <summary>
+    /// Junta a paridade aos dados na ordem de envio: depois de cada <paramref name="fecGroupSize"/> pacotes de dados vai
+    /// uma paridade. <paramref name="spread"/> escolhe os grupos espalhados (1.1.1) ou de pacotes seguidos (versões antigas).
+    /// </summary>
+    public static List<MediaChunk> WithFec(IReadOnlyList<MediaChunk> data, int fecGroupSize, bool spread)
+    {
+        if (data.Count == 0) return [];
+        var type = data[0].Header.Type;
+        if (fecGroupSize <= 1 || VideoTrack.FecType(type) is not { } fecType) return [.. data];
+
+        var count = data.Count;
+        var groups = FecGroups(count, fecGroupSize);
+        var header = data[0].Header;
+        var result = new List<MediaChunk>(count + groups);
+        for (var g = 0; g < groups; g++)
         {
-            var groups = (count + fecGroupSize - 1) / fecGroupSize;
-            for (var g = 0; g < groups; g++)
+            var start = g * fecGroupSize;
+            var end = Math.Min(count, start + fecGroupSize);
+            for (var i = start; i < end; i++) result.Add(data[i]);
+
+            var members = GroupMembers(g, count, fecGroupSize, spread);
+            if (members.Count < 2) continue; // grupo de 1 pacote: retransmissão é mais barata
+            var parity = BuildParity(data, members);
+            result.Add(new MediaChunk
             {
-                var start = g * fecGroupSize;
-                var end = Math.Min(count, start + fecGroupSize);
-                if (end - start < 2) continue; // grupo de 1 pacote: retransmissão é mais barata
-                var parity = BuildParity(result, start, end);
-                result.Add(new MediaChunk
+                Header = new MediaHeader
                 {
-                    Header = new MediaHeader { Type = fecType, FrameId = frameId, Index = (ushort)g, Count = (ushort)count, FecGroupSize = (byte)fecGroupSize, Flags = flags, TimestampUs = timestampUs, PayloadLength = (ushort)parity.Length },
-                    Payload = parity,
-                });
-            }
+                    Type = fecType, FrameId = header.FrameId, Index = (ushort)g, Count = (ushort)count, FecGroupSize = (byte)fecGroupSize,
+                    Flags = (header.Flags & MediaPacketFlags.Keyframe) | (spread ? MediaPacketFlags.SpreadFec : MediaPacketFlags.None),
+                    TimestampUs = header.TimestampUs, PayloadLength = (ushort)parity.Length,
+                },
+                Payload = parity,
+            });
         }
         return result;
     }
 
+    /// <summary>Quantos grupos de FEC um frame de <paramref name="count"/> pacotes tem (o mesmo nos dois jeitos).</summary>
+    public static int FecGroups(int count, int fecGroupSize) => (count + fecGroupSize - 1) / Math.Max(1, fecGroupSize);
+
+    /// <summary>
+    /// Índices dos pacotes de dados do grupo <paramref name="group"/>. Seguidos: g·N até g·N + N - 1. Espalhados: g, g + G,
+    /// g + 2G... com G grupos, então pacotes vizinhos estão sempre em grupos diferentes.
+    /// </summary>
+    public static List<int> GroupMembers(int group, int count, int fecGroupSize, bool spread)
+    {
+        var members = new List<int>(fecGroupSize);
+        if (spread)
+        {
+            var groups = FecGroups(count, fecGroupSize);
+            for (var i = group; i < count; i += groups) members.Add(i);
+        }
+        else
+        {
+            var end = Math.Min(count, (group + 1) * fecGroupSize);
+            for (var i = group * fecGroupSize; i < end; i++) members.Add(i);
+        }
+        return members;
+    }
+
     /// <summary>Paridade = [XOR dos tamanhos (2 bytes)] + XOR dos payloads com padding até o maior.</summary>
-    internal static byte[] BuildParity(IReadOnlyList<MediaChunk> chunks, int start, int end)
+    internal static byte[] BuildParity(IReadOnlyList<MediaChunk> chunks, IReadOnlyList<int> members)
     {
         var max = 0;
-        for (var i = start; i < end; i++) max = Math.Max(max, chunks[i].Payload.Length);
+        foreach (var i in members) max = Math.Max(max, chunks[i].Payload.Length);
         var parity = new byte[2 + max];
         ushort lengths = 0;
-        for (var i = start; i < end; i++)
+        foreach (var i in members)
         {
             var span = chunks[i].Payload.Span;
             lengths ^= (ushort)span.Length;

@@ -1,7 +1,8 @@
 namespace ScreenFlow.Core.Media;
 
 /// <summary>Medida de rede reportada pelo viewer em janelas de ~1 s.</summary>
-public readonly record struct NetworkSample(double LossRate, double RoundTripMs, double ReceivedKbps, double DecodeFps);
+/// <param name="SentFps">Frames que o host mandou no mesmo segundo (0 = desconhecido, compara com o FPS do perfil).</param>
+public readonly record struct NetworkSample(double LossRate, double RoundTripMs, double ReceivedKbps, double DecodeFps, double SentFps = 0);
 
 public sealed record StreamTarget(int BitrateKbps, int Fps, Resolution Resolution)
 {
@@ -17,6 +18,7 @@ public sealed class AdaptiveBitrateController
     private readonly StreamTarget _profile;
     private readonly VideoCodec _codec;
     private int _goodStreak;
+    private int _slowStreak;
     private double _baselineRtt = double.NaN;
 
     public AdaptiveBitrateController(StreamTarget profile, VideoCodec codec)
@@ -38,11 +40,16 @@ public sealed class AdaptiveBitrateController
             _baselineRtt = _baselineRtt * 0.98 + sample.RoundTripMs * 0.02;
 
         var congested = sample.LossRate > 0.02 || sample.RoundTripMs > _baselineRtt + 40;
-        var viewerSlow = sample.DecodeFps > 0 && sample.DecodeFps < Current.Fps * 0.8;
+        // O viewer só está lento se decodifica bem menos do que recebeu, por dois segundos seguidos. Com a tela parada
+        // (ou um vídeo de 30 FPS) o host manda menos frames, e isso não é motivo para baixar a qualidade.
+        var sent = sample.SentFps > 0 ? Math.Min(sample.SentFps, Current.Fps) : Current.Fps;
+        _slowStreak = sample.DecodeFps > 0 && sent >= 5 && sample.DecodeFps < sent * 0.8 ? _slowStreak + 1 : 0;
+        var viewerSlow = _slowStreak >= 2;
 
         if (congested || viewerSlow)
         {
             _goodStreak = 0;
+            if (viewerSlow) _slowStreak = 0;
             return Apply(StepDown(viewerSlow && !congested), congested ? $"perda {sample.LossRate:P1}, RTT {sample.RoundTripMs:0} ms" : $"viewer decodifica {sample.DecodeFps:0} FPS");
         }
 

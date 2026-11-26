@@ -7,6 +7,7 @@ using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
+using System.Windows.Threading;
 using ScreenFlow.App.Services;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
@@ -27,6 +28,8 @@ public partial class TransmitPage : UserControl, IShellPage
     private readonly ObservableCollection<ViewerRow> _viewerRows = [];
     private readonly ObservableCollection<AppChoice> _apps = [];
     private int _appsVersion;
+    private int _partyAppsVersion;
+    private bool _fillingPartyApps;
     private HostSession? _session;
     private System.Net.IPAddress? _liveAddress;
     private IReadOnlyList<DisplayMonitor> _monitors = [];
@@ -34,6 +37,14 @@ public partial class TransmitPage : UserControl, IShellPage
     private bool _starting;
     private Task? _camerasLoading;
     private bool _camerasFound;
+    private readonly DispatcherTimer _mediaTimer = new() { Interval = TimeSpan.FromMilliseconds(500) };
+    private MediaControls? _media;
+    private string? _mediaId;
+    private bool _mediaPinned;
+    private bool _mediaSeeking;
+    private bool _fillingMediaSessions;
+    private string? _mediaArtKey;
+    private string? _liveWindowExe;
 
     public TransmitPage(MainWindow shell)
     {
@@ -46,10 +57,13 @@ public partial class TransmitPage : UserControl, IShellPage
         FpsCombo.Fill(Quality.FrameRates.Select(f => new Choice<int>(f, $"{f} FPS")));
         CameraQualityCombo.Fill(OverviewPage.CameraQualities);
         MusicCombo.Fill(AudioProfile.MusicBitrates.Select(k => new Choice<int>(k, OverviewPage.MusicLabel(k))));
-        QualityCombo.SelectionChanged += (_, _) => UpdateProfileHint();
-        FpsCombo.SelectionChanged += (_, _) => UpdateProfileHint();
-        CameraQualityCombo.SelectionChanged += (_, _) => UpdateProfileHint();
+        QualityCombo.SelectionChanged += (_, _) => QualityChanged();
+        FpsCombo.SelectionChanged += (_, _) => QualityChanged();
+        CameraQualityCombo.SelectionChanged += (_, _) => QualityChanged();
         MusicCombo.SelectionChanged += (_, _) => UpdateProfileHint();
+        PartyAppCombo.SelectionChanged += (_, _) => PartyApp_Changed();
+        MediaSessionCombo.SelectionChanged += (_, _) => MediaSession_Changed();
+        _mediaTimer.Tick += (_, _) => UpdateMedia();
         AudioToggle.Checked += (_, _) => UpdateAudioCard();
         AudioToggle.Unchecked += (_, _) => UpdateAudioCard();
         Spectrum.Source = () => _session?.AudioMeter;
@@ -61,7 +75,9 @@ public partial class TransmitPage : UserControl, IShellPage
         shell.NetworkStatusChanged += () =>
         {
             if (_session is null && _loaded) RefreshNetwork();
+            else UpdateRadminPanel();
         };
+        AppServices.RadminSetup.Changed += UpdateRadminPanel;
     }
 
     public bool IsRunning => _session is not null;
@@ -104,6 +120,7 @@ public partial class TransmitPage : UserControl, IShellPage
         CameraQualityCombo.SelectValue((Resolution.FromLabel(Settings.CameraResolution), Settings.CameraFps));
         MusicCombo.SelectValue(Settings.MusicBitrateKbps, k => k);
         AudioToggle.IsChecked = Settings.AudioEnabled;
+        FixedQualityToggle.IsChecked = !Settings.AdaptiveQuality;
         CameraWithScreenToggle.IsChecked = Settings.CameraWithScreen;
         ApproveToggle.IsChecked = Settings.ApproveEachViewer;
         PinBox.Text = Settings.Pin ?? string.Empty;
@@ -131,14 +148,73 @@ public partial class TransmitPage : UserControl, IShellPage
         ScreenOptions.Visibility = mode == StreamMode.Screen ? Visibility.Visible : Visibility.Collapsed;
         CameraOptions.Visibility = mode == StreamMode.Camera ? Visibility.Visible : Visibility.Collapsed;
         PartyOptions.Visibility = mode == StreamMode.AudioOnly ? Visibility.Visible : Visibility.Collapsed;
-        AudioToggle.Visibility = mode == StreamMode.AudioOnly ? Visibility.Collapsed : Visibility.Visible;
+        AudioToggle.Visibility = FixedQualityToggle.Visibility = mode == StreamMode.AudioOnly ? Visibility.Collapsed : Visibility.Visible;
         OptionsTitle.Text = StreamModes.Label(mode);
         StartText.Text = mode == StreamMode.AudioOnly ? "Começar a festa" : "Iniciar transmissão";
         StartGlyph.Text = mode switch { StreamMode.Camera => "", StreamMode.AudioOnly => "", _ => "" };
         if (mode == StreamMode.Camera) _ = LoadCamerasAsync();
+        if (mode == StreamMode.AudioOnly) _ = LoadPartyAppsAsync();
         UpdateAudioCard();
         UpdateProfileHint();
+        UpdateMutedApps();
     }
+
+    // ───────────────────────── Festa de música: o app da música ─────────────────────────
+
+    private void RefreshPartyApps_Click(object sender, RoutedEventArgs e) => _ = LoadPartyAppsAsync();
+
+    /// <summary>"O que toca na festa": todo o som do PC ou um app só (os que estão tocando som aparecem primeiro).</summary>
+    private async Task LoadPartyAppsAsync()
+    {
+        var version = ++_partyAppsVersion;
+        IReadOnlyList<RunningApp> running = [];
+        if (AppServices.DemoMode) running = DemoData.PartyApps;
+        else
+        {
+            try { running = await Task.Run(AppAudioCatalog.List); }
+            catch (Exception exception) { Log.Warn($"Não deu para listar os apps abertos: {exception.Message}"); }
+        }
+        if (version != _partyAppsVersion) return;
+
+        var saved = Settings.PartyApp;
+        var choices = new List<Choice<MutedApp?>> { new(null, "Todo o som do PC") };
+        choices.AddRange(running.Select(app => new Choice<MutedApp?>(new MutedApp(app.Exe, app.Name), app.PlayingSound ? $"Só {app.Name} · tocando agora" : $"Só {app.Name}")));
+        if (saved is not null && running.All(app => app.Exe != saved.Exe)) choices.Add(new(saved, $"Só {saved.Name} · fechado agora"));
+        _fillingPartyApps = true;
+        PartyAppCombo.Fill(choices);
+        PartyAppCombo.SelectedItem = choices.FirstOrDefault(c => c.Value?.Exe == saved?.Exe) ?? choices[0];
+        _fillingPartyApps = false;
+        UpdatePartyInfo();
+    }
+
+    private void PartyApp_Changed()
+    {
+        if (_fillingPartyApps || PartyAppCombo.SelectedItem is not Choice<MutedApp?> choice) return;
+        var app = choice.Value;
+        if (app?.Exe == Settings.PartyApp?.Exe) return;
+        Settings.PartyApp = app;
+        AppServices.Settings.Save();
+        UpdatePartyInfo();
+        if (_session?.Mode != StreamMode.AudioOnly)
+        {
+            UpdateMutedApps();
+            return;
+        }
+        OnAudioSettingsChanged();
+        _shell.Toast(app is null ? "A festa agora toca todo o som do PC." : $"A festa agora toca só o som de {app.Name}.", ToastKind.Success);
+    }
+
+    private void UpdatePartyInfo()
+    {
+        const string quality = "Opus estéreo 48 kHz, com cópia de cada pacote no seguinte: se um se perder na rede, ninguém percebe.";
+        PartyInfoText.Text = Settings.PartyApp is { } app
+            ? $"Toca só o som de {app.Name}: notificações, jogos e o resto do PC ficam de fora. Dá para trocar com a festa no ar. {quality}"
+            : $"Toca tudo o que sai no som do PC (Spotify, YouTube, jogos). Para tocar só a música, escolha o app dela aqui em cima. {quality}";
+    }
+
+    /// <summary>Como separar o som do PC para a transmissão neste modo (a festa pode ir com o som de um app só).</summary>
+    private SystemAudioOptions AudioOptions(StreamMode mode)
+        => new(Settings.SeparateAppAudio, Settings.MutedApps, mode == StreamMode.AudioOnly ? Settings.PartyApp : null);
 
     /// <summary>"Mandar a câmera junto": mostra a escolha da câmera e já procura as câmeras do PC.</summary>
     private void CameraWithScreen_Changed(object sender, RoutedEventArgs e)
@@ -150,12 +226,98 @@ public partial class TransmitPage : UserControl, IShellPage
         UpdateProfileHint();
     }
 
+    private void FixedQuality_Changed(object sender, RoutedEventArgs e)
+    {
+        if (IsInitialized) QualityChanged();
+    }
+
+    private void QualityChanged()
+    {
+        UpdateProfileHint();
+        if (!_syncingQuality) ApplyLiveQuality();
+    }
+
+    private bool _syncingQuality;
+
+    /// <summary>
+    /// A qualidade foi salva nas Configurações: com a transmissão no ar, vale na hora (uma troca só). true quando mudou
+    /// (e o aviso já apareceu).
+    /// </summary>
+    public bool ApplySettingsQualityLive()
+    {
+        if (_session is not { HasVideo: true }) return false;
+        _syncingQuality = true;
+        try
+        {
+            QualityCombo.SelectValue(Resolution.FromLabel(Settings.Resolution));
+            FpsCombo.SelectValue(Settings.Fps, f => f);
+            CameraQualityCombo.SelectValue((Resolution.FromLabel(Settings.CameraResolution), Settings.CameraFps));
+            FixedQualityToggle.IsChecked = !Settings.AdaptiveQuality;
+        }
+        finally { _syncingQuality = false; }
+        return ApplyLiveQuality();
+    }
+
+    /// <summary>
+    /// Qualidade trocada com a transmissão no ar (resolução, FPS ou qualidade fixa): vale na hora para quem está
+    /// assistindo e fica salva para a próxima vez.
+    /// </summary>
+    private bool ApplyLiveQuality()
+    {
+        if (!IsInitialized || _session is not { HasVideo: true } session) return false;
+        Resolution? resolution;
+        int fps;
+        if (session.Mode == StreamMode.Camera)
+        {
+            if (CameraQualityCombo.SelectedItem is not Choice<(Resolution Resolution, int Fps)> camera) return false;
+            (resolution, fps) = camera.Value;
+        }
+        else
+        {
+            resolution = QualityCombo.Value<Resolution>();
+            fps = FpsCombo.SelectedItem is Choice<int> f ? f.Value : 0;
+        }
+        if (resolution is null || fps <= 0) return false;
+        var adaptive = FixedQualityToggle.IsChecked != true;
+        if (!session.ChangeQuality(resolution, fps, adaptive)) return false;
+
+        if (session.Mode == StreamMode.Camera)
+        {
+            Settings.CameraResolution = resolution.Label;
+            Settings.CameraFps = fps;
+        }
+        else
+        {
+            Settings.Resolution = resolution.Label;
+            Settings.Fps = fps;
+        }
+        Settings.AdaptiveQuality = adaptive;
+        AppServices.Settings.Save();
+        _shell.Toast(adaptive
+            ? $"Qualidade agora: {resolution.Label} a {fps} FPS. Quem está assistindo já recebe assim."
+            : $"Qualidade fixa em {resolution.Label} a {fps} FPS. Quem está assistindo já recebe assim.", ToastKind.Success);
+        return true;
+    }
+
+    /// <summary>
+    /// Ao vivo, trava só o que não dá para trocar com a transmissão no ar (o modo, a tela ou câmera, quem pode entrar).
+    /// A qualidade continua livre.
+    /// </summary>
+    private void LockWhileLive(bool live)
+    {
+        ModeGrid.IsEnabled = AccessPanel.IsEnabled = !live;
+        SourceRow.IsEnabled = CameraWithScreenToggle.IsEnabled = OverlayCameraPanel.IsEnabled = CameraRow.IsEnabled = !live;
+        MusicCombo.IsEnabled = AudioToggle.IsEnabled = !live;
+    }
+
     private void UpdateAudioCard()
     {
         var mode = _session?.Mode ?? SelectedMode;
         var audio = mode == StreamMode.AudioOnly || (_session?.AudioEnabled ?? AudioToggle.IsChecked == true);
         AudioCard.Visibility = audio ? Visibility.Visible : Visibility.Collapsed;
     }
+
+    private const string FixedHint = " Qualidade fixa: ela não baixa sozinha, então se a rede não aguentar a imagem pode travar.";
 
     private void UpdateProfileHint()
     {
@@ -169,7 +331,8 @@ public partial class TransmitPage : UserControl, IShellPage
             case StreamMode.Camera when CameraQualityCombo.SelectedItem is Choice<(Resolution Resolution, int Fps)> camera:
                 var codec = Settings.PreferredCodec ?? VideoCodec.Hevc;
                 var kbps = Quality.TargetBitrateKbps(camera.Value.Resolution, camera.Value.Fps, codec);
-                ProfileHint.Text = $"Cerca de {kbps / 1000.0:0.#} Mbps por pessoa em {Quality.CodecLabel(codec)}. A câmera usa o formato mais próximo que ela suportar.";
+                ProfileHint.Text = $"Cerca de {kbps / 1000.0:0.#} Mbps por pessoa em {Quality.CodecLabel(codec)}. A câmera usa o formato mais próximo que ela suportar."
+                                   + (FixedQualityToggle.IsChecked == true ? FixedHint : string.Empty);
                 break;
             default:
                 if (QualityCombo.Value<Resolution>() is not { } resolution || FpsCombo.SelectedItem is not Choice<int> fps) return;
@@ -178,12 +341,15 @@ public partial class TransmitPage : UserControl, IShellPage
                 var text = $"Perfil {Quality.TierLabel(resolution, fps.Value)}: cerca de {target / 1000.0:0} Mbps por pessoa em {Quality.CodecLabel(screenCodec)}.";
                 if (CameraWithScreenToggle.IsChecked == true)
                     text += $" A câmera junto usa mais uns {Quality.CameraOverlayBitrateKbps(1280, 720, 30, screenCodec) / 1000.0:0.#} Mbps por pessoa.";
+                var fixedQuality = FixedQualityToggle.IsChecked == true;
                 if (Settings.UploadMbps > 0)
                 {
                     var people = Math.Max(1, (int)(Settings.UploadMbps * 0.8 * 1000 / target));
-                    text += $" Com o seu upload ({Settings.UploadMbps:0} Mbps) cabem umas {people} pessoas nessa qualidade; acima disso a qualidade se ajusta sozinha.";
+                    text += $" Com o seu upload ({Settings.UploadMbps:0} Mbps) cabem umas {people} pessoas nessa qualidade"
+                            + (fixedQuality ? "." : "; acima disso a qualidade se ajusta sozinha.");
                 }
-                else text += " Com mais gente assistindo, o upload é dividido e a qualidade se ajusta sozinha.";
+                else if (!fixedQuality) text += " Com mais gente assistindo, o upload é dividido e a qualidade se ajusta sozinha.";
+                if (fixedQuality) text += FixedHint;
                 ProfileHint.Text = text;
                 break;
         }
@@ -200,6 +366,26 @@ public partial class TransmitPage : UserControl, IShellPage
         AdapterCombo.SelectValue(adapters.FirstOrDefault(a => a.Address.Equals(previous?.Address)) ?? radmin ?? adapters.FirstOrDefault()!);
         RadminMissing.Visibility = radmin is null ? Visibility.Visible : Visibility.Collapsed;
         UpdateIp();
+        UpdateRadminPanel();
+    }
+
+    /// <summary>Sem o Radmin: instalar pelo app (com o andamento aqui) ou, já instalado, abrir para entrar numa rede.</summary>
+    private void UpdateRadminPanel()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(UpdateRadminPanel);
+            return;
+        }
+        var setup = AppServices.RadminSetup;
+        var installed = _shell.RadminInstalled;
+        RadminMissingText.Text = setup.Busy || (setup.Status is not null && !installed) ? setup.Status
+            : installed ? "O Radmin VPN está instalado, mas sem rede ativa. Abra o Radmin, entre na mesma rede que os outros e clique em Tentar de novo."
+            : "O Radmin VPN não está instalado. O ScreenFlow baixa do site oficial e instala para você (o Windows vai pedir permissão).";
+        RadminProgress.Visibility = setup.Progress is null ? Visibility.Collapsed : Visibility.Visible;
+        RadminProgress.Value = setup.Progress ?? 0;
+        RadminActionButton.Content = installed && !setup.Busy ? "Abrir o Radmin VPN" : "Instalar o Radmin VPN";
+        RadminActionButton.IsEnabled = !setup.Busy;
     }
 
     private void UpdateIp()
@@ -218,7 +404,15 @@ public partial class TransmitPage : UserControl, IShellPage
 
     private void Adapter_SelectionChanged(object sender, SelectionChangedEventArgs e) => UpdateIp();
     private void RefreshNetwork_Click(object sender, RoutedEventArgs e) => RefreshNetwork();
-    private void InstallRadmin_Click(object sender, RoutedEventArgs e) => MainWindow.OpenUrl(AppInfo.RadminDownloadUrl);
+    private async void RadminAction_Click(object sender, RoutedEventArgs e)
+    {
+        if (_shell.RadminInstalled)
+        {
+            if (!RadminSetup.OpenApp()) _shell.Toast("Abra o Radmin VPN pelo menu Iniciar e entre na mesma rede que os outros.", ToastKind.Info);
+            return;
+        }
+        if (await AppServices.RadminSetup.InstallAsync(_shell)) RefreshNetwork();
+    }
 
     private void RefreshSources()
     {
@@ -368,6 +562,7 @@ public partial class TransmitPage : UserControl, IShellPage
 
         Settings.Mode = mode;
         Settings.AudioEnabled = AudioToggle.IsChecked == true;
+        if (mode != StreamMode.AudioOnly) Settings.AdaptiveQuality = FixedQualityToggle.IsChecked != true;
         Settings.CameraWithScreen = CameraWithScreenToggle.IsChecked == true;
         Settings.ApproveEachViewer = ApproveToggle.IsChecked == true;
         Settings.Pin = pin.Length == 0 ? null : pin;
@@ -391,7 +586,7 @@ public partial class TransmitPage : UserControl, IShellPage
                 Settings.PreferredCodec, Settings.PreferredEncoder, hardware.Encoders,
                 mode == StreamMode.AudioOnly || Settings.AudioEnabled, Settings.AudioBitrateKbps, Settings.AdaptiveQuality, Settings.FecGroupSize, Settings.UploadMbps,
                 mode, Settings.MusicBitrateKbps, OverlayCamera: overlay,
-                AudioSeparation: new SystemAudioOptions(Settings.SeparateAppAudio, Settings.MutedApps));
+                AudioSeparation: AudioOptions(mode));
 
             var session = new HostSession(options) { ApprovalHandler = RequestApprovalAsync };
             session.StatusChanged += message => Dispatcher.BeginInvoke(() => StateText.Text = message);
@@ -400,9 +595,11 @@ public partial class TransmitPage : UserControl, IShellPage
             session.BandwidthMeasured += (name, mbps) => Dispatcher.BeginInvoke(() => OnBandwidthMeasured(name, mbps));
             await Task.Run(session.Start);
             _liveAddress = adapter.Address;
+            _liveWindowExe = target.Kind == CaptureKind.Window ? WindowDiscovery.ProcessExe(target.Handle) : null;
             _session = session;
+            _ = StartMediaAsync();
 
-            ModeGrid.IsEnabled = OptionsPanel.IsEnabled = AccessPanel.IsEnabled = false;
+            LockWhileLive(true);
             StartButton.Visibility = Visibility.Collapsed;
             StopButton.Visibility = Visibility.Visible;
             SetBadge("Ao vivo", "Pink", "PinkSoft");
@@ -442,12 +639,13 @@ public partial class TransmitPage : UserControl, IShellPage
         foreach (var pending in _approvals.ToList()) pending.Completion.TrySetResult(false);
         if (session is not null) await session.DisposeAsync();
         if (!Dispatcher.CheckAccess()) return;
+        StopMedia();
         _approvals.Clear();
         ApprovalCard.Visibility = Visibility.Collapsed;
         _viewerRows.Clear();
         NoViewers.Visibility = Visibility.Visible;
         ViewerCount.Text = string.Empty;
-        ModeGrid.IsEnabled = OptionsPanel.IsEnabled = AccessPanel.IsEnabled = true;
+        LockWhileLive(false);
         StartButton.Visibility = Visibility.Visible;
         StopButton.Visibility = Visibility.Collapsed;
         StatViewers.Text = "0";
@@ -460,6 +658,139 @@ public partial class TransmitPage : UserControl, IShellPage
         Telemetry.EndHost();
         UpdateAudioCard();
         _shell.NotifyLiveStateChanged();
+        if (session is not null) _shell.ShowAfterSessionEnded(this);
+    }
+
+    // ───────────────────────── O que está tocando (controles de mídia do Windows) ─────────────────────────
+
+    private async Task StartMediaAsync()
+    {
+        if (AppServices.DemoMode) return;
+        var media = await MediaControls.OpenAsync();
+        if (media is null) return;
+        if (_session is null || _media is not null)
+        {
+            media.Dispose();
+            return;
+        }
+        _media = media;
+        _mediaTimer.Start();
+        UpdateMedia();
+    }
+
+    private void StopMedia()
+    {
+        _mediaTimer.Stop();
+        var media = _media;
+        _media = null;
+        media?.Dispose();
+        _mediaId = null;
+        _mediaPinned = false;
+        _mediaSeeking = false;
+        _mediaArtKey = null;
+        MediaCard.Visibility = Visibility.Collapsed;
+    }
+
+    /// <summary>O app que está sendo transmitido: o dono da janela ou o app da festa (para mostrar a mídia dele).</summary>
+    private string? SharedAppExe() => _session?.Mode == StreamMode.AudioOnly ? Settings.PartyApp?.Exe : _liveWindowExe;
+
+    private void UpdateMedia()
+    {
+        if (_media is not { } media || _session is null)
+        {
+            MediaCard.Visibility = Visibility.Collapsed;
+            return;
+        }
+        var sessions = media.Sessions;
+        if (media.Pick(SharedAppExe(), _mediaPinned ? _mediaId : null) is not { } info)
+        {
+            MediaCard.Visibility = Visibility.Collapsed;
+            return;
+        }
+        _mediaId = info.Id;
+        FillMediaSessions(sessions, info.Id);
+        ShowMedia(info, DateTimeOffset.UtcNow);
+    }
+
+    private void ShowMedia(MediaSessionInfo info, DateTimeOffset now)
+    {
+        MediaCard.Visibility = Visibility.Visible;
+        MediaApp.Text = $"{info.AppName} · {(info.Playing ? "tocando agora" : "pausado")}";
+        MediaTitle.Text = info.Title.Length > 0 ? info.Title : info.AppName;
+        MediaArtist.Text = info.Artist;
+        MediaArtist.Visibility = info.Artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        MediaPlayGlyph.Text = info.Playing ? "\uE769" : "\uE768";
+        MediaPlayPause.ToolTip = info.Playing ? "Pausar" : "Tocar";
+        MediaPrevious.IsEnabled = info.CanPrevious;
+        MediaNext.IsEnabled = info.CanNext;
+        MediaPlayPause.IsEnabled = info.CanPlayPause;
+
+        var duration = info.Timeline.Duration;
+        MediaSeekRow.Visibility = duration > TimeSpan.Zero ? Visibility.Visible : Visibility.Collapsed;
+        MediaSeek.IsEnabled = info.CanSeek;
+        MediaDuration.Text = MediaApps.FormatTime(duration);
+        if (!_mediaSeeking)
+        {
+            var position = info.Timeline.PositionAt(now);
+            MediaSeek.Maximum = Math.Max(1, duration.TotalSeconds);
+            MediaSeek.Value = Math.Min(MediaSeek.Maximum, position.TotalSeconds);
+            MediaPosition.Text = MediaApps.FormatTime(position);
+        }
+
+        var artKey = info.Thumbnail is null ? null : $"{info.Id}\n{info.Title}\n{info.Artist}\n{info.Thumbnail.Length}";
+        if (artKey == _mediaArtKey) return;
+        _mediaArtKey = artKey;
+        var image = ToImage(info.Thumbnail);
+        MediaArt.Background = image is null ? null : new ImageBrush(image) { Stretch = Stretch.UniformToFill };
+        MediaArt.Visibility = image is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>Com mais de um app tocando, uma lista para escolher qual controlar.</summary>
+    private void FillMediaSessions(IReadOnlyList<MediaSessionInfo> sessions, string selected)
+    {
+        MediaSessionCombo.Visibility = sessions.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        var choices = sessions.Select((s, i) => new Choice<string>(s.Id, sessions.Take(i).Any(o => o.AppName == s.AppName) ? $"{s.AppName} ({i + 1})" : s.AppName)).ToList();
+        _fillingMediaSessions = true;
+        if (!choices.SequenceEqual(MediaSessionCombo.Items.OfType<Choice<string>>())) MediaSessionCombo.Fill(choices);
+        MediaSessionCombo.SelectValue(selected);
+        _fillingMediaSessions = false;
+    }
+
+    private void MediaSession_Changed()
+    {
+        if (_fillingMediaSessions || MediaSessionCombo.Value<string>() is not { } id) return;
+        _mediaId = id;
+        _mediaPinned = true;
+        _mediaArtKey = null;
+        UpdateMedia();
+    }
+
+    private async void MediaPrevious_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.Previous);
+    private async void MediaPlayPause_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.PlayPause);
+    private async void MediaNext_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.Next);
+
+    private async Task MediaCommandAsync(MediaCommand command)
+    {
+        if (_media is not { } media || _mediaId is not { } id) return;
+        if (!await media.SendAsync(id, command)) _shell.Toast("O app não aceitou o comando. Alguns apps não deixam pular ou voltar.", ToastKind.Warning);
+    }
+
+    private void MediaSeek_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (MediaSeek.IsEnabled) _mediaSeeking = true;
+    }
+
+    private async void MediaSeek_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (!_mediaSeeking) return;
+        _mediaSeeking = false;
+        if (_media is not { } media || _mediaId is not { } id) return;
+        if (!await media.SeekAsync(id, TimeSpan.FromSeconds(MediaSeek.Value))) _shell.Toast("O app não deixou mudar o ponto da música ou do vídeo.", ToastKind.Warning);
+    }
+
+    private void MediaSeek_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_mediaSeeking) MediaPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(e.NewValue));
     }
 
     private void ShowError(string message)
@@ -642,16 +973,24 @@ public partial class TransmitPage : UserControl, IShellPage
     /// <summary>As opções do som do PC mudaram (aqui ou nas Configurações): vale na hora para a transmissão no ar.</summary>
     public void OnAudioSettingsChanged()
     {
-        _session?.ConfigureAudio(new SystemAudioOptions(Settings.SeparateAppAudio, Settings.MutedApps));
+        if (_session is { } session) session.ConfigureAudio(AudioOptions(session.Mode));
         UpdateMutedApps();
     }
 
     /// <summary>"Fica fora da transmissão": o que foi pedido ou, ao vivo, o que está acontecendo de fato.</summary>
     private void UpdateMutedApps()
     {
+        if (!IsInitialized) return;
         var names = Settings.MutedApps.Select(a => a.Name).ToList();
         var live = _session?.AudioSeparated;
-        if (live == true)
+        // Festa com o som de um app só: tirar apps não faz diferença.
+        var partyApp = (_session?.Mode ?? SelectedMode) == StreamMode.AudioOnly ? Settings.PartyApp : null;
+        ChooseAppsButton.IsEnabled = partyApp is null;
+        if (_session?.AudioOnlyApp is { } only)
+            MutedAppsText.Text = $"Tudo menos {only}: a festa toca só o som dele.";
+        else if (_session is null && partyApp is not null)
+            MutedAppsText.Text = $"Tudo menos {partyApp.Name}: a festa toca só o som dele.";
+        else if (live == true)
             MutedAppsText.Text = $"Agora vai o som do PC {_session!.AudioSeparation}.";
         else if (live == false)
             MutedAppsText.Text = Settings.SeparateAppAudio
@@ -716,7 +1055,7 @@ public partial class TransmitPage : UserControl, IShellPage
         CameraWithScreenToggle.IsChecked = true;
         var meter = DemoData.LiveMeter();
         Spectrum.Source = () => meter;
-        ModeGrid.IsEnabled = OptionsPanel.IsEnabled = AccessPanel.IsEnabled = false;
+        LockWhileLive(true);
         StartButton.Visibility = Visibility.Collapsed;
         StopButton.Visibility = Visibility.Visible;
         SetBadge("Ao vivo", "Pink", "PinkSoft");
@@ -740,6 +1079,9 @@ public partial class TransmitPage : UserControl, IShellPage
         NoViewers.Visibility = Visibility.Collapsed;
         ViewerCount.Text = "3 pessoas";
         UpdateAudioCard();
+        var now = DateTimeOffset.UtcNow;
+        ShowMedia(new MediaSessionInfo("Spotify.exe", "Spotify.exe", "Spotify", "Noite de Sexta", "Banda da Rede",
+            new PlaybackTimeline(TimeSpan.FromSeconds(83), TimeSpan.FromSeconds(214), now, true), true, true, true, true, null), now);
     }
 
     /// <summary>Abre "Tirar o som de apps" com apps de exemplo (para a captura de tela).</summary>

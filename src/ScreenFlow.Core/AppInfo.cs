@@ -16,7 +16,6 @@ public static class AppInfo
 
     public const string GitHubOwner = "KaykyFerro";
     public const string GitHubRepository = "SCREENFLOW-REMOTE";
-    public const string RadminDownloadUrl = "https://www.radmin-vpn.com/";
 
     public static Version Version { get; } =
         typeof(AppInfo).Assembly.GetName().Version ?? new Version(1, 0, 0);

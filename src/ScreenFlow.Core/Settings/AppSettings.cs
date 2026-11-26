@@ -10,7 +10,10 @@ public enum AppTheme { Dark, Light }
 public sealed class AppSettings
 {
     public AppTheme Theme { get; set; } = AppTheme.Dark;
+    /// <summary>Seu nome: aparece no chat, na voz e para quem assiste (no começo é o nome do PC).</summary>
     public string DeviceName { get; set; } = Environment.MachineName;
+    /// <summary>A sua foto do perfil (id do arquivo guardado na pasta de imagens). Null: aparece a inicial do nome.</summary>
+    public string? AvatarId { get; set; }
 
     // Rede
     public int MediaPort { get; set; } = AppInfo.DefaultMediaPort;
@@ -49,6 +52,8 @@ public sealed class AppSettings
     public bool SeparateAppAudio { get; set; } = true;
     /// <summary>Apps cujo som não vai na transmissão (Spotify, Discord...).</summary>
     public List<MutedApp> MutedApps { get; set; } = [];
+    /// <summary>Festa de música com o som de um app só (o Spotify, por exemplo). Null: todo o som do PC.</summary>
+    public MutedApp? PartyApp { get; set; }
 
     // Segurança
     public string? Pin { get; set; }
@@ -71,6 +76,8 @@ public sealed class AppSettings
     /// <summary>Fechar e minimizar levam o app para a bandeja (perto do relógio) em vez de fechar.</summary>
     public bool MinimizeToTray { get; set; } = true;
     public bool TrayHintShown { get; set; }
+    /// <summary>Quando a transmissão acaba (ou o player fecha) com o ScreenFlow na bandeja, a janela volta sozinha.</summary>
+    public bool ShowWindowWhenSessionEnds { get; set; } = true;
 
     // Sala da rede: voz e chat com todo mundo que está na mesma rede
     /// <summary>Identifica este PC na sala da rede. Gerado na primeira vez que o app abre.</summary>
@@ -121,7 +128,10 @@ public sealed class AppSettings
         UploadMbps = Math.Clamp(UploadMbps, 0, 100_000);
         Volume = Math.Clamp(Volume, 0, 1);
         if (!Security.SessionCrypto.IsValidPin(Pin)) Pin = null;
-        if (string.IsNullOrWhiteSpace(DeviceName)) DeviceName = Environment.MachineName;
+        DeviceName = (DeviceName ?? string.Empty).Trim();
+        if (DeviceName.Length > Room.RoomPacket.MaxNameLength) DeviceName = DeviceName[..Room.RoomPacket.MaxNameLength].TrimEnd();
+        if (DeviceName.Length == 0) DeviceName = Environment.MachineName;
+        if (!Room.RoomBlob.IsValidId(AvatarId)) AvatarId = null;
         RecentHosts ??= [];
         if (InstanceId is null || !Guid.TryParseExact(InstanceId, "N", out _)) InstanceId = Guid.NewGuid().ToString("N");
         if (string.IsNullOrWhiteSpace(MicrophoneId)) MicrophoneId = null;
@@ -129,6 +139,7 @@ public sealed class AppSettings
         VoiceSensitivity = Math.Clamp(VoiceSensitivity, 0, 1);
         RoomPeers = (RoomPeers ?? []).Select(p => p.Trim()).Where(p => p.Length is > 0 and <= 64).Distinct(StringComparer.OrdinalIgnoreCase).Take(16).ToList();
         MutedApps = MutedApp.Normalize(MutedApps);
+        PartyApp = MutedApp.Normalize([PartyApp]).FirstOrDefault();
     }
 
     private static int ValidPort(int port, int fallback) => port is >= 1024 and <= 65535 ? port : fallback;

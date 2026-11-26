@@ -30,6 +30,7 @@ public partial class OverviewPage : UserControl, IShellPage
         MusicCombo.SelectionChanged += (_, _) => UpdateProfileCard();
         SizeChanged += (_, _) => EnvGrid.Columns = ActualWidth >= 1060 ? 4 : 2;
         shell.NetworkStatusChanged += UpdateNetworkCard;
+        AppServices.RadminSetup.Changed += UpdateNetworkCard;
         shell.LiveStateChanged += UpdateLiveState;
     }
 
@@ -262,8 +263,26 @@ public partial class OverviewPage : UserControl, IShellPage
     private void UpdateNetworkCard()
     {
         var radmin = _shell.Radmin;
-        NetworkValue.Text = radmin?.Address.ToString() ?? "Desconectado";
-        NetworkDetail.Text = radmin is null ? "Abra o Radmin VPN e entre numa rede" : Settings.FirewallConfigured ? "Firewall liberado" : "Portas fechadas no firewall";
+        var setup = AppServices.RadminSetup;
+        var installed = _shell.RadminInstalled;
+        NetworkValue.Text = radmin?.Address.ToString() ?? (installed ? "Desconectado" : "Não instalado");
+        NetworkDetail.Text = radmin is not null ? (Settings.FirewallConfigured ? "Firewall liberado" : "Portas fechadas no firewall")
+            : setup.Busy || (setup.Status is not null && !installed) ? setup.Status
+            : installed ? "Abra o Radmin VPN e entre numa rede" : "O ScreenFlow baixa e instala para você";
         NetworkTile.Style = (Style)FindResource(radmin is null ? "IconTileAmber" : "IconTileCyan");
+        RadminProgress.Visibility = setup.Progress is null ? Visibility.Collapsed : Visibility.Visible;
+        RadminProgress.Value = setup.Progress ?? 0;
+        RadminButton.Visibility = radmin is null && !setup.Busy ? Visibility.Visible : Visibility.Collapsed;
+        RadminButton.Content = installed ? "Abrir o Radmin VPN" : "Instalar o Radmin VPN";
+    }
+
+    private async void RadminButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (_shell.RadminInstalled)
+        {
+            if (!RadminSetup.OpenApp()) _shell.Toast("Abra o Radmin VPN pelo menu Iniciar e entre na mesma rede que os outros.", ToastKind.Info);
+            return;
+        }
+        await AppServices.RadminSetup.InstallAsync(_shell);
     }
 }

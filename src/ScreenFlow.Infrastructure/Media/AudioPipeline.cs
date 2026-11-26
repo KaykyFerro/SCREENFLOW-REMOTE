@@ -151,8 +151,11 @@ internal sealed class OpusFramer : IDisposable
     public void Dispose() => _encoder.Dispose();
 }
 
-/// <summary>Como separar o som do PC: tirar a voz da rede e os sons do ScreenFlow, e quais apps tirar também.</summary>
-public sealed record SystemAudioOptions(bool SeparateApps = true, IReadOnlyList<MutedApp>? MutedApps = null);
+/// <summary>
+/// Como separar o som do PC: tirar a voz da rede e os sons do ScreenFlow, e quais apps tirar também. Com
+/// <paramref name="OnlyApp"/> (festa de música), vai só o som desse app.
+/// </summary>
+public sealed record SystemAudioOptions(bool SeparateApps = true, IReadOnlyList<MutedApp>? MutedApps = null, MutedApp? OnlyApp = null);
 
 /// <summary>
 /// Captura o som do PC, converte para 48 kHz estéreo float com o swresample (reamostragem de qualidade e downmix correto
@@ -200,6 +203,9 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
     /// <summary>O som está separado por app (a voz da rede fica fora). False: vai todo o som do PC.</summary>
     public bool Separated { get; private set; }
 
+    /// <summary>O app que está indo sozinho (festa com "só o Spotify"). Null: vai o som do PC.</summary>
+    public string? OnlyApp { get; private set; }
+
     public bool Paused
     {
         get => _framer.Paused;
@@ -229,17 +235,19 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         options = Clean(options);
         lock (_gate)
         {
-            if (options.SeparateApps == _options.SeparateApps && options.MutedApps!.Select(a => a.Exe).SequenceEqual(_options.MutedApps!.Select(a => a.Exe))) return;
+            if (options.SeparateApps == _options.SeparateApps && options.OnlyApp?.Exe == _options.OnlyApp?.Exe
+                && options.MutedApps!.Select(a => a.Exe).SequenceEqual(_options.MutedApps!.Select(a => a.Exe))) return;
             _options = options;
         }
         Restart("apps tirados do som mudaram", delayMs: 0);
     }
 
-    private static SystemAudioOptions Clean(SystemAudioOptions options) => options with { MutedApps = MutedApp.Normalize(options.MutedApps) };
+    private static SystemAudioOptions Clean(SystemAudioOptions options)
+        => options with { MutedApps = MutedApp.Normalize(options.MutedApps), OnlyApp = MutedApp.Normalize([options.OnlyApp]).FirstOrDefault() };
 
     private void OpenCapture()
     {
-        var capture = CreateCapture(out var separation);
+        var capture = CreateCapture(out var separation, out var onlyApp);
         var format = capture.WaveFormat;
         _sourceRate = format.SampleRate;
         _sourceChannels = Math.Max(1, format.Channels);
@@ -251,16 +259,37 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         capture.RecordingStopped += OnStopped;
         _capture = capture;
         Separation = separation;
-        Separated = capture is not WasapiLoopbackCapture;
+        Separated = capture is not LowLatencyLoopbackCapture;
+        OnlyApp = onlyApp;
         Description = $"{_sourceRate} Hz, {_sourceChannels} canais, {_sourceBits} bits{(_sourceFloat ? " float" : string.Empty)} → Opus {Profile.BitrateKbps} kbps"
-                      + (Profile.Music ? " (música, 20 ms, VBR)" : " (baixa latência, 10 ms)") + $" · {separation}";
+                      + (Profile.Music ? $" (música, {Profile.FrameMs} ms, VBR)" : $" (baixa latência, {Profile.FrameMs} ms)") + $" · {separation}";
         Log.Info($"Áudio do sistema: {Description}");
     }
 
-    /// <summary>Escolhe a captura: mistura sem os apps escolhidos, tudo menos o ScreenFlow ou, se nada disso abrir, tudo.</summary>
-    private IWaveIn CreateCapture(out string separation)
+    /// <summary>
+    /// Escolhe a captura: só o app escolhido (festa de música), mistura sem os apps escolhidos, tudo menos o ScreenFlow
+    /// ou, se nada disso abrir, tudo.
+    /// </summary>
+    private IWaveIn CreateCapture(out string separation, out string? onlyApp)
     {
         var options = _options;
+        onlyApp = null;
+        if (options.OnlyApp is { } only)
+        {
+            try
+            {
+                if (!ProcessLoopbackCapture.Supported) throw new PlatformNotSupportedException("precisa do Windows 10 versão 2004 ou mais novo");
+                var mixer = AppAudioMixer.OpenOnly([only.Exe]);
+                separation = $"só o som de {only.Name}";
+                onlyApp = only.Name;
+                return mixer;
+            }
+            catch (Exception exception)
+            {
+                Log.Warn($"Não deu para mandar só o som de {only.Exe}: {exception.Message}");
+                Warn($"Não deu para mandar só o som de {only.Name} ({exception.Message}). Vai o som do PC.");
+            }
+        }
         if (options.SeparateApps && ProcessLoopbackCapture.Supported)
         {
             if (options.MutedApps is { Count: > 0 } muted)
@@ -290,7 +319,7 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
             }
         }
         separation = "todo o som do PC";
-        return new WasapiLoopbackCapture();
+        return new LowLatencyLoopbackCapture();
     }
 
     private void Warn(string message)
@@ -568,24 +597,36 @@ internal sealed class DeviceWatcher : IMMNotificationClient, IDisposable
 }
 
 /// <summary>
-/// Buffer de reprodução com alvo de latência: espera juntar o alvo antes de tocar, volta a juntar depois de um
-/// buraco (em vez de estalar) e pula para o alvo quando a fila passa do máximo (atraso acumulado).
+/// Loopback normal (todo o som do PC) com buffer curto. O <see cref="WasapiLoopbackCapture"/> do NAudio usa 100 ms e lê
+/// a cada 50 ms, o que somava até 50 ms de atraso no som; aqui o buffer é de 30 ms e a leitura a cada 15 ms.
+/// </summary>
+internal sealed class LowLatencyLoopbackCapture() : WasapiCapture(WasapiLoopbackCapture.GetDefaultLoopbackCaptureDevice(), false, 30)
+{
+    protected override AudioClientStreamFlags GetAudioClientStreamFlags() => AudioClientStreamFlags.Loopback | base.GetAudioClientStreamFlags();
+}
+
+/// <summary>
+/// Buffer de reprodução com o menor atraso que a rede deixa (<see cref="PlayoutController"/>): espera juntar o alvo
+/// antes de tocar, volta a juntar depois de um buraco (em vez de estalar), lê 0,5% mais rápido ou mais devagar para
+/// voltar ao alvo sem cortes (inclusive a diferença de relógio entre as placas de som) e só pula de uma vez quando o
+/// atraso passa muito do alvo.
 /// </summary>
 internal sealed class JitterBuffer : ISampleProvider
 {
+    private const int Channels = AudioProfile.Channels;
+
     private readonly object _gate = new();
     private readonly float[] _ring;
-    private readonly int _target;
-    private readonly int _max;
+    private readonly PlayoutController _playout;
     private int _read;
     private int _count;
     private bool _playing;
+    private double _fraction;
 
-    public JitterBuffer(int targetMs, int maxMs)
+    public JitterBuffer(int minMs, int maxTargetMs)
     {
-        _target = Floats(targetMs);
-        _max = Floats(maxMs);
-        _ring = new float[_max + Floats(200)];
+        _playout = new PlayoutController(minMs, maxTargetMs);
+        _ring = new float[Floats(_playout.MaxTargetMs * 3 + 40) + Floats(200)];
     }
 
     public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(AudioProfile.SampleRate, AudioProfile.Channels);
@@ -593,12 +634,20 @@ internal sealed class JitterBuffer : ISampleProvider
     public long Underruns { get; private set; }
     public long Skips { get; private set; }
 
-    public TimeSpan Buffered
+    /// <summary>O alvo de agora (sobe se o som falhar, desce devagar com a rede estável).</summary>
+    public int TargetMs
     {
-        get { lock (_gate) return TimeSpan.FromSeconds(_count / (double)(AudioProfile.SampleRate * AudioProfile.Channels)); }
+        get { lock (_gate) return _playout.TargetMs; }
     }
 
-    private static int Floats(int ms) => AudioProfile.SampleRate * ms / 1000 * AudioProfile.Channels;
+    public TimeSpan Buffered
+    {
+        get { lock (_gate) return TimeSpan.FromSeconds(_count / (double)(AudioProfile.SampleRate * Channels)); }
+    }
+
+    private static int Floats(int ms) => AudioProfile.SampleRate * ms / 1000 * Channels;
+
+    private double BufferedMs => _count * 1000.0 / (AudioProfile.SampleRate * Channels);
 
     public void Write(ReadOnlySpan<float> samples)
     {
@@ -612,9 +661,10 @@ internal sealed class JitterBuffer : ISampleProvider
             samples[..first].CopyTo(_ring.AsSpan(write));
             samples[first..].CopyTo(_ring);
             _count += samples.Length;
-            if (_count > _max)
+            if (_count > Floats(_playout.HardLimitMs))
             {
-                Drop(_count - _target);
+                Drop(_count - Floats(_playout.TargetMs));
+                _playout.Reset();
                 Skips++;
             }
         }
@@ -633,34 +683,56 @@ internal sealed class JitterBuffer : ISampleProvider
         {
             _read = _count = 0;
             _playing = false;
+            _fraction = 0;
+            _playout.Reset();
         }
     }
+
+    private float At(int frame, int channel) => _ring[(_read + frame * Channels + channel) % _ring.Length];
 
     public int Read(float[] buffer, int offset, int count)
     {
         lock (_gate)
         {
+            var now = MediaClock.Now;
             if (!_playing)
             {
-                if (_count < _target)
+                if (_count < Floats(_playout.TargetMs))
                 {
                     Array.Clear(buffer, offset, count);
                     return count;
                 }
                 _playing = true;
+                _fraction = 0;
             }
-            var n = Math.Min(count, _count);
-            var first = Math.Min(n, _ring.Length - _read);
+
+            // Lê com interpolação linear na velocidade que o controle pede (1 ± 0,5%).
+            var rate = _playout.Update(BufferedMs, now);
             var volume = Volume;
-            for (var i = 0; i < first; i++) buffer[offset + i] = _ring[_read + i] * volume;
-            for (var i = first; i < n; i++) buffer[offset + i] = _ring[i - first] * volume;
-            _read = (_read + n) % _ring.Length;
-            _count -= n;
-            if (n < count)
+            var frames = count / Channels;
+            var written = 0;
+            for (; written < frames; written++)
             {
-                Array.Clear(buffer, offset + n, count - n);
+                var available = _count / Channels;
+                if (available < 2) break;
+                var t = (float)_fraction;
+                for (var c = 0; c < Channels; c++)
+                {
+                    var a = At(0, c);
+                    var b = At(1, c);
+                    buffer[offset + written * Channels + c] = (a + (b - a) * t) * volume;
+                }
+                _fraction += rate;
+                var advance = (int)_fraction;
+                _fraction -= advance;
+                if (advance > 0) Drop(Math.Min(_count, advance * Channels));
+            }
+            if (written < frames)
+            {
+                Array.Clear(buffer, offset + written * Channels, count - written * Channels);
                 _playing = false;
                 Underruns++;
+                _playout.Underrun(now);
             }
             return count;
         }
@@ -690,7 +762,7 @@ public sealed unsafe class AudioPlayer : IDisposable
         if (!FFmpegLoader.EnsureLoaded()) throw new InvalidOperationException(FFmpegLoader.Error);
         Profile = profile;
         _outputEnabled = outputEnabled;
-        _buffer = new JitterBuffer(profile.PlaybackTargetMs, profile.PlaybackMaxMs) { Volume = Math.Clamp(volume, 0f, 1f) };
+        _buffer = new JitterBuffer(profile.PlaybackMinMs, profile.PlaybackMaxTargetMs) { Volume = Math.Clamp(volume, 0f, 1f) };
 
         var codec = ffmpeg.avcodec_find_decoder(AVCodecID.AV_CODEC_ID_OPUS);
         if (codec is null) throw new InvalidOperationException("Decoder Opus não está nesta build do FFmpeg.");

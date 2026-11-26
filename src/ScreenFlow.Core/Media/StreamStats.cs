@@ -91,4 +91,23 @@ public sealed record ViewerStatistics(
     bool GpuRendering = false,
     double CameraFps = 0,
     int CameraWidth = 0,
-    int CameraHeight = 0);
+    int CameraHeight = 0)
+{
+    /// <summary>Perda de pacotes desde que conectou (o <see cref="LossRate"/> é só o último segundo).</summary>
+    public double TotalLossRate { get; init; }
+
+    /// <summary>Frames que chegaram em parte e venceram o prazo (o NACK não conseguiu completar).</summary>
+    public long FramesExpired { get; init; }
+
+    /// <summary>Frames dos quais nenhum pacote chegou.</summary>
+    public long FramesMissing { get; init; }
+
+    /// <summary>Frames presos atrás de um incompleto, pulados porque um keyframe mais novo já tinha chegado.</summary>
+    public long FramesSuperseded { get; init; }
+
+    /// <summary>Pacotes perdidos que voltaram por retransmissão (NACK).</summary>
+    public long NackRecovered { get; init; }
+
+    /// <summary>Frames descartados porque o decoder não acompanhou (fila cheia).</summary>
+    public long DecoderLate { get; init; }
+}

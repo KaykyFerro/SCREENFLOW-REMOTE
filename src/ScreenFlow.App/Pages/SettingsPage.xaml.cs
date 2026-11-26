@@ -20,6 +20,9 @@ public partial class SettingsPage : UserControl, IShellPage
     private readonly DispatcherTimer _micTimer = new() { Interval = TimeSpan.FromMilliseconds(60) };
     private readonly VoiceGate _micGate = new();
     private IVoiceInput? _micTest;
+    private MicrophoneInput? _monitorInput;
+    private MicrophoneMonitor? _monitor;
+    private bool _monitorStarting;
     private double _micLevelDb = -100;
     private double _shownLevel;
     private bool _loading;
@@ -37,7 +40,11 @@ public partial class SettingsPage : UserControl, IShellPage
         CameraQualityCombo.Fill(OverviewPage.CameraQualities);
         ThemeCombo.Fill([new Choice<AppTheme>(AppTheme.Dark, "Escuro"), new Choice<AppTheme>(AppTheme.Light, "Claro")]);
         _micTimer.Tick += (_, _) => UpdateMicMeter();
-        Unloaded += (_, _) => StopMicTest();
+        Unloaded += (_, _) =>
+        {
+            StopMicTest();
+            StopMonitor();
+        };
     }
 
     private AppSettings Settings => AppServices.Settings.Current;
@@ -65,9 +72,11 @@ public partial class SettingsPage : UserControl, IShellPage
         UploadBox.Text = s.UploadMbps > 0 ? s.UploadMbps.ToString("0", CultureInfo.CurrentCulture) : string.Empty;
         MaxViewersBox.Text = s.MaxViewers.ToString();
         NameBox.Text = s.DeviceName;
+        UpdateProfilePreview();
         PinBox.Text = s.Pin ?? string.Empty;
         ApproveToggle.IsChecked = s.ApproveEachViewer;
         TrayToggle.IsChecked = s.MinimizeToTray;
+        ReopenToggle.IsChecked = s.ShowWindowWhenSessionEnds;
         ThemeCombo.SelectValue(ThemeManager.Current);
         LoadMicrophones(s.MicrophoneId);
         SensitivitySlider.Value = s.VoiceSensitivity;
@@ -130,10 +139,12 @@ public partial class SettingsPage : UserControl, IShellPage
         s.DiscoveryPort = int.TryParse(DiscoveryPortBox.Text, out var dp) ? dp : s.DiscoveryPort;
         s.UploadMbps = TryNumber(UploadBox.Text, out var up) ? up : 0;
         s.MaxViewers = int.TryParse(MaxViewersBox.Text, out var mv) ? mv : s.MaxViewers;
-        s.DeviceName = NameBox.Text.Trim();
+        var name = NameBox.Text.Trim();
+        s.DeviceName = name.Length == 0 ? Environment.MachineName : name;
         s.Pin = pinText.Length == 0 ? null : pinText;
         s.ApproveEachViewer = ApproveToggle.IsChecked == true;
         s.MinimizeToTray = TrayToggle.IsChecked == true;
+        s.ShowWindowWhenSessionEnds = ReopenToggle.IsChecked == true;
         s.MicrophoneId = MicrophoneCombo.Value<string?>();
         s.VoiceSensitivity = SensitivitySlider.Value;
         s.VoiceVolume = VoiceVolumeSlider.Value;
@@ -150,7 +161,8 @@ public partial class SettingsPage : UserControl, IShellPage
         if (separateChanged) _shell.TransmitPage.OnAudioSettingsChanged();
         if (theme != ThemeManager.Current) ThemeManager.Apply(theme);
         SavedText.Text = $"Salvo às {DateTime.Now:HH:mm}";
-        _shell.Toast(_shell.IsTransmitting ? "Configurações salvas. As mudanças de qualidade valem na próxima transmissão." : "Configurações salvas.", ToastKind.Success);
+        // Com a transmissão no ar, a qualidade nova vale na hora (a tela da Transmissão avisa); o resto já está salvo.
+        if (!_shell.IsTransmitting || !_shell.TransmitPage.ApplySettingsQualityLive()) _shell.Toast("Configurações salvas.", ToastKind.Success);
         _ = LoadAsync();
 
         if (portsBefore != (s.MediaPort, s.ControlPort, s.DiscoveryPort))
@@ -163,6 +175,52 @@ public partial class SettingsPage : UserControl, IShellPage
 
     private static bool TryNumber(string text, out double value)
         => double.TryParse(text.Trim().Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out value) && value > 0;
+
+    // ───────────────────────── Seu perfil ─────────────────────────
+
+    private void UpdateProfilePreview()
+    {
+        var room = AppServices.Room;
+        var name = NameBox.Text.Trim();
+        ProfilePhoto.Colors = AvatarColors.For(room.SelfId);
+        ProfilePhoto.Initial = AvatarColors.Initial(name.Length == 0 ? Settings.DeviceName : name);
+        ProfilePhoto.Photo = room.SelfPhoto;
+        var hasPhoto = Settings.AvatarId is not null;
+        ChoosePhotoLabel.Text = hasPhoto ? "Trocar a foto" : "Escolher foto";
+        RemovePhotoButton.Visibility = hasPhoto ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void NameBox_TextChanged(object sender, TextChangedEventArgs e)
+    {
+        if (IsInitialized) UpdateProfilePreview();
+    }
+
+    /// <summary>A foto vale na hora (sem precisar salvar): quem está na rede baixa a nova em alguns segundos.</summary>
+    private void ChoosePhoto_Click(object sender, RoutedEventArgs e)
+    {
+        var dialog = new Microsoft.Win32.OpenFileDialog { Title = "Escolha a sua foto", Filter = ImageTools.FileFilter };
+        if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
+        try
+        {
+            var image = ImageTools.LoadFile(dialog.FileName, ImageTools.AvatarSide * 3, limitShortSide: true);
+            AppServices.Room.SetPhoto(ImageTools.MakeAvatar(image));
+            UpdateProfilePreview();
+            _shell.Toast("Foto trocada. Quem está na rede vê a nova em alguns segundos.", ToastKind.Success);
+        }
+        catch (System.IO.InvalidDataException exception) { _shell.Toast(exception.Message, ToastKind.Warning); }
+        catch (Exception exception)
+        {
+            Log.Warn($"Foto do perfil: {exception}");
+            _shell.Toast("Não deu para usar essa imagem como foto.", ToastKind.Warning);
+        }
+    }
+
+    private void RemovePhoto_Click(object sender, RoutedEventArgs e)
+    {
+        AppServices.Room.SetPhoto(null);
+        UpdateProfilePreview();
+        _shell.Toast("Foto tirada. Agora aparece a inicial do seu nome.", ToastKind.Success);
+    }
 
     // ───────────────────────── Automático ─────────────────────────
 
@@ -273,6 +331,84 @@ public partial class SettingsPage : UserControl, IShellPage
         MicLevel.Width = 0;
         MicTestButton.Content = "Testar microfone";
         MicTestText.Text = "Fale normalmente: a barra precisa passar da marca para a sua voz ir. Se não passar, puxe a sensibilidade para a direita.";
+    }
+
+    // ───────────────────────── Ouvir o próprio microfone ─────────────────────────
+
+    private void MicMonitor_Click(object sender, RoutedEventArgs e)
+    {
+        if (_monitor is not null) StopMonitor();
+        else _ = StartMonitorAsync();
+    }
+
+    /// <summary>
+    /// Abre o microfone escolhido só para o retorno (o Windows deixa vários programas lerem o mesmo microfone, então
+    /// funciona também com a voz ligada) e toca no fone.
+    /// </summary>
+    private async Task StartMonitorAsync()
+    {
+        if (AppServices.DemoMode || _monitorStarting) return;
+        _monitorStarting = true;
+        MicMonitorButton.IsEnabled = false;
+        var id = MicrophoneCombo.Value<string?>();
+        try
+        {
+            var (input, monitor) = await Task.Run(() =>
+            {
+                var monitor = new MicrophoneMonitor();
+                try
+                {
+                    var input = new MicrophoneInput(id);
+                    input.FrameReady += monitor.Write;
+                    input.Start();
+                    return (input, monitor);
+                }
+                catch
+                {
+                    monitor.Dispose();
+                    throw;
+                }
+            });
+            if (!IsLoaded)
+            {
+                _ = Task.Run(() => { input.Dispose(); monitor.Dispose(); });
+                return;
+            }
+            _monitorInput = input;
+            _monitor = monitor;
+            MicMonitorLabel.Text = "Parar de ouvir";
+            MicMonitorText.Text = "Você está se ouvindo. Use fone de ouvido: na caixa de som o microfone capta o próprio som e começa a apitar.";
+            MicMonitorText.SetResourceReference(TextBlock.ForegroundProperty, "Success");
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"Ouvir o microfone: {exception.Message}");
+            MicMonitorText.Text = RoomService.MicrophoneProblem(exception);
+            MicMonitorText.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
+        }
+        finally
+        {
+            _monitorStarting = false;
+            MicMonitorButton.IsEnabled = true;
+        }
+    }
+
+    private void StopMonitor()
+    {
+        var input = _monitorInput;
+        var monitor = _monitor;
+        _monitorInput = null;
+        _monitor = null;
+        if (input is not null || monitor is not null)
+            _ = Task.Run(() =>
+            {
+                input?.Dispose();
+                monitor?.Dispose();
+            });
+        if (!IsInitialized) return;
+        MicMonitorLabel.Text = "Ouvir meu microfone";
+        MicMonitorText.Text = "Toca o seu microfone no fone, para você ouvir como a sua voz está saindo.";
+        MicMonitorText.SetResourceReference(TextBlock.ForegroundProperty, "TextSubtle");
     }
 
     private void UpdateMicMeter()

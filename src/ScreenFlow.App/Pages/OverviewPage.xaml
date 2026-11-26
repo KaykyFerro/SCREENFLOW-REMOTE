@@ -174,7 +174,10 @@
                         <StackPanel Margin="16,0,0,0" VerticalAlignment="Center">
                             <TextBlock Style="{StaticResource Caption}" Text="Rede Radmin"/>
                             <TextBlock x:Name="NetworkValue" FontSize="20" FontWeight="Bold" Text="—" Margin="0,3,0,2" TextWrapping="Wrap"/>
-                            <TextBlock x:Name="NetworkDetail" Style="{StaticResource Caption}"/>
+                            <TextBlock x:Name="NetworkDetail" Style="{StaticResource Caption}" TextWrapping="Wrap"/>
+                            <ProgressBar x:Name="RadminProgress" Height="5" Maximum="1" Margin="0,8,0,0" Visibility="Collapsed"/>
+                            <Button x:Name="RadminButton" Style="{StaticResource ChipButton}" HorizontalAlignment="Left" Margin="0,10,0,0" Visibility="Collapsed"
+                                    Click="RadminButton_Click"/>
                         </StackPanel>
                     </DockPanel>
                 </Border>

@@ -101,6 +101,16 @@ public static class WindowDiscovery
         return list.OrderBy(w => w.Label).ToArray();
     }
 
+    /// <summary>O executável dono da janela ("spotify.exe"), ou null se o Windows não deixar ler.</summary>
+    public static string? ProcessExe(nint hwnd)
+    {
+        if (hwnd == 0) return null;
+        GetWindowThreadProcessId(hwnd, out var pid);
+        if (pid <= 0) return null;
+        var path = ScreenFlow.Infrastructure.Media.ProcessTable.ImagePath(pid);
+        return path is null ? null : ScreenFlow.Core.Media.MutedApp.NormalizeExe(path);
+    }
+
     private delegate bool EnumWindowsProc(nint hwnd, nint data);
     [DllImport("user32.dll")] private static extern bool EnumWindows(EnumWindowsProc callback, nint data);
     [DllImport("user32.dll")] private static extern bool IsWindowVisible(nint hwnd);

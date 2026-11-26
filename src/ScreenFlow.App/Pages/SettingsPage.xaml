@@ -1,6 +1,7 @@
 <UserControl x:Class="ScreenFlow.App.Pages.SettingsPage"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:controls="clr-namespace:ScreenFlow.App.Controls">
     <ScrollViewer Style="{StaticResource PageScroll}">
         <StackPanel Margin="{DynamicResource PagePadding}" MaxWidth="{DynamicResource ContentMaxWidth}">
             <DockPanel Margin="0,22,0,6">
@@ -185,9 +186,19 @@
                                         ToolTip="A voz só vai pela rede quando passa desta marca."/>
                             </Grid>
                             <DockPanel Margin="{DynamicResource FieldGap}">
-                                <Button x:Name="MicTestButton" DockPanel.Dock="Right" Content="Testar microfone" MinHeight="34" Padding="14,0" Margin="12,0,0,0" Click="MicTest_Click"/>
+                                <Button x:Name="MicTestButton" DockPanel.Dock="Right" Content="Testar microfone" MinHeight="34" MinWidth="172" Padding="14,0" Margin="12,0,0,0" Click="MicTest_Click"/>
                                 <TextBlock x:Name="MicTestText" Style="{StaticResource Caption}" VerticalAlignment="Center"
                                            Text="Fale normalmente: a barra precisa passar da marca para a sua voz ir. Se não passar, puxe a sensibilidade para a direita."/>
+                            </DockPanel>
+                            <DockPanel Margin="{DynamicResource FieldGap}">
+                                <Button x:Name="MicMonitorButton" DockPanel.Dock="Right" MinHeight="34" MinWidth="172" Padding="14,0" Margin="12,0,0,0" Click="MicMonitor_Click">
+                                    <StackPanel Orientation="Horizontal">
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE7F6;" FontSize="14" VerticalAlignment="Center"/>
+                                        <TextBlock x:Name="MicMonitorLabel" Text="Ouvir meu microfone" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+                                <TextBlock x:Name="MicMonitorText" Style="{StaticResource Caption}" VerticalAlignment="Center"
+                                           Text="Toca o seu microfone no fone, para você ouvir como a sua voz está saindo."/>
                             </DockPanel>
                             <DockPanel Margin="0,0,0,6">
                                 <TextBlock x:Name="VoiceVolumeValue" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
@@ -201,6 +212,40 @@
                 </StackPanel>
 
                 <StackPanel Grid.Column="2">
+                    <!-- Seu perfil -->
+                    <Border x:Name="ProfileCard" Style="{StaticResource Card}">
+                        <StackPanel>
+                            <DockPanel Margin="0,0,0,20">
+                                <Border Style="{StaticResource IconTileCyan}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE77B;"/>
+                                </Border>
+                                <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Style="{StaticResource Heading}" Text="Seu perfil"/>
+                                    <TextBlock Style="{StaticResource Caption}" Text="Como você aparece no chat, na voz e para quem assiste."/>
+                                </StackPanel>
+                            </DockPanel>
+                            <DockPanel>
+                                <controls:AvatarView x:Name="ProfilePhoto" Width="84" Height="84" TextElement.FontSize="32" VerticalAlignment="Top" Margin="0,2,18,0"/>
+                                <StackPanel>
+                                    <TextBlock Style="{StaticResource Label}" Text="Seu nome"/>
+                                    <TextBox x:Name="NameBox" MaxLength="40" Tag="Como quer ser chamado" TextChanged="NameBox_TextChanged"/>
+                                    <TextBlock x:Name="NameHint" Style="{StaticResource Caption}" Margin="0,6,0,12" TextWrapping="Wrap"
+                                               Text="Aparece para todo mundo da rede no lugar do nome do PC. Vale quando você salvar."/>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button x:Name="ChoosePhotoButton" MinHeight="34" Padding="14,0" Click="ChoosePhoto_Click">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Style="{StaticResource Icon}" Text="&#xEB9F;" FontSize="14" VerticalAlignment="Center"/>
+                                                <TextBlock x:Name="ChoosePhotoLabel" Text="Escolher foto" Margin="8,0,0,0" VerticalAlignment="Center"/>
+                                            </StackPanel>
+                                        </Button>
+                                        <Button x:Name="RemovePhotoButton" Style="{StaticResource GhostButton}" MinHeight="34" Padding="12,0" Margin="8,0,0,0"
+                                                Content="Tirar a foto" Click="RemovePhoto_Click"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </DockPanel>
+                        </StackPanel>
+                    </Border>
+
                     <!-- Rede -->
                     <Border Style="{StaticResource Card}">
                         <StackPanel>
@@ -268,29 +313,29 @@
                                 </Border>
                                 <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
                                     <TextBlock Style="{StaticResource Heading}" Text="Segurança e aparência"/>
-                                    <TextBlock Style="{StaticResource Caption}" Text="Como você aparece para os outros e quem pode entrar."/>
+                                    <TextBlock Style="{StaticResource Caption}" Text="Quem pode entrar, o tema e a bandeja."/>
                                 </StackPanel>
                             </DockPanel>
                             <Grid Margin="{DynamicResource FieldGap}">
                                 <Grid.ColumnDefinitions>
-                                    <ColumnDefinition Width="1.4*"/>
+                                    <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="12"/>
                                     <ColumnDefinition Width="*"/>
                                 </Grid.ColumnDefinitions>
                                 <StackPanel>
-                                    <TextBlock Style="{StaticResource Label}" Text="Nome deste PC"/>
-                                    <TextBox x:Name="NameBox" MaxLength="40"/>
+                                    <TextBlock Style="{StaticResource Label}" Text="PIN padrão (opcional)"/>
+                                    <TextBox x:Name="PinBox" MaxLength="32" Tag="Sem PIN"/>
                                 </StackPanel>
                                 <StackPanel Grid.Column="2">
                                     <TextBlock Style="{StaticResource Label}" Text="Tema"/>
                                     <ComboBox x:Name="ThemeCombo"/>
                                 </StackPanel>
                             </Grid>
-                            <TextBlock Style="{StaticResource Label}" Text="PIN padrão (opcional)"/>
-                            <TextBox x:Name="PinBox" MaxLength="32" Tag="Sem PIN" Margin="{DynamicResource FieldGap}"/>
                             <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de mostrar a tela" Margin="0,0,0,14"/>
-                            <CheckBox x:Name="TrayToggle" Style="{StaticResource Switch}"
+                            <CheckBox x:Name="TrayToggle" Style="{StaticResource Switch}" Margin="0,0,0,14"
                                       Content="Fechar e minimizar levam o ScreenFlow para a bandeja, perto do relógio (a transmissão, a voz e o chat continuam)"/>
+                            <CheckBox x:Name="ReopenToggle" Style="{StaticResource Switch}"
+                                      Content="Abrir o ScreenFlow de novo quando a transmissão acabar ou o player fechar (se ele estiver na bandeja)"/>
                         </StackPanel>
                     </Border>
 

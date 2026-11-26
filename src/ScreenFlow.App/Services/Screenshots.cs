@@ -33,6 +33,8 @@ public static class Screenshots
 
         // Sala da rede de exemplo: gente online, duas pessoas na voz e uma conversa no chat.
         AppServices.Settings.Current.DeviceName = "PC da Sala";
+        // A sua foto é a paisagem inteira (aurora, montanha e mata), para não confundir com as fotos da Ana e do Bruno.
+        AppServices.Room.SetPhoto(DemoData.ProfilePhoto(690, 10, 880));
         AppServices.Room.LoadDemo(inVoice: false, unread: 2);
 
         var window = new MainWindow
@@ -117,6 +119,13 @@ public static class Screenshots
             await Go(window, window.ChatPage, 500);
         });
         ThemeManager.Apply(AppTheme.Dark);
+        await Shot("21-chat-imagem-anexada.png", () =>
+        {
+            window.ChatPage.ShowAttachmentDemo(DemoData.ChatPicture(), "Ficou bom esse fundo?");
+            return Go(window, window.ChatPage, 500);
+        });
+        window.ChatPage.ShowAttachmentDemo(null, string.Empty);
+        await Shot("22-seu-perfil.png", () => Go(window, window.SettingsPage, 600), () => window.SettingsPage.ProfileCard);
 
         foreach (var (name, mode, state, camera) in new[]
                  {

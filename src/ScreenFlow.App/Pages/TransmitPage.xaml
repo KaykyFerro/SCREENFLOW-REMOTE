@@ -75,7 +75,7 @@
 
                             <StackPanel x:Name="ScreenOptions">
                                 <TextBlock Style="{StaticResource Label}" Text="Monitor ou janela"/>
-                                <DockPanel Margin="{DynamicResource FieldGap}">
+                                <DockPanel x:Name="SourceRow" Margin="{DynamicResource FieldGap}">
                                     <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Atualizar a lista" Click="RefreshSources_Click" Margin="8,0,0,0"/>
                                     <ComboBox x:Name="SourceCombo"/>
                                 </DockPanel>
@@ -108,7 +108,7 @@
 
                             <StackPanel x:Name="CameraOptions" Visibility="Collapsed">
                                 <TextBlock Style="{StaticResource Label}" Text="Câmera"/>
-                                <DockPanel Margin="{DynamicResource FieldGap}">
+                                <DockPanel x:Name="CameraRow" Margin="{DynamicResource FieldGap}">
                                     <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar câmeras de novo" Click="RefreshCameras_Click" Margin="8,0,0,0"/>
                                     <ComboBox x:Name="CameraCombo"/>
                                 </DockPanel>
@@ -117,17 +117,25 @@
                             </StackPanel>
 
                             <StackPanel x:Name="PartyOptions" Visibility="Collapsed">
+                                <TextBlock Style="{StaticResource Label}" Text="O que toca na festa"/>
+                                <DockPanel Margin="{DynamicResource FieldGap}">
+                                    <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar os apps de novo" Click="RefreshPartyApps_Click" Margin="8,0,0,0"/>
+                                    <ComboBox x:Name="PartyAppCombo" ToolTip="Escolha o app da música para ninguém ouvir notificações, jogos e o resto do PC. Dá para trocar com a festa no ar."/>
+                                </DockPanel>
                                 <TextBlock Style="{StaticResource Label}" Text="Qualidade do som"/>
                                 <ComboBox x:Name="MusicCombo" Margin="{DynamicResource FieldGap}"/>
                                 <Border Style="{StaticResource InsetCard}" Margin="0,0,0,14">
                                     <DockPanel>
                                         <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE946;" Foreground="{DynamicResource Violet}" VerticalAlignment="Top" Margin="0,2,12,0"/>
-                                        <TextBlock Style="{StaticResource Muted}" FontSize="13" LineHeight="19"
+                                        <TextBlock x:Name="PartyInfoText" Style="{StaticResource Muted}" FontSize="13" LineHeight="19"
                                                    Text="Toca tudo o que sai no som do PC (Spotify, YouTube, jogos). Opus estéreo 48 kHz, com cópia de cada pacote no seguinte: se um se perder na rede, ninguém percebe."/>
                                     </DockPanel>
                                 </Border>
                             </StackPanel>
 
+                            <CheckBox x:Name="FixedQualityToggle" Style="{StaticResource Switch}" Content="Qualidade fixa (não baixa sozinha quando a rede aperta)"
+                                      ToolTip="Fica sempre na resolução e no FPS escolhidos. Dá para trocar a qualidade a qualquer momento, até durante a transmissão."
+                                      Checked="FixedQuality_Changed" Unchecked="FixedQuality_Changed"/>
                             <CheckBox x:Name="AudioToggle" Style="{StaticResource Switch}" Content="Compartilhar o som do PC"/>
                             <TextBlock x:Name="ProfileHint" Style="{StaticResource Caption}"/>
                         </StackPanel>
@@ -147,10 +155,11 @@
                             <Border x:Name="RadminMissing" Visibility="Collapsed" Margin="0,14,0,0" CornerRadius="{DynamicResource RadiusLg}" Padding="14,12"
                                     Background="{DynamicResource AmberSoft}">
                                 <StackPanel>
-                                    <TextBlock Style="{StaticResource Body}" FontSize="13" Foreground="{DynamicResource Amber}"
+                                    <TextBlock x:Name="RadminMissingText" Style="{StaticResource Body}" FontSize="13" Foreground="{DynamicResource Amber}" TextWrapping="Wrap"
                                                Text="O Radmin VPN não está conectado. Instale, entre na mesma rede que os outros e tente de novo."/>
+                                    <ProgressBar x:Name="RadminProgress" Height="6" Maximum="1" Margin="0,10,0,0" Visibility="Collapsed"/>
                                     <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
-                                        <Button Content="Baixar o Radmin VPN" MinHeight="34" Click="InstallRadmin_Click"/>
+                                        <Button x:Name="RadminActionButton" Content="Instalar o Radmin VPN" MinHeight="34" Click="RadminAction_Click"/>
                                         <Button Content="Tentar de novo" MinHeight="34" Margin="8,0,0,0" Click="RefreshNetwork_Click"/>
                                     </StackPanel>
                                 </StackPanel>
@@ -198,6 +207,49 @@
                                 </Border>
                             </UniformGrid>
                             <TextBlock x:Name="StatDetails" Style="{StaticResource Caption}" Margin="2,14,0,0" Text="Os números aparecem quando alguém entra."/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- O que está tocando no PC (os controles de mídia do Windows): voltar, pausar, pular e ir para um ponto -->
+                    <Border x:Name="MediaCard" Style="{StaticResource Card}" Visibility="Collapsed">
+                        <StackPanel>
+                            <DockPanel>
+                                <ComboBox x:Name="MediaSessionCombo" DockPanel.Dock="Right" MinWidth="150" MaxWidth="220" VerticalAlignment="Top" Margin="12,0,0,0"
+                                          Visibility="Collapsed" ToolTip="Mais de um app está tocando: escolha qual controlar"/>
+                                <Grid Width="60" Height="60" VerticalAlignment="Center">
+                                    <Border CornerRadius="14" Background="{DynamicResource BrandGradient}">
+                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE8D6;" FontSize="22" Foreground="{DynamicResource OnAccent}"
+                                                   HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                    </Border>
+                                    <Border x:Name="MediaArt" CornerRadius="14" Visibility="Collapsed"/>
+                                </Grid>
+                                <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock x:Name="MediaApp" Style="{StaticResource Caption}" Text="Tocando agora"/>
+                                    <TextBlock x:Name="MediaTitle" FontWeight="SemiBold" FontSize="15.5" TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                                    <TextBlock x:Name="MediaArtist" Style="{StaticResource Muted}" FontSize="13" TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+                            </DockPanel>
+                            <Grid x:Name="MediaSeekRow" Margin="0,14,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock x:Name="MediaPosition" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="38" Text="0:00"/>
+                                <Slider x:Name="MediaSeek" Grid.Column="1" Margin="10,0" Minimum="0" Maximum="1" ToolTip="Arraste para ir a outro ponto"
+                                        PreviewMouseLeftButtonDown="MediaSeek_PreviewMouseLeftButtonDown" PreviewMouseLeftButtonUp="MediaSeek_PreviewMouseLeftButtonUp"
+                                        ValueChanged="MediaSeek_ValueChanged"/>
+                                <TextBlock x:Name="MediaDuration" Grid.Column="2" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="38"
+                                           TextAlignment="Right" Text="0:00"/>
+                            </Grid>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
+                                <Button x:Name="MediaPrevious" Style="{StaticResource IconButton}" Content="&#xE892;" ToolTip="Voltar" Click="MediaPrevious_Click"/>
+                                <Button x:Name="MediaPlayPause" Style="{StaticResource PrimaryButton}" Width="52" Height="44" Padding="0" Margin="16,0"
+                                        HorizontalContentAlignment="Center" ToolTip="Pausar" Click="MediaPlayPause_Click">
+                                    <TextBlock x:Name="MediaPlayGlyph" Style="{StaticResource Icon}" Text="&#xE769;" FontSize="16"/>
+                                </Button>
+                                <Button x:Name="MediaNext" Style="{StaticResource IconButton}" Content="&#xE893;" ToolTip="Pular" Click="MediaNext_Click"/>
+                            </StackPanel>
                         </StackPanel>
                     </Border>
 

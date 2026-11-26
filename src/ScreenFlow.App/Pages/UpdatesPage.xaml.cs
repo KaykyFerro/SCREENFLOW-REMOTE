@@ -14,13 +14,15 @@ public partial class UpdatesPage : UserControl, IShellPage
     /// <summary>O que mudou nesta versão (mostrado quando não há versão nova).</summary>
     private static readonly string[] CurrentNotes =
     [
-        "Visual novo, com cores mais vivas, menu lateral e a fonte Inter.",
-        "Festa de música: transmita só o som do PC, em qualidade de música, para ouvir junto.",
-        "Compartilhe a câmera (webcam ou placa de captura) com o som do PC.",
-        "Sininho de avisos: mostra quando sai uma versão nova e atualiza com um clique.",
-        "O instalador já libera as portas no firewall, sem pedir de novo.",
-        "Player desenha o vídeo direto na GPU: mais leve e com menos atraso.",
-        "Tela de Monitoramento com gráficos de FPS, banda, ping e perda.",
+        "Seu perfil: escolha seu nome e uma foto para aparecer no chat, na voz e para quem assiste.",
+        "Imagens no chat: anexe, cole com Ctrl+V ou arraste uma imagem para a conversa.",
+        "Controles da música e do vídeo na transmissão: voltar, pausar, pular e mudar o tempo.",
+        "Troque a qualidade com a transmissão no ar, ou deixe a qualidade fixa, sem adaptar.",
+        "Festa de música com o som de um app só (só o Spotify, por exemplo).",
+        "Botão para ouvir o próprio microfone, nas Configurações.",
+        "Instale o Radmin VPN pelo próprio ScreenFlow, com um clique.",
+        "A janela volta sozinha quando a transmissão acaba ou o player fecha.",
+        "Transmissão mais estável, com menos perdas, e som com menos atraso.",
     ];
 
     private readonly MainWindow _shell;
@@ -214,7 +216,7 @@ public partial class UpdatesPage : UserControl, IShellPage
     private void Releases_Click(object sender, RoutedEventArgs e) => MainWindow.OpenUrl(UpdateService.ReleasesPage);
 
     /// <summary>Usado nas capturas de tela do CI: finge que existe uma versão nova.</summary>
-    internal static ReleaseInfo DemoRelease { get; } = new(new Version(1, 1, 1), "v1.1.1", "ScreenFlow 1.1.1",
+    internal static ReleaseInfo DemoRelease { get; } = new(new Version(1, 2, 0), "v1.2.0", "ScreenFlow 1.2.0",
         "## Novidades\n- Melhorias de desempenho no player\n- Ajustes no visual\n\n## Correções\n- Correções de estabilidade",
         "https://example.invalid/ScreenFlow-Setup-win-x64.exe", "ScreenFlow-Setup-win-x64.exe", 48_000_000, null);
 }

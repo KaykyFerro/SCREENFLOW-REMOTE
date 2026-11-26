@@ -86,6 +86,53 @@ public class AppAudioTests
     }
 
     [Fact]
+    public void OnlyAppTakesJustThatAppsProcesses()
+    {
+        // Festa com "só o Chrome": entra o processo de áudio do Chrome; Spotify, jogo e ScreenFlow ficam de fora.
+        var chosen = AppAudioPlan.ChooseOnly([Own, 210, 310, 510], Table(), Own, Muted("chrome.exe"));
+        Assert.Equal([310], chosen);
+    }
+
+    [Fact]
+    public void OnlyAppDoesNotDoubleAChildAndItsParent()
+    {
+        var chosen = AppAudioPlan.ChooseOnly([200, 210, 310], Table(), Own, Muted("spotify.exe"));
+        Assert.Equal([200], chosen);
+    }
+
+    [Fact]
+    public void OnlyAppNeverCapturesTheTreeAboveScreenFlow()
+    {
+        // Mesmo escolhido, o Explorer abriu o ScreenFlow: a árvore dele traria a voz da rede para a festa.
+        var chosen = AppAudioPlan.ChooseOnly([100, 210], Table(), Own, Muted("explorer.exe", "spotify.exe"));
+        Assert.Equal([210], chosen);
+    }
+
+    [Fact]
+    public void OnlyAppKeepsOtherProgramsTheLauncherOpenedOut()
+    {
+        // Só o Steam: o jogo que ele abriu é outro app e não entra (a menos que o próprio Steam tenha som).
+        Assert.Empty(AppAudioPlan.ChooseOnly([510], Table(), Own, Muted("steam.exe")));
+        Assert.Equal([510], AppAudioPlan.ChooseOnly([510], Table(), Own, Muted("jogo.exe")));
+    }
+
+    [Fact]
+    public void OnlyAppWithNothingPlayingIsEmpty()
+        => Assert.Empty(AppAudioPlan.ChooseOnly([210, 310], Table(), Own, Muted("vlc.exe")));
+
+    [Fact]
+    public void PartyAppIsNormalizedInSettings()
+    {
+        var settings = new AppSettings { PartyApp = new MutedApp(@"C:\Apps\Spotify.EXE", " ") };
+        settings.Normalize();
+        Assert.Equal(new MutedApp("spotify.exe", "Spotify"), settings.PartyApp);
+
+        settings.PartyApp = new MutedApp("  ", "Nada");
+        settings.Normalize();
+        Assert.Null(settings.PartyApp);
+    }
+
+    [Fact]
     public void ParentCyclesDoNotHang()
     {
         var table = new Dictionary<int, ProcessEntry>

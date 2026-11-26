@@ -1,6 +1,6 @@
 ﻿#define MyAppName "ScreenFlow"
 #ifndef MyAppVersion
-  #define MyAppVersion "1.1.0"
+  #define MyAppVersion "1.1.1"
 #endif
 #define MyAppPublisher "KaykyFerro"
 #define MyAppExeName "ScreenFlow.exe"

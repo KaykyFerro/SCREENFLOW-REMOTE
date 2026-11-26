@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net;
+using System.Security.Cryptography;
 using System.Text;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
@@ -102,12 +103,33 @@ public static class SelfTest
         return (ok && roomOk && soundOk, report.ToString());
     }
 
-    /// <summary>Dois PCs de mentira (duas salas em portas diferentes) se acham, trocam uma mensagem e conversam por voz.</summary>
+    /// <summary>
+    /// Dois PCs de mentira (duas salas em portas diferentes) se acham, trocam uma mensagem, passam a foto do perfil e uma
+    /// imagem do chat de um para o outro e conversam por voz.
+    /// </summary>
     private static async Task<bool> RoomTestAsync(Action<string> line)
     {
         line("Sala da rede: dois PCs de mentira no 127.0.0.1.");
-        var a = new NetworkRoom(Guid.NewGuid(), RoomPortA, new RoomLocalState("Autoteste A")) { BroadcastTargets = () => [], OutputEnabled = false };
-        var b = new NetworkRoom(Guid.NewGuid(), RoomPortB, new RoomLocalState("Autoteste B")) { BroadcastTargets = () => [], OutputEnabled = false };
+        // Arquivos de A: a foto do perfil (40 KB) e uma imagem do chat (1 MB, umas 870 partes).
+        var avatar = RandomNumberGenerator.GetBytes(40 * 1024);
+        var picture = RandomNumberGenerator.GetBytes(1024 * 1024);
+        var filesA = new Dictionary<string, byte[]> { [RoomBlob.IdOf(avatar)] = avatar, [RoomBlob.IdOf(picture)] = picture };
+        var filesB = new System.Collections.Concurrent.ConcurrentDictionary<string, byte[]>();
+        var a = new NetworkRoom(Guid.NewGuid(), RoomPortA, new RoomLocalState("Autoteste A", Avatar: new RoomBlobRef(RoomBlob.IdOf(avatar), avatar.Length)))
+        {
+            BroadcastTargets = () => [],
+            OutputEnabled = false,
+            BlobSource = id => filesA.GetValueOrDefault(id),
+            HasBlob = filesA.ContainsKey,
+        };
+        var b = new NetworkRoom(Guid.NewGuid(), RoomPortB, new RoomLocalState("Autoteste B"))
+        {
+            BroadcastTargets = () => [],
+            OutputEnabled = false,
+            BlobSource = id => filesB.GetValueOrDefault(id),
+            HasBlob = filesB.ContainsKey,
+        };
+        b.BlobReceived += (id, data) => filesB[id] = data;
         try
         {
             a.Start();
@@ -136,6 +158,15 @@ public static class SelfTest
             var chatOk = await Task.WhenAny(received.Task, Task.Delay(5000)) == received.Task && received.Task.Result.Text == text;
             line(chatOk ? $"Chat: B recebeu \"{received.Task.Result.Text}\" de {received.Task.Result.AuthorName}." : "FALHOU: a mensagem do chat não chegou.");
 
+            // A foto do perfil vem sozinha (está na presença de A); a imagem, quando a mensagem com ela chega.
+            var started = Stopwatch.StartNew();
+            var avatarOk = await WaitAsync(() => filesB.TryGetValue(RoomBlob.IdOf(avatar), out var got) && got.AsSpan().SequenceEqual(avatar), 10);
+            line(avatarOk ? $"Foto do perfil: B baixou a de A ({avatar.Length / 1024} KB) em {started.ElapsedMilliseconds} ms." : "FALHOU: a foto do perfil de A não chegou em B.");
+            started.Restart();
+            a.SendChat("Imagem do autoteste", new ChatImage(RoomBlob.IdOf(picture), picture.Length, 1600, 900));
+            var pictureOk = await WaitAsync(() => filesB.TryGetValue(RoomBlob.IdOf(picture), out var got) && got.AsSpan().SequenceEqual(picture), 20);
+            line(pictureOk ? $"Imagem do chat: B baixou {picture.Length / 1024} KB em {started.ElapsedMilliseconds} ms, com o hash conferido." : "FALHOU: a imagem do chat não chegou em B.");
+
             a.JoinVoice(new ToneVoiceInput());
             b.JoinVoice(new ToneVoiceInput());
             var voiceOk = await WaitAsync(() => a.Voice?.FramesDecoded > 50 && b.Voice?.FramesDecoded > 50, 10);
@@ -149,8 +180,8 @@ public static class SelfTest
             var leftOk = await WaitAsync(() => b.Peers.FirstOrDefault()?.Presence.InVoice == false, 4);
             if (!leftOk) line("FALHOU: B não viu A sair da voz.");
 
-            var ok = chatOk && voiceOk && peerInVoice && leftOk;
-            line(ok ? "PASSOU: presença, chat e voz funcionam entre dois PCs." : "FALHOU: a sala da rede não funcionou como deveria.");
+            var ok = chatOk && avatarOk && pictureOk && voiceOk && peerInVoice && leftOk;
+            line(ok ? "PASSOU: presença, chat, fotos, imagens e voz funcionam entre dois PCs." : "FALHOU: a sala da rede não funcionou como deveria.");
             return ok;
         }
         catch (Exception exception)
@@ -170,6 +201,7 @@ public static class SelfTest
     // Tons do teste do som do PC: o do ScreenFlow e os dois que o CI deixa tocando fora dele (veja windows-build.yml).
     private const double OwnHz = 1000, MutedHz = 440, KeptHz = 700;
     private const string MutedExe = "powershell.exe";
+    private const string KeptExe = "pwsh.exe";
 
     /// <summary>
     /// Som do PC separado por app, no áudio de verdade do Windows (no CI, numa placa de som virtual). O ScreenFlow toca
@@ -193,6 +225,7 @@ public static class SelfTest
 
         WasapiOut? tone = null;
         AppAudioMixer? mixer = null;
+        AppAudioMixer? only = null;
         var recorders = new List<Recorder>();
         try
         {
@@ -209,6 +242,8 @@ public static class SelfTest
                 recorders.Add(new Recorder("sem o ScreenFlow", ProcessLoopbackCapture.ExcludingProcess(Environment.ProcessId)));
                 mixer = AppAudioMixer.Open([MutedExe]);
                 recorders.Add(new Recorder($"sem o {MutedExe}", mixer));
+                only = AppAudioMixer.OpenOnly([KeptExe]);
+                recorders.Add(new Recorder($"só o {KeptExe}", only));
                 foreach (var recorder in recorders) recorder.Start();
             });
             await Task.Delay(1500); // o misturador acha os apps e enche as filas
@@ -220,8 +255,9 @@ public static class SelfTest
                 line($"{recorder.Name}: {recorder.Seconds:0.0} s, {OwnHz:0} Hz {recorder.Level(OwnHz):0.000}, {MutedHz:0} Hz {recorder.Level(MutedHz):0.000}, " +
                      $"{KeptHz:0} Hz {recorder.Level(KeptHz):0.000}");
             line($"Mistura capturando: {(mixer!.CapturedApps.Count == 0 ? "nenhum app" : string.Join(", ", mixer.CapturedApps))}.");
+            line($"Só um app capturando: {(only!.CapturedApps.Count == 0 ? "nenhum app" : string.Join(", ", only.CapturedApps))}.");
 
-            var (all, withoutUs, withoutApp) = (recorders[0], recorders[1], recorders[2]);
+            var (all, withoutUs, withoutApp, onlyApp) = (recorders[0], recorders[1], recorders[2], recorders[3]);
             var reference = all.Level(OwnHz);
             if (reference < 0.05)
             {
@@ -241,6 +277,8 @@ public static class SelfTest
 
             Check(withoutUs.Seconds > 0.8, "a captura sem o ScreenFlow não entregou áudio.");
             Check(withoutApp.Seconds > 0.8, "a mistura sem o app não entregou áudio.");
+            Check(onlyApp.Seconds > 0.8, "a captura de um app só não entregou áudio.");
+            Check(Silent(onlyApp, OwnHz), "o som do próprio ScreenFlow apareceu na captura de um app só.");
             Check(Silent(withoutUs, OwnHz), "o som do próprio ScreenFlow apareceu na captura sem o ScreenFlow.");
             Check(Silent(withoutApp, OwnHz), "o som do próprio ScreenFlow apareceu na mistura.");
             var external = 0;
@@ -249,15 +287,18 @@ public static class SelfTest
                 external++;
                 Check(Heard(withoutUs, MutedHz), $"a captura sem o ScreenFlow perdeu o som do {MutedExe}.");
                 Check(Silent(withoutApp, MutedHz), $"o som do {MutedExe} apareceu na mistura que deveria tirá-lo.");
+                Check(Silent(onlyApp, MutedHz), $"o som do {MutedExe} apareceu na captura que deveria ter só o {KeptExe}.");
             }
             if (all.Level(KeptHz) > 0.05)
             {
                 external++;
                 Check(Heard(withoutUs, KeptHz), "a captura sem o ScreenFlow perdeu o som de outro app.");
                 Check(Heard(withoutApp, KeptHz), "a mistura perdeu o som de um app que não foi tirado.");
+                Check(Heard(onlyApp, KeptHz), $"a captura de um app só perdeu o som do {KeptExe}.");
             }
             if (external < 2) line("Aviso: os tons de fora (440 e 700 Hz) não estavam tocando todos, então só parte da separação foi conferida.");
-            line(ok ? "PASSOU: o som do ScreenFlow e o do app tirado ficam fora; o resto do som do PC vai." : "FALHOU: a separação do som por app não funcionou.");
+            line(ok ? $"PASSOU: o som do ScreenFlow e o do app tirado ficam fora; o resto do som do PC vai; e só o {KeptExe} vai quando é o único escolhido."
+                : "FALHOU: a separação do som por app não funcionou.");
             return ok;
         }
         catch (Exception exception)
@@ -270,6 +311,7 @@ public static class SelfTest
         {
             foreach (var recorder in recorders) recorder.Dispose();
             mixer?.Dispose();
+            only?.Dispose();
             tone?.Dispose();
         }
     }
