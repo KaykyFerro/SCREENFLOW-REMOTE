@@ -150,6 +150,11 @@ public static class Screenshots
             imageViewer.SetDemoView(1.25);
             return Task.Delay(500);
         }, () => WindowRoot(imageViewer!));
+        await Shot("32-chat-visualizador-janela-pequena.png", () =>
+        {
+            Resize(imageViewer!, new Size(imageViewer!.MinWidth, imageViewer.MinHeight));
+            return Task.Delay(500);
+        }, () => WindowRoot(imageViewer!));
         imageViewer?.Close();
         await Shot("16-chat-tema-claro.png", async () =>
         {

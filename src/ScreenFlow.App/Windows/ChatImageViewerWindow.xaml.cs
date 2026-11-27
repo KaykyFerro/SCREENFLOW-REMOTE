@@ -10,7 +10,7 @@ using ScreenFlow.App.Services;
 namespace ScreenFlow.App.Windows;
 
 /// <summary>Visualizador integrado do chat: zoom com a rodinha, arraste para mover e setas para navegar pelo canal.</summary>
-internal partial class ChatImageViewerWindow : Window
+public partial class ChatImageViewerWindow : Window
 {
     private const double MinimumZoom = 1.0;
     private const double MaximumZoom = 8.0;
