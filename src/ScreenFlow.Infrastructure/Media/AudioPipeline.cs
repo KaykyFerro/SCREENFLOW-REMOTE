@@ -155,7 +155,8 @@ internal sealed class OpusFramer : IDisposable
 /// Como separar o som do PC: tirar a voz da rede e os sons do ScreenFlow, e quais apps tirar também. Com
 /// <paramref name="OnlyApp"/> (festa de música), vai só o som desse app.
 /// </summary>
-public sealed record SystemAudioOptions(bool SeparateApps = true, IReadOnlyList<MutedApp>? MutedApps = null, MutedApp? OnlyApp = null);
+/// <param name="KeepVolume">O volume do PC de quem transmite não muda o som que vai para quem assiste (1.3.0).</param>
+public sealed record SystemAudioOptions(bool SeparateApps = true, IReadOnlyList<MutedApp>? MutedApps = null, MutedApp? OnlyApp = null, bool KeepVolume = true);
 
 /// <summary>
 /// Captura o som do PC, converte para 48 kHz estéreo float com o swresample (reamostragem de qualidade e downmix correto
@@ -180,6 +181,9 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
     private float[] _widened = [];
     private bool _started;
     private bool _disposed;
+    private VolumeCompensation _compensation = new();
+    private SystemVolumeMonitor? _volumeMonitor;
+    private bool _bypassLogged;
 
     public SystemAudioCapture(AudioProfile profile, SystemAudioOptions? options = null)
     {
@@ -235,12 +239,21 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         options = Clean(options);
         lock (_gate)
         {
+            // Manter o volume liga e desliga na hora, sem reabrir a captura.
+            _compensation.Enabled = options.KeepVolume;
             if (options.SeparateApps == _options.SeparateApps && options.OnlyApp?.Exe == _options.OnlyApp?.Exe
-                && options.MutedApps!.Select(a => a.Exe).SequenceEqual(_options.MutedApps!.Select(a => a.Exe))) return;
+                && options.MutedApps!.Select(a => a.Exe).SequenceEqual(_options.MutedApps!.Select(a => a.Exe)))
+            {
+                _options = options;
+                return;
+            }
             _options = options;
         }
         Restart("apps tirados do som mudaram", delayMs: 0);
     }
+
+    /// <summary>O volume do PC está sendo desfeito agora (o ganho extra que vai para quem assiste; 1 = nada).</summary>
+    public float VolumeGain => _compensation.CurrentGain;
 
     private static SystemAudioOptions Clean(SystemAudioOptions options)
         => options with { MutedApps = MutedApp.Normalize(options.MutedApps), OnlyApp = MutedApp.Normalize([options.OnlyApp]).FirstOrDefault() };
@@ -258,6 +271,7 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         capture.DataAvailable += OnData;
         capture.RecordingStopped += OnStopped;
         _capture = capture;
+        StartVolumeCompensation();
         Separation = separation;
         Separated = capture is not LowLatencyLoopbackCapture;
         OnlyApp = onlyApp;
@@ -320,6 +334,23 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
         }
         separation = "todo o som do PC";
         return new LowLatencyLoopbackCapture();
+    }
+
+    /// <summary>
+    /// Uma correção nova para cada captura (o dispositivo de saída pode ter mudado): lê o volume do dispositivo padrão e
+    /// acompanha cada mudança. Sem conseguir ler o volume, o som vai como vem.
+    /// </summary>
+    private void StartVolumeCompensation()
+    {
+        var compensation = new VolumeCompensation { Enabled = _options.KeepVolume };
+        _compensation = compensation;
+        _bypassLogged = false;
+        try { _volumeMonitor = new SystemVolumeMonitor((db, muted) => compensation.SetVolume(db, muted, Environment.TickCount64)); }
+        catch (Exception exception)
+        {
+            _volumeMonitor = null;
+            Log.Debug($"Sem ler o volume do PC (o som vai como vem): {exception.Message}");
+        }
     }
 
     private void Warn(string message)
@@ -389,7 +420,15 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
                 var output = (byte*)destination;
                 produced = ffmpeg.swr_convert(_resampler, &output, maxOut, &input, frames);
             }
-            if (produced > 0) _framer.Push(_converted.AsSpan(0, produced * AudioProfile.Channels), startUs);
+            if (produced <= 0) return;
+            var samples = _converted.AsSpan(0, produced * AudioProfile.Channels);
+            _compensation.Process(samples, AudioProfile.Channels, Environment.TickCount64);
+            if (_compensation.Bypassed && !_bypassLogged)
+            {
+                _bypassLogged = true;
+                Log.Info("O volume do PC não baixa o som capturado neste dispositivo (volume no hardware): nada a desfazer.");
+            }
+            _framer.Push(samples, startUs);
         }
     }
 
@@ -447,6 +486,10 @@ public sealed unsafe class SystemAudioCapture : IAudioSource
     {
         var capture = _capture;
         _capture = null;
+        var monitor = _volumeMonitor;
+        _volumeMonitor = null;
+        // Fora da trava de quem chamou não dá (a captura ainda pode estar no OnData), mas o monitor não usa a trava.
+        if (monitor is not null) Task.Run(monitor.Dispose);
         if (capture is null) return null;
         capture.DataAvailable -= OnData;
         capture.RecordingStopped -= OnStopped;
@@ -593,6 +636,68 @@ internal sealed class DeviceWatcher : IMMNotificationClient, IDisposable
         if (_enumerator is null) return;
         try { _enumerator.UnregisterEndpointNotificationCallback(this); } catch { }
         _enumerator.Dispose();
+    }
+}
+
+/// <summary>
+/// O volume geral do dispositivo de saída padrão, em dB, e o mudo, lidos agora e a cada mudança (1.3.0). A notificação
+/// do Windows não pode esperar nem chamar o volume de volta, então a leitura vai para uma thread do pool.
+/// </summary>
+internal sealed class SystemVolumeMonitor : IDisposable
+{
+    private readonly MMDeviceEnumerator _enumerator;
+    private readonly MMDevice _device;
+    private readonly AudioEndpointVolume _volume;
+    private readonly Action<float, bool> _changed;
+    private int _pending;
+    private volatile bool _disposed;
+
+    public SystemVolumeMonitor(Action<float, bool> changed)
+    {
+        _changed = changed;
+        _enumerator = new MMDeviceEnumerator();
+        try
+        {
+            _device = _enumerator.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+            _volume = _device.AudioEndpointVolume;
+        }
+        catch
+        {
+            _enumerator.Dispose();
+            throw;
+        }
+        _volume.OnVolumeNotification += OnNotification;
+        Read();
+    }
+
+    private void OnNotification(AudioVolumeNotificationData data)
+    {
+        if (_disposed || Interlocked.Exchange(ref _pending, 1) == 1) return;
+        ThreadPool.QueueUserWorkItem(_ =>
+        {
+            Interlocked.Exchange(ref _pending, 0);
+            Read();
+        });
+    }
+
+    private void Read()
+    {
+        if (_disposed) return;
+        try { _changed(_volume.MasterVolumeLevel, _volume.Mute); }
+        catch (Exception exception) when (exception is COMException or InvalidCastException or ObjectDisposedException)
+        {
+            Log.Debug($"Não deu para ler o volume do PC: {exception.Message}");
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        try { _volume.OnVolumeNotification -= OnNotification; } catch { }
+        try { _volume.Dispose(); } catch { }
+        try { _device.Dispose(); } catch { }
+        try { _enumerator.Dispose(); } catch { }
     }
 }
 

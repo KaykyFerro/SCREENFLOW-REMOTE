@@ -106,8 +106,13 @@
                     <TextBlock x:Name="PartyDetail" FontSize="15" Foreground="{DynamicResource TextMuted}" TextWrapping="Wrap"
                                Text="O som que toca no PC de quem transmite chega aqui em qualidade de música. Ajuste o volume na barra de baixo."/>
 
-                    <!-- Tocando agora no PC de quem transmite (1.2.0), com voltar, pausar, pular e mudar o ponto -->
-                    <Border x:Name="PartyMedia" Visibility="Collapsed" Margin="0,8,0,0" MaxWidth="700" HorizontalAlignment="Left" CornerRadius="18" Padding="14"
+                    <!-- Tocando agora no PC de quem transmite (1.2.0), com voltar, pausar, pular e mudar o ponto. A largura é fixa
+                         (até 660): o cartão não cresce nem encolhe quando a música muda. -->
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" MaxWidth="660"/>
+                        </Grid.ColumnDefinitions>
+                    <Border x:Name="PartyMedia" Visibility="Collapsed" CornerRadius="18" Padding="14"
                             Background="#B3101932" BorderBrush="#26FFFFFF" BorderThickness="1">
                         <Grid>
                             <Grid.ColumnDefinitions>
@@ -144,15 +149,16 @@
                                     <ColumnDefinition Width="*"/>
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
-                                <TextBlock x:Name="PartyPosition" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="38" Text="0:00"/>
+                                <TextBlock x:Name="PartyPosition" Style="{StaticResource Caption}" VerticalAlignment="Center" Width="40" Text="0:00"/>
                                 <Slider x:Name="PartySeek" Grid.Column="1" Margin="10,0" Minimum="0" Maximum="1" ToolTip="Arraste para ir a outro ponto (vale para todo mundo)"
                                         PreviewMouseLeftButtonDown="PartySeek_PreviewMouseLeftButtonDown" PreviewMouseLeftButtonUp="PartySeek_PreviewMouseLeftButtonUp"
                                         ValueChanged="PartySeek_ValueChanged"/>
-                                <TextBlock x:Name="PartyDuration" Grid.Column="2" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="38"
+                                <TextBlock x:Name="PartyDuration" Grid.Column="2" Style="{StaticResource Caption}" VerticalAlignment="Center" Width="40"
                                            TextAlignment="Right" Text="0:00"/>
                             </Grid>
                         </Grid>
                     </Border>
+                    </Grid>
                 </StackPanel>
                 <controls:SpectrumVisualizer x:Name="PartySpectrum" Grid.Row="1" MaxHeight="380" Margin="0,36,0,0" BarGap="6" Mirror="True"/>
                 <UniformGrid Grid.Row="2" Columns="4" Margin="0,28,-14,0" HorizontalAlignment="Left" MaxWidth="760">
@@ -232,12 +238,14 @@
             </StackPanel>
         </Border>
 
-        <!-- Barra de controles: some sozinha com o mouse parado. Com o vídeo na GPU, vai para uma janela sobreposta. -->
+        <!-- Barra de controles: some sozinha com o mouse parado. Com o vídeo na GPU, vai para uma janela sobreposta.
+             Cada parte tem tamanho fixo (1.3.0): o nome da música, a qualidade e o nome de quem transmite são cortados com
+             reticências e a barra só muda de tamanho quando a janela muda (o nome da música usa o espaço que sobra). -->
         <Border x:Name="ControlBar" Background="#F00B1224" BorderBrush="#2EFFFFFF" BorderThickness="1" CornerRadius="18" Padding="10,8"
-                HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,26">
-            <StackPanel Orientation="Horizontal">
+                HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,26" Height="58">
+            <StackPanel x:Name="BarContent" Orientation="Horizontal">
                 <Border Style="{StaticResource Pill}" Background="{DynamicResource PinkSoft}" BorderBrush="{DynamicResource PinkSoft}" TextElement.Foreground="{DynamicResource Pink}"
-                        Margin="4,0,12,0" MaxWidth="260">
+                        Margin="4,0,10,0" MaxWidth="190">
                     <StackPanel Orientation="Horizontal">
                         <Ellipse Width="7" Height="7" Fill="{DynamicResource Pink}" Margin="0,0,8,0" VerticalAlignment="Center"/>
                         <TextBlock x:Name="BarTitle" Text="Ao vivo" TextTrimming="CharacterEllipsis"/>
@@ -248,21 +256,21 @@
                     <Button x:Name="BarPrevious" Style="{StaticResource IconButton}" Content="&#xE892;" ToolTip="Voltar (vale para todo mundo)" Click="MediaPrevious_Click"/>
                     <Button x:Name="BarPlayPause" Style="{StaticResource IconButton}" Content="&#xE769;" ToolTip="Pausar (vale para todo mundo)" Click="MediaPlayPause_Click"/>
                     <Button x:Name="BarNext" Style="{StaticResource IconButton}" Content="&#xE893;" ToolTip="Pular (vale para todo mundo)" Click="MediaNext_Click"/>
-                    <StackPanel x:Name="BarMediaInfo" VerticalAlignment="Center" Margin="6,0,6,0" MaxWidth="190">
+                    <StackPanel x:Name="BarMediaInfo" VerticalAlignment="Center" Margin="8,0,6,0" Width="0" Visibility="Collapsed">
                         <TextBlock x:Name="BarMediaTitle" FontSize="12.5" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                         <TextBlock x:Name="BarMediaArtist" FontSize="11.5" Foreground="{DynamicResource TextMuted}" TextTrimming="CharacterEllipsis"/>
                     </StackPanel>
                     <Border Width="1" Height="22" Background="#26FFFFFF" Margin="6,0,8,0"/>
                 </StackPanel>
                 <Button x:Name="MuteButton" Style="{StaticResource IconButton}" Content="&#xE767;" ToolTip="Mudo (M)" Click="Mute_Click"/>
-                <Slider x:Name="VolumeSlider" Width="130" Minimum="0" Maximum="1" VerticalAlignment="Center" Margin="6,0,10,0" ValueChanged="Volume_Changed"/>
+                <Slider x:Name="VolumeSlider" Width="120" Minimum="0" Maximum="1" VerticalAlignment="Center" Margin="6,0,10,0" ValueChanged="Volume_Changed"/>
                 <Border Width="1" Height="22" Background="#26FFFFFF" Margin="4,0,8,0"/>
                 <!-- Controles de quem assiste (1.2.0): só aparecem com um host que deixa -->
-                <Button x:Name="QualityButton" Style="{StaticResource ChipButton}" Margin="0,0,6,0" VerticalAlignment="Center" Visibility="Collapsed"
-                        Click="Quality_Click" ToolTip="Trocar a qualidade da transmissão (vale para todo mundo)">
+                <Button x:Name="QualityButton" Style="{StaticResource ChipButton}" Margin="0,0,6,0" VerticalAlignment="Center" Visibility="Collapsed" Width="150"
+                        HorizontalContentAlignment="Left" Click="Quality_Click" ToolTip="Trocar a qualidade da transmissão (vale para todo mundo)">
                     <StackPanel Orientation="Horizontal">
                         <TextBlock Style="{StaticResource Icon}" Text="&#xE7F4;" FontSize="13" Margin="0,0,7,0"/>
-                        <TextBlock x:Name="QualityText" Text="Qualidade"/>
+                        <TextBlock x:Name="QualityText" Text="Qualidade" TextTrimming="CharacterEllipsis" MaxWidth="104"/>
                     </StackPanel>
                 </Button>
                 <Button x:Name="AppsButton" Style="{StaticResource IconButton}" Content="&#xE71D;" ToolTip="Tirar apps do som da transmissão" Click="Apps_Click"

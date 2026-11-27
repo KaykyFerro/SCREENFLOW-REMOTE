@@ -7,15 +7,32 @@ using System.Windows.Threading;
 using ScreenFlow.App.Services;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
+using ScreenFlow.Core.Room;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Network;
 using ScreenFlow.Infrastructure.Room;
 
 namespace ScreenFlow.App.Pages;
 
-/// <summary>Configurações: qualidade, câmera e som, player, rede e firewall, segurança, tema e diagnóstico.</summary>
+/// <summary>As abas das Configurações.</summary>
+public enum SettingsTab
+{
+    General,
+    Stream,
+    Player,
+    Voice,
+    Network,
+}
+
+/// <summary>
+/// Configurações em abas: Geral (perfil, tema e janela), Transmissão (qualidade, som e quem pode entrar), Assistir
+/// (player e atalhos), Voz e sala (microfone e chat guardado) e Rede e diagnóstico.
+/// </summary>
 public partial class SettingsPage : UserControl, IShellPage
 {
+    /// <summary>Pasta de exemplo do chat guardado nas capturas de tela.</summary>
+    private const string DemoArchiveFolder = @"G:\Meu Drive\ScreenFlow Chat";
+
     private readonly MainWindow _shell;
     private readonly DispatcherTimer _micTimer = new() { Interval = TimeSpan.FromMilliseconds(60) };
     private readonly VoiceGate _micGate = new();
@@ -26,12 +43,16 @@ public partial class SettingsPage : UserControl, IShellPage
     private double _micLevelDb = -100;
     private double _shownLevel;
     private bool _loading;
+    private SettingsTab _tab = SettingsTab.General;
+    private bool _archiveDemo;
+    private bool _choosingFolder;
 
     public SettingsPage(MainWindow shell)
     {
         _shell = shell;
         InitializeComponent();
-        SizeChanged += (_, _) => ResponsiveGrid.Apply(Columns, ActualWidth < 1000);
+        SizeChanged += (_, _) => ApplyLayout();
+        ShowTab(_tab);
         QualityCombo.Fill(Resolution.All.Select(r => new Choice<Resolution>(r, $"{r.Label} · {r.Width} × {r.Height}")));
         FpsCombo.Fill(Quality.FrameRates.Select(f => new Choice<int>(f, $"{f} FPS")));
         FecCombo.Fill(new[] { 0, 4, 6, 8, 10, 16 }.Select(n => new Choice<int>(n, n == 0 ? "Desligada" : $"1 extra a cada {n}")));
@@ -40,6 +61,7 @@ public partial class SettingsPage : UserControl, IShellPage
         CameraQualityCombo.Fill(OverviewPage.CameraQualities);
         ThemeCombo.Fill([new Choice<AppTheme>(AppTheme.Dark, "Escuro"), new Choice<AppTheme>(AppTheme.Light, "Claro")]);
         _micTimer.Tick += (_, _) => UpdateMicMeter();
+        AppServices.Room.ArchiveChanged += UpdateArchiveCard;
         Unloaded += (_, _) =>
         {
             StopMicTest();
@@ -50,6 +72,58 @@ public partial class SettingsPage : UserControl, IShellPage
     private AppSettings Settings => AppServices.Settings.Current;
 
     public void OnShown() => _ = LoadAsync();
+
+    // ───────────────────────── Abas ─────────────────────────
+
+    public SettingsTab Tab => _tab;
+
+    /// <summary>Abre uma aba (as outras telas usam para ir direto ao assunto, como a voz ou o perfil).</summary>
+    public void ShowTab(SettingsTab tab)
+    {
+        _tab = tab;
+        var radio = TabButton(tab);
+        if (radio.IsChecked != true) radio.IsChecked = true; // chama o Tab_Checked
+        else ApplyTab();
+    }
+
+    private RadioButton TabButton(SettingsTab tab) => tab switch
+    {
+        SettingsTab.Stream => TabStream,
+        SettingsTab.Player => TabPlayer,
+        SettingsTab.Voice => TabVoice,
+        SettingsTab.Network => TabNetwork,
+        _ => TabGeneral,
+    };
+
+    private void Tab_Checked(object sender, RoutedEventArgs e)
+    {
+        // O XAML marca a primeira aba antes de criar o resto da página.
+        if (!IsInitialized || GeneralColumns is null) return;
+        foreach (var tab in Enum.GetValues<SettingsTab>())
+            if (ReferenceEquals(sender, TabButton(tab))) _tab = tab;
+        ApplyTab();
+        PageScroller.ScrollToTop();
+    }
+
+    private void ApplyTab()
+    {
+        GeneralColumns.Visibility = _tab == SettingsTab.General ? Visibility.Visible : Visibility.Collapsed;
+        StreamPanel.Visibility = _tab == SettingsTab.Stream ? Visibility.Visible : Visibility.Collapsed;
+        PlayerColumns.Visibility = _tab == SettingsTab.Player ? Visibility.Visible : Visibility.Collapsed;
+        VoiceColumns.Visibility = _tab == SettingsTab.Voice ? Visibility.Visible : Visibility.Collapsed;
+        NetworkColumns.Visibility = _tab == SettingsTab.Network ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>Com a janela estreita, os cartões de cada aba ficam um embaixo do outro.</summary>
+    private void ApplyLayout()
+    {
+        var stacked = ActualWidth < 1000;
+        ResponsiveGrid.Apply(GeneralColumns, stacked);
+        ResponsiveGrid.Apply(StreamColumns, stacked);
+        ResponsiveGrid.Apply(PlayerColumns, stacked);
+        ResponsiveGrid.Apply(VoiceColumns, stacked);
+        ResponsiveGrid.Apply(NetworkColumns, stacked);
+    }
 
     private async Task LoadAsync()
     {
@@ -64,8 +138,10 @@ public partial class SettingsPage : UserControl, IShellPage
         AudioBitrateCombo.SelectValue(s.AudioBitrateKbps, k => k);
         MusicCombo.SelectValue(s.MusicBitrateKbps, k => k);
         SeparateAudioToggle.IsChecked = s.SeparateAppAudio;
+        KeepVolumeToggle.IsChecked = s.KeepStreamVolume;
         GpuToggle.IsChecked = s.GpuVideoRenderer;
         StatsToggle.IsChecked = s.ShowStatsOverlay;
+        MediaControlsToggle.IsChecked = s.SystemMediaControls;
         MediaPortBox.Text = s.MediaPort.ToString();
         ControlPortBox.Text = s.ControlPort.ToString();
         DiscoveryPortBox.Text = s.DiscoveryPort.ToString();
@@ -83,6 +159,7 @@ public partial class SettingsPage : UserControl, IShellPage
         VoiceVolumeSlider.Value = s.VoiceVolume;
         VoiceSoundsToggle.IsChecked = s.VoiceSounds;
         UpdateVoiceLabels();
+        UpdateArchiveCard();
         if (AppServices.DemoMode) ShowDemoMeter();
         SavedText.Text = string.Empty;
         AutoResult.Text = s.LastAutoConfig is { } when
@@ -130,10 +207,12 @@ public partial class SettingsPage : UserControl, IShellPage
         }
         if (AudioBitrateCombo.SelectedItem is Choice<int> audio) s.AudioBitrateKbps = audio.Value;
         if (MusicCombo.SelectedItem is Choice<int> music) s.MusicBitrateKbps = music.Value;
-        var separateChanged = s.SeparateAppAudio != (SeparateAudioToggle.IsChecked == true);
+        var audioChanged = s.SeparateAppAudio != (SeparateAudioToggle.IsChecked == true) || s.KeepStreamVolume != (KeepVolumeToggle.IsChecked == true);
         s.SeparateAppAudio = SeparateAudioToggle.IsChecked == true;
+        s.KeepStreamVolume = KeepVolumeToggle.IsChecked == true;
         s.GpuVideoRenderer = GpuToggle.IsChecked == true;
         s.ShowStatsOverlay = StatsToggle.IsChecked == true;
+        s.SystemMediaControls = MediaControlsToggle.IsChecked == true;
         s.MediaPort = int.TryParse(MediaPortBox.Text, out var mp) ? mp : s.MediaPort;
         s.ControlPort = int.TryParse(ControlPortBox.Text, out var cp) ? cp : s.ControlPort;
         s.DiscoveryPort = int.TryParse(DiscoveryPortBox.Text, out var dp) ? dp : s.DiscoveryPort;
@@ -158,7 +237,7 @@ public partial class SettingsPage : UserControl, IShellPage
         s.PreferredCodec = encoder?.Codec;
 
         AppServices.Settings.Save();
-        if (separateChanged) _shell.TransmitPage.OnAudioSettingsChanged();
+        if (audioChanged) _shell.TransmitPage.OnAudioSettingsChanged();
         if (theme != ThemeManager.Current) ThemeManager.Apply(theme);
         SavedText.Text = $"Salvo às {DateTime.Now:HH:mm}";
         // Com a transmissão no ar, a qualidade nova vale na hora (a tela da Transmissão avisa); o resto já está salvo.
@@ -433,6 +512,123 @@ public partial class SettingsPage : UserControl, IShellPage
             MicTestText.Text = "Passando da marca: é assim que a sua voz vai para os outros.";
             MicTestText.SetResourceReference(TextBlock.ForegroundProperty, "Success");
         });
+    }
+
+    // ───────────────────────── Chat guardado (Google Drive) ─────────────────────────
+
+    /// <summary>Mostra se o chat está sendo guardado, onde, ou por que não está.</summary>
+    private void UpdateArchiveCard()
+    {
+        if (!IsInitialized) return;
+        var s = Settings;
+        var room = AppServices.Room;
+        var enabled = _archiveDemo || s.ChatArchiveEnabled;
+        var custom = !_archiveDemo && s.ChatArchiveFolder is not null;
+        var folder = _archiveDemo ? DemoArchiveFolder : enabled ? room.ArchiveFolder : null;
+        var problem = _archiveDemo || !enabled ? null : room.ArchiveProblem;
+        ArchiveToggle.IsChecked = enabled;
+        string dot;
+        if (!enabled)
+        {
+            ArchiveStatus.Text = "Desligado. As conversas ficam só enquanto o ScreenFlow está aberto.";
+            dot = "TextSubtle";
+        }
+        else if (problem is not null)
+        {
+            ArchiveStatus.Text = problem;
+            dot = "Warning";
+        }
+        else if (folder is null)
+        {
+            ArchiveStatus.Text = custom ? "Abrindo a pasta…" : "Procurando o Google Drive deste PC…";
+            dot = "TextSubtle";
+        }
+        else
+        {
+            ArchiveStatus.Text = custom ? "Guardando as conversas nesta pasta:" : "Guardando no Google Drive, nesta pasta:";
+            dot = "Success";
+        }
+        ArchiveDot.SetResourceReference(Shape.FillProperty, dot);
+        ArchivePath.Text = folder ?? string.Empty;
+        ArchivePath.Visibility = folder is null ? Visibility.Collapsed : Visibility.Visible;
+        ArchiveDriveButton.Visibility = custom ? Visibility.Visible : Visibility.Collapsed;
+        ArchiveOpenButton.Visibility = folder is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>Para as capturas do CI: o chat guardado ligado numa pasta do Google Drive.</summary>
+    internal void ShowArchiveDemo()
+    {
+        _archiveDemo = true;
+        UpdateArchiveCard();
+    }
+
+    /// <summary>O chat guardado vale na hora (sem precisar do Salvar): a sala abre ou fecha a pasta.</summary>
+    private void SaveArchiveSettings()
+    {
+        try { AppServices.Settings.Save(); }
+        catch (Exception exception)
+        {
+            Log.Warn($"Chat guardado: configurações não salvas: {exception.Message}");
+            _shell.Toast("Não deu para salvar a escolha do chat guardado.", ToastKind.Warning);
+        }
+        UpdateArchiveCard();
+    }
+
+    private void ArchiveToggle_Click(object sender, RoutedEventArgs e)
+    {
+        if (_archiveDemo) return;
+        Settings.ChatArchiveEnabled = ArchiveToggle.IsChecked == true;
+        SaveArchiveSettings();
+    }
+
+    private async void ArchiveChoose_Click(object sender, RoutedEventArgs e)
+    {
+        if (_choosingFolder) return;
+        _choosingFolder = true;
+        ArchiveChooseButton.IsEnabled = false;
+        try
+        {
+            var start = Settings.ChatArchiveFolder ?? await Task.Run(ChatArchiveFolders.FindGoogleDrive);
+            var dialog = new Microsoft.Win32.OpenFolderDialog
+            {
+                Title = "Escolha a pasta em que o chat vai ficar guardado",
+                InitialDirectory = start is not null && System.IO.Directory.Exists(start)
+                    ? start
+                    : Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            };
+            if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
+            Settings.ChatArchiveFolder = ChatArchive.RootFor(dialog.FolderName);
+            Settings.ChatArchiveEnabled = true;
+            SaveArchiveSettings();
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"Escolher a pasta do chat: {exception.Message}");
+            _shell.Toast("Não deu para usar essa pasta.", ToastKind.Warning);
+        }
+        finally
+        {
+            _choosingFolder = false;
+            ArchiveChooseButton.IsEnabled = true;
+        }
+    }
+
+    private void ArchiveDrive_Click(object sender, RoutedEventArgs e)
+    {
+        Settings.ChatArchiveFolder = null;
+        Settings.ChatArchiveEnabled = true;
+        SaveArchiveSettings();
+    }
+
+    private void ArchiveOpen_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Room.ArchiveFolder is not { } folder) return;
+        try { Process.Start(new ProcessStartInfo(folder) { UseShellExecute = true }); }
+        catch (Exception exception)
+        {
+            Log.Warn($"Não foi possível abrir a pasta do chat: {exception.Message}");
+            _shell.Toast("Não deu para abrir a pasta do chat.", ToastKind.Warning);
+        }
     }
 
     // ───────────────────────── Firewall ─────────────────────────

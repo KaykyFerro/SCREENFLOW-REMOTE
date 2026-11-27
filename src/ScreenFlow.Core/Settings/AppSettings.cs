@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
+using ScreenFlow.Core.Room;
 
 namespace ScreenFlow.Core.Settings;
 
@@ -54,10 +55,19 @@ public sealed class AppSettings
     public List<MutedApp> MutedApps { get; set; } = [];
     /// <summary>Festa de música com o som de um app só (o Spotify, por exemplo). Null: todo o som do PC.</summary>
     public MutedApp? PartyApp { get; set; }
+    /// <summary>
+    /// Desfaz o volume geral do PC de quem transmite no som que vai para quem assiste (1.3.0): cada um controla só o
+    /// próprio volume. Desligado, quem assiste ouve o som como ele sai na caixa de quem transmite.
+    /// </summary>
+    public bool KeepStreamVolume { get; set; } = true;
 
     // Segurança
     public string? Pin { get; set; }
-    public bool ApproveEachViewer { get; set; } = true;
+    /// <summary>
+    /// Quem transmite aceita cada pessoa antes de ela ver a tela. Desde a 1.3.0 vem desligado: quem está na rede entra
+    /// direto (as configurações antigas são ajustadas uma vez, em <see cref="Migrate"/>).
+    /// </summary>
+    public bool ApproveEachViewer { get; set; }
     public int MaxViewers { get; set; } = 20;
     /// <summary>
     /// Quem assiste (1.2.0 ou mais nova) pode trocar a qualidade, pausar e pular a música e tirar apps do som, pelo
@@ -76,6 +86,11 @@ public sealed class AppSettings
     public bool GpuVideoRenderer { get; set; } = true;
     /// <summary>Canto do quadrinho da câmera no player: 0 em cima à direita, 1 embaixo à direita, 2 embaixo à esquerda.</summary>
     public int PlayerCameraCorner { get; set; }
+    /// <summary>
+    /// O player aparece no Windows como um player de música (1.3.0): nos controles de mídia, nas teclas de mídia do
+    /// teclado e nos apps que mostram o que está tocando.
+    /// </summary>
+    public bool SystemMediaControls { get; set; } = true;
 
     // Bandeja
     /// <summary>Fechar e minimizar levam o app para a bandeja (perto do relógio) em vez de fechar.</summary>
@@ -96,6 +111,28 @@ public sealed class AppSettings
     public double VoiceSensitivity { get; set; } = 0.6;
     /// <summary>IPs adicionados à mão na sala (para redes em que o aviso automático não chega).</summary>
     public List<string> RoomPeers { get; set; } = [];
+    /// <summary>Canais que você criou (1.3.0): aparecem para todo mundo da sala enquanto você estiver nela.</summary>
+    public List<RoomChannel> MyChannels { get; set; } = [];
+    /// <summary>O último canal de texto aberto e o último canal de voz (o botão Entrar volta para ele).</summary>
+    public string? LastTextChannel { get; set; }
+    public string? LastVoiceChannel { get; set; }
+    /// <summary>Volume de cada pessoa na voz, só para você (id da pessoa → 0 a 2; sem a pessoa = 1).</summary>
+    public Dictionary<string, double> PeerVolumes { get; set; } = [];
+
+    // Chat guardado numa pasta (1.3.0)
+    /// <summary>
+    /// Guarda as mensagens do chat (e as imagens) numa pasta, por exemplo a do Google Drive para computador: o Drive
+    /// manda para a nuvem sozinho. Ligado, o chat também volta quando o ScreenFlow abre de novo.
+    /// </summary>
+    public bool ChatArchiveEnabled { get; set; }
+    /// <summary>A pasta do chat guardado. Null: a pasta do Google Drive achada no PC.</summary>
+    public string? ChatArchiveFolder { get; set; }
+
+    /// <summary>De que versão são estas configurações (para ajustar padrões antigos uma vez só).</summary>
+    public int SettingsVersion { get; set; }
+
+    /// <summary>A versão atual das configurações: 2 é a 1.3.0.</summary>
+    public const int CurrentSettingsVersion = 2;
 
     // Configuração automática e atualização
     public bool AutoConfigured { get; set; }
@@ -145,6 +182,31 @@ public sealed class AppSettings
         RoomPeers = (RoomPeers ?? []).Select(p => p.Trim()).Where(p => p.Length is > 0 and <= 64).Distinct(StringComparer.OrdinalIgnoreCase).Take(16).ToList();
         MutedApps = MutedApp.Normalize(MutedApps);
         PartyApp = MutedApp.Normalize([PartyApp]).FirstOrDefault();
+        MyChannels = RoomChannels.Normalize(MyChannels);
+        LastTextChannel = RoomChannels.CleanName(RoomChannelKind.Text, LastTextChannel) is { Length: > 0 } text ? text : null;
+        LastVoiceChannel = RoomChannels.CleanName(RoomChannelKind.Voice, LastVoiceChannel) is { Length: > 0 } voice ? voice : null;
+        PeerVolumes = (PeerVolumes ?? [])
+            .Where(p => Guid.TryParseExact(p.Key, "N", out _) && double.IsFinite(p.Value) && Math.Abs(p.Value - 1) > 0.001)
+            .Take(256)
+            .ToDictionary(p => p.Key, p => Math.Clamp(p.Value, 0, 2));
+        if (string.IsNullOrWhiteSpace(ChatArchiveFolder)) ChatArchiveFolder = null;
+        else
+        {
+            ChatArchiveFolder = ChatArchiveFolder.Trim();
+            if (ChatArchiveFolder.Length > 260 || !Path.IsPathFullyQualified(ChatArchiveFolder)) ChatArchiveFolder = null;
+        }
+    }
+
+    /// <summary>
+    /// Ajusta, uma vez, configurações salvas por versões antigas: na 1.3.0 entrar na transmissão deixou de pedir a
+    /// aprovação de quem transmite (o padrão antigo era pedir, então quase todo mundo estava com ele ligado sem escolher).
+    /// </summary>
+    public bool Migrate()
+    {
+        if (SettingsVersion >= CurrentSettingsVersion) return false;
+        if (SettingsVersion < 2) ApproveEachViewer = false;
+        SettingsVersion = CurrentSettingsVersion;
+        return true;
     }
 
     private static int ValidPort(int port, int fallback) => port is >= 1024 and <= 65535 ? port : fallback;
@@ -181,6 +243,7 @@ public sealed class SettingsStore
             if (File.Exists(_path))
             {
                 var loaded = JsonSerializer.Deserialize<AppSettings>(File.ReadAllText(_path), Options) ?? new AppSettings();
+                if (loaded.Migrate()) Log.Info($"Configurações atualizadas para a versão {AppSettings.CurrentSettingsVersion}.");
                 loaded.Normalize();
                 return loaded;
             }
@@ -189,7 +252,7 @@ public sealed class SettingsStore
         {
             Log.Warn($"Configurações corrompidas, usando padrão: {exception.Message}");
         }
-        var settings = new AppSettings();
+        var settings = new AppSettings { SettingsVersion = AppSettings.CurrentSettingsVersion };
         settings.Normalize();
         return settings;
     }

@@ -34,7 +34,7 @@ public sealed class RoomPeer
     /// <summary>Endereço para assistir a transmissão: o IP que o host anuncia ou, sem ele, o de onde a presença veio.</summary>
     public IPAddress WatchAddress => Presence.LiveAddress ?? EndPoint.Address;
 
-    public bool IsSpeaking(DateTimeOffset now) => Presence.InVoice && !Presence.Muted && now - LastVoice < TimeSpan.FromMilliseconds(320) && VoiceLevel > 24;
+    public bool IsSpeaking(DateTimeOffset now) => Presence.InAnyVoice && !Presence.Muted && now - LastVoice < TimeSpan.FromMilliseconds(320) && VoiceLevel > 24;
 }
 
 public readonly record struct PeerUpdate(RoomPeer? Peer, bool IsNew, RoomPresence? Previous)
@@ -260,10 +260,10 @@ public sealed class RateLimiter<TKey>(int burst, double perSecond) where TKey : 
     }
 }
 
-/// <summary>Histórico do chat desta sessão, em ordem de horário, sem repetidas. Guarda as últimas 300 mensagens.</summary>
+/// <summary>Histórico do chat desta sessão (todos os canais), em ordem de horário, sem repetidas. Guarda as últimas 600 mensagens.</summary>
 public sealed class ChatHistory
 {
-    public const int Capacity = 300;
+    public const int Capacity = 600;
     private readonly List<RoomChatMessage> _messages = [];
     private readonly HashSet<(Guid, ulong)> _ids = [];
     private readonly object _gate = new();

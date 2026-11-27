@@ -101,13 +101,39 @@ Pelo player, quem assiste troca a qualidade, controla a música ou o vídeo e ti
 
 Enquanto uma transmissão ou um player está no ar, o `SessionPerformance` pede ao Windows o timer de 1 ms (`timeBeginPeriod`), tira o processo do modo de eficiência do Windows 11 (EcoQoS, que com a janela minimizada ou na bandeja atrasava o ritmo de envio e ignorava o timer de 1 ms), sobe a prioridade do processo para acima do normal e põe o coletor de lixo no modo de baixa latência. Tudo volta ao normal quando a última sessão acaba.
 
+## Volume de quem transmite (1.3.0)
+
+Em muitos PCs o Windows aplica o volume geral antes de o ScreenFlow capturar o som (no loopback por app, quase sempre): baixar o volume para ouvir mais baixo deixava a transmissão baixa para todo mundo. O `VolumeCompensation` (no Core, com testes) multiplica o som capturado pelo inverso do volume do aparelho (lido e acompanhado pelo `AudioEndpointVolume` do WASAPI), até +60 dB, com um limitador para os picos. Mudo vira volume zero para a correção, e o som que sobra é o que o Windows ainda deixa passar.
+
+Nem todo PC baixa o som antes da captura (placas com volume no hardware, fones Bluetooth com volume próprio). Um som que baixou com o volume nunca passa do teto que o volume deixa; se o som capturado passa desse teto por uns 100 ms seguidos, depois de 1 s sem mudar o volume, a correção desliga sozinha para aquele dispositivo. A opção fica em Configurações › Transmissão e vale na hora, com a transmissão no ar.
+
+## Controles de mídia do Windows no player (1.3.0)
+
+O `SystemMediaSession` liga os controles de mídia da janela do player (`SystemMediaTransportControls`, pelo `ISystemMediaTransportControlsInterop` com o HWND): o ScreenFlow aparece no painel do volume, na tela de bloqueio e para os apps que mostram o que está tocando, e responde às teclas de mídia. Na festa de música mostra a música que toca no PC de quem transmite (título, artista, capa e tempo); numa transmissão de tela, o nome de quem transmite. Tocar, pausar e pular viram os mesmos pedidos `mediacmd` dos botões do player, então só funcionam quando quem transmite deixa **Quem assiste pode mexer nos controles**; sem isso, a tecla de pausa tira e volta o som do player. A capa vai como um fluxo em memória e só é trocada quando muda.
+
+## Canais da sala (1.3.0)
+
+A sala virou um servidor no estilo do Discord, sem servidor:
+
+- **Canais padrão** em todo mundo: texto #geral, #música e #prints-e-clipes; voz Geral, Jogando e Música. Cada PC pode criar até 6 canais (nomes de até 24 caracteres), que vão na presença num campo novo e aparecem para todo mundo enquanto quem criou está na sala. Um canal de texto com conversa continua na lista; um de voz, enquanto tem alguém nele. O `RoomChannels` (no Core, com testes) limpa os nomes, compara sem acento e sem diferença de maiúsculas e junta as listas de todo mundo (no máximo 40 de cada tipo).
+- **Compatibilidade**: o #geral e a voz Geral são os de antes. Uma mensagem em outro canal leva o nome do canal num campo novo e só vai para quem anunciou que entende canais; a 1.2 e as mais antigas continuam vendo só o #geral. Estar na voz Geral liga a mesma marca de antes (`InVoice`), então a 1.2 ouve e é ouvida normalmente lá; num canal criado, a marca é outra (`InVoiceChannel`) e a 1.2 não vê a pessoa como na voz.
+- **Voz por canal**: cada quadro de voz só vai para quem está no mesmo canal, e quem recebe ignora quadros de quem está em outro canal. Trocar de canal não fecha o microfone nem o motor de voz: tira as pessoas do canal antigo da mistura e anuncia o novo canal na hora.
+- **Volume por pessoa**: o motor de voz aplica um ganho por pessoa (0 a 2, com limitador) antes da mistura. Os volumes ficam nas configurações (`PeerVolumes`, pelo id da pessoa) e valem nas próximas sessões.
+- **Não lidas por canal**: cada canal de texto guarda as próprias 300 mensagens e as não lidas. O último canal de texto aberto e o último canal de voz ficam salvos.
+
+## Chat guardado (1.3.0)
+
+Com **Guardar o chat no Google Drive** ligado, o `ChatArchive` (no Core, com testes) grava cada mensagem numa pasta `ScreenFlow Chat`: um arquivo de texto por canal e por dia (`<canal>/<aaaa-mm-dd>.txt`, fácil de ler no celular pelo app do Drive), as imagens em `imagens/<id>.jpg` e um histórico em `historico/<aaaa-mm>.jsonl` para o app ler de volta. Tudo é gravado numa thread só, fora da interface, com uma fila; uma falha (o Drive fechou, a pasta sumiu) avisa uma vez e tenta de novo nas próximas mensagens. Ao abrir, as mensagens dos últimos dois meses voltam (no máximo 300 por canal), e uma imagem guardada volta da pasta sem precisar da rede, com o hash conferido.
+
+A pasta do Google Drive para computador é achada sem login nem API: a unidade com o nome "Google Drive" (G:, no modo de streaming) e, dentro dela, "Meu Drive" ou "My Drive"; ou, no modo espelhado, a pasta dentro do usuário. Sem o Drive, dá para escolher qualquer pasta (uma pasta de outro serviço de nuvem também funciona).
+
 ## Sala da rede (UDP 47802)
 
-Todo mundo com o ScreenFlow 1.1 aberto na mesma rede do Radmin se vê, conversa no chat e pode entrar na voz. Não há servidor: tudo passa pela porta de descoberta, que o instalador já libera.
+Todo mundo com o ScreenFlow 1.1 aberto na mesma rede do Radmin se vê, conversa no chat e pode entrar na voz (na 1.3.0, em canais: veja **Canais da sala** acima). Não há servidor: tudo passa pela porta de descoberta, que o instalador já libera.
 
 - **Pacotes** binários com cabeçalho de 20 bytes (`SR`, versão, tipo e o id de quem mandou) e no máximo 1400 bytes: presença, saída, chat, confirmação do chat, voz e pedido de histórico. Os anúncios em JSON das transmissões das versões 1.0.x chegam na mesma porta e alimentam a tela Assistir.
 - **Presença** por broadcast nos adaptadores do Radmin a cada 2 s (e direto para quem já é conhecido ou foi adicionado pelo IP), com o nome, se está na voz, mudo, sem som e se está ao vivo (tela, som, câmera). Quem some por 7 s sai da lista.
-- **Chat** direto para cada PC, com confirmação e até 6 tentativas. O histórico guarda as últimas 300 mensagens só na memória; quem chega pede o histórico aos outros.
+- **Chat** direto para cada PC, com confirmação e até 6 tentativas. O histórico guarda as últimas 300 mensagens na memória (e, com o chat guardado ligado, também na pasta escolhida); quem chega pede o histórico aos outros.
 - **Voz** direto para quem está na voz: Opus 32 kbps, 48 kHz mono, quadros de 20 ms, com portão de voz (só manda enquanto você fala) e cada quadro levando o anterior para cobrir uma perda isolada. Cada pessoa tem um buffer de jitter (de 40 a 240 ms) e todas são mixadas numa saída só. Sem som (ensurdecer) também desliga o microfone. **Ouvir meu microfone** (Configurações) toca o microfone no fone com um buffer curto, sem passar pela rede.
 - **Perfil** (1.1.1): o nome vem de **Seu perfil** (no começo, o nome do PC). A foto vai na presença como uma referência (id e tamanho) num campo novo no fim do pacote, que as versões antigas ignoram; quem vê uma foto que ainda não tem baixa de quem anunciou.
 - **Arquivos** (1.1.1): as fotos de perfil (JPEG 192×192, até 96 KB) e as imagens do chat (JPEG de até 1920 px, em torno de 600 KB, no máximo 2 MB) passam pela mesma porta. O id de um arquivo são os 16 primeiros bytes do SHA-256 do conteúdo. Quem quer pede (`BlobRequest`) tudo ou só as partes que faltam (até 600 por pedido); quem tem manda partes (`BlobChunk`) de 1200 bytes, em lotes, só para quem está na sala e no endereço de onde ela fala, com limite de pedidos por pessoa e de envios ao mesmo tempo (um pedido pequeno não vira uma enxurrada para outro endereço). O `RoomBlobDownloads` (no Core, com testes) pede de novo o que falta depois de 400 ms sem partes novas, com espera crescente; depois de 5 tentativas sem nada passa para a próxima pessoa que tem o arquivo (o autor da mensagem, quem repassou o histórico, os outros da sala) e desiste em 60 s. No fim, o hash precisa conferir. Os arquivos ficam em `%LOCALAPPDATA%\ScreenFlow\imagens` (`RoomBlobStore`: gravação atômica, conferência do hash ao ler, 24 MB na memória, limpeza do que não é usado há 30 dias ou passa de 300 MB, a sua foto fica sempre).

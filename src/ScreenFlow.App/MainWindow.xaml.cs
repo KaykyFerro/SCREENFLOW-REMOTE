@@ -14,6 +14,7 @@ using ScreenFlow.App.Windows;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
+using ScreenFlow.Core.Room;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Core.Updates;
 using ScreenFlow.Infrastructure.Network;
@@ -47,6 +48,7 @@ public partial class MainWindow : Window
     private Action? _balloonAction;
     private DateTimeOffset _lastChatToast;
     private DateTimeOffset _lastChatBalloon;
+    private string? _lastArchiveError;
 
     public MainWindow()
     {
@@ -68,6 +70,7 @@ public partial class MainWindow : Window
         room.MessageArrived += OnRoomMessage;
         room.PersonWentLive += OnPersonWentLive;
         room.ProfileChanged += UpdateProfile;
+        room.ArchiveFailed += OnArchiveFailed;
         UpdateProfile();
         room.IsChatInFront = () => Host.Content is Pages.ChatPage && IsVisible && IsActive && WindowState != WindowState.Minimized;
         Activated += (_, _) =>
@@ -152,7 +155,7 @@ public partial class MainWindow : Window
         {
             Pages.TransmitPage => (NavTransmit, "Transmissão"),
             Pages.WatchPage => (NavWatch, "Assistir"),
-            Pages.ChatPage => (NavChat, "Chat da rede"),
+            Pages.ChatPage => (NavChat, "Sala da rede"),
             Pages.MonitorPage => (NavMonitor, "Monitoramento"),
             Pages.SettingsPage => (NavSettings, "Configurações"),
             Pages.UpdatesPage => (NavUpdates, "Atualizações"),
@@ -170,6 +173,13 @@ public partial class MainWindow : Window
             Host.BeginAnimation(OpacityProperty, new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(200)) { EasingFunction = ease });
             HostTranslate.BeginAnimation(TranslateTransform.YProperty, new DoubleAnimation(10, 0, TimeSpan.FromMilliseconds(240)) { EasingFunction = ease });
         }
+    }
+
+    /// <summary>Abre as Configurações direto numa aba (a voz, o perfil, a rede...).</summary>
+    public void OpenSettings(SettingsTab tab)
+    {
+        SettingsPage.ShowTab(tab);
+        Navigate(SettingsPage);
     }
 
     private void Nav_Checked(object sender, RoutedEventArgs e)
@@ -321,7 +331,7 @@ public partial class MainWindow : Window
             {
                 var result = await AppServices.AutoConfigureAsync();
                 Toast($"Configurado para este PC: {result.Resolution.Label} a {result.Fps} FPS em {Quality.CodecLabel(result.Codec)} ({result.Encoder}).",
-                    ToastKind.Success, "Ver detalhes", () => Navigate(SettingsPage));
+                    ToastKind.Success, "Ver detalhes", () => OpenSettings(SettingsTab.Stream));
                 (Host.Content as IShellPage)?.OnShown();
             }
             catch (Exception exception)
@@ -685,9 +695,10 @@ public partial class MainWindow : Window
     {
         var room = AppServices.Room;
         if (!room.InVoice)
-            return room.Unread switch { 0 => null, 1 => "1 mensagem nova no chat", var n => $"{n} mensagens novas no chat" };
+            return room.Unread switch { 0 => null, 1 => "1 mensagem nova na sala", var n => $"{n} mensagens novas na sala" };
         var others = Math.Max(0, room.VoiceMembers.Count - 1);
-        var line = others switch { 0 => "Na voz da rede (só você)", 1 => "Na voz com 1 pessoa", var n => $"Na voz com {n} pessoas" };
+        var channel = room.VoiceChannel ?? RoomChannels.DefaultVoiceName;
+        var line = others switch { 0 => $"Na voz: {channel} (só você)", 1 => $"Na voz: {channel}, com 1 pessoa", var n => $"Na voz: {channel}, com {n} pessoas" };
         return room.Deafened ? line + " · sem som" : room.MicrophoneOff ? line + " · mudo" : line;
     }
 
@@ -702,8 +713,8 @@ public partial class MainWindow : Window
             menu.Items.Add(TrayItem("Som desligado", "\uE7F6", room.ToggleDeafen, room.Deafened));
             menu.Items.Add(TrayItem("Sair da voz", "\uE778", () => _ = room.LeaveVoiceAsync()));
         }
-        else menu.Items.Add(TrayItem("Entrar na voz da rede", "\uE7F6", () => _ = JoinVoiceAsync()));
-        var chat = room.Unread switch { 0 => "Abrir o chat da rede", 1 => "Abrir o chat da rede (1 nova)", var n => $"Abrir o chat da rede ({n} novas)" };
+        else menu.Items.Add(TrayItem($"Entrar na voz ({room.SuggestedVoiceChannel})", "\uE7F6", () => _ = JoinVoiceAsync()));
+        var chat = room.Unread switch { 0 => "Abrir a sala da rede", 1 => "Abrir a sala da rede (1 nova)", var n => $"Abrir a sala da rede ({n} novas)" };
         menu.Items.Add(TrayItem(chat, "\uE8BD", () => ShowFromTray(ChatPage)));
     }
 
@@ -719,22 +730,24 @@ public partial class MainWindow : Window
         }
         var room = AppServices.Room;
         var inVoice = room.InVoice;
-        var talking = room.VoiceMembers.Count;
+        // Como no Discord: o canal em que você está (ou o que o Entrar escolhe) e quem está nele.
+        var here = room.VoiceMembers.Count;
+        var channel = room.VoiceChannel ?? room.SuggestedVoiceChannel;
         var others = room.People.Count;
         VoiceTitle.Text = inVoice ? "Voz conectada" : "Voz da rede";
         VoiceTitle.SetResourceReference(TextBlock.ForegroundProperty, inVoice ? "Success" : "Text");
         foreach (var bar in VoiceSignal.Children.OfType<Rectangle>()) bar.SetResourceReference(Shape.FillProperty, inVoice ? "Success" : "TextSubtle");
         VoiceSubtitle.Text = !room.IsAvailable ? "Sala da rede desligada"
             : room.IsJoining ? "Ligando o microfone…"
-            : inVoice ? (talking <= 1 ? "Só você por enquanto" : $"{talking} pessoas conversando")
-            : talking > 0 ? (talking == 1 ? "1 pessoa na voz" : $"{talking} pessoas na voz")
+            : inVoice ? (here <= 1 ? $"{channel} · só você" : $"{channel} · {here} pessoas")
+            : here > 0 ? (here == 1 ? $"1 pessoa em {channel}" : $"{here} pessoas em {channel}")
             : others switch { 0 => "Ninguém da rede ainda", 1 => "1 pessoa na rede", var n => $"{n} pessoas na rede" };
-        VoiceSubtitle.ToolTip = room.Error;
-        VoiceList.Visibility = talking > 0 && !_compact ? Visibility.Visible : Visibility.Collapsed;
+        VoiceSubtitle.ToolTip = room.Error ?? (inVoice ? $"Você está no canal de voz {channel}. Troque de canal na Sala da rede." : null);
+        VoiceList.Visibility = here > 0 && !_compact ? Visibility.Visible : Visibility.Collapsed;
         LeaveVoiceButton.Visibility = inVoice ? Visibility.Visible : Visibility.Collapsed;
         JoinVoiceButton.Visibility = inVoice ? Visibility.Collapsed : Visibility.Visible;
         JoinVoiceButton.IsEnabled = room.IsAvailable && !room.IsJoining;
-        JoinVoiceButton.ToolTip = talking > 0 ? $"Entrar na voz da rede ({VoiceSubtitle.Text})" : "Entrar na voz da rede";
+        JoinVoiceButton.ToolTip = here > 0 ? $"Entrar no canal de voz {channel} ({VoiceSubtitle.Text})" : $"Entrar no canal de voz {channel}";
         MuteToggle.Visibility = DeafenToggle.Visibility = inVoice ? Visibility.Visible : Visibility.Collapsed;
         CompactLeaveButton.Visibility = inVoice && _compact ? Visibility.Visible : Visibility.Collapsed;
         MuteToggle.IsChecked = room.MicrophoneOff;
@@ -760,7 +773,15 @@ public partial class MainWindow : Window
         MachineCard.ToolTip = _compact ? $"{name} · trocar seu nome e sua foto" : "Trocar seu nome e sua foto";
     }
 
-    private void MachineCard_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e) => Navigate(SettingsPage);
+    private void MachineCard_MouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e) => OpenSettings(SettingsTab.General);
+
+    /// <summary>Botão direito em alguém da voz no menu lateral: o volume dessa pessoa só para você.</summary>
+    private void VoiceMember_MouseRightButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.DataContext is not VoiceMemberRow member) return;
+        e.Handled = true;
+        VoiceMemberMenu.Open(element, member, this);
+    }
 
     private void UpdateChatBadge()
     {
@@ -776,8 +797,8 @@ public partial class MainWindow : Window
     private async Task JoinVoiceAsync()
     {
         if (await AppServices.Room.JoinVoiceAsync() is not { } error) return;
-        if (IsInBackground) TrayNotify("Não deu para entrar na voz", error, () => Navigate(SettingsPage));
-        else Toast(error, ToastKind.Warning, "Escolher o microfone", () => Navigate(SettingsPage));
+        if (IsInBackground) TrayNotify("Não deu para entrar na voz", error, () => OpenSettings(SettingsTab.Voice));
+        else Toast(error, ToastKind.Warning, "Escolher o microfone", () => OpenSettings(SettingsTab.Voice));
     }
 
     private async void LeaveVoice_Click(object sender, RoutedEventArgs e) => await AppServices.Room.LeaveVoiceAsync();
@@ -788,7 +809,17 @@ public partial class MainWindow : Window
 
     private void OpenChat_Click(object sender, RoutedEventArgs e) => Navigate(ChatPage);
 
-    /// <summary>Mensagem nova com o chat fechado: aviso rápido na janela, ou notificação do Windows com o app escondido.</summary>
+    /// <summary>Abre a Sala da rede num canal de texto (o da mensagem que chegou).</summary>
+    public void OpenChannel(string? channel)
+    {
+        AppServices.Room.SelectText(channel);
+        Navigate(ChatPage);
+    }
+
+    /// <summary>
+    /// Mensagem nova com a sala fechada: aviso rápido na janela, ou notificação do Windows com o app escondido. Com a sala
+    /// aberta, a bolinha do canal já avisa.
+    /// </summary>
     private void OnRoomMessage(ChatRow row)
     {
         if (AppServices.Room.IsChatInFront?.Invoke() == true) return;
@@ -796,16 +827,29 @@ public partial class MainWindow : Window
         var preview = row.HasImage
             ? (row.HasText ? $"📷 {Preview(row.Text, 100)}" : "📷 mandou uma imagem")
             : Preview(row.Text, 110);
+        var where = RoomChannels.IsDefaultText(row.ChannelName) ? null : $"#{row.ChannelName}";
+        var channel = row.ChannelName;
         if (IsInBackground)
         {
             if (now - _lastChatBalloon < TimeSpan.FromSeconds(20)) return;
             _lastChatBalloon = now;
-            TrayNotify($"{row.Author} no chat da rede", preview, () => Navigate(ChatPage));
+            TrayNotify(where is null ? $"{row.Author} na sala da rede" : $"{row.Author} em {where}", preview, () => OpenChannel(channel));
             return;
         }
         if (now - _lastChatToast < TimeSpan.FromSeconds(4)) return;
         _lastChatToast = now;
-        Toast($"{row.Author}: {preview}", ToastKind.Info, "Responder", () => Navigate(ChatPage));
+        Toast(where is null ? $"{row.Author}: {preview}" : $"{row.Author} em {where}: {preview}", ToastKind.Info, "Responder", () => OpenChannel(channel));
+    }
+
+    /// <summary>O chat guardado não conseguiu gravar na pasta (o Drive fechou, a pasta sumiu): avisa uma vez por problema.</summary>
+    private void OnArchiveFailed(string error)
+    {
+        if (_lastArchiveError == error) return;
+        _lastArchiveError = error;
+        Notifications.Post(new Notice("chat-archive", NoticeKind.Info, "O chat não está sendo guardado",
+            $"{error} As conversas continuam na sala; quando a pasta voltar, as novas são guardadas de novo.",
+            "Configurações", () => OpenSettings(SettingsTab.Voice)));
+        Toast($"O chat não foi guardado na pasta: {error}", ToastKind.Warning, "Configurações", () => OpenSettings(SettingsTab.Voice));
     }
 
     private void OnPersonWentLive(RoomPersonRow person)

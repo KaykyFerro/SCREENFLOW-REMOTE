@@ -1,41 +1,54 @@
+using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Microsoft.Win32;
 using ScreenFlow.App.Services;
+using ScreenFlow.App.Windows;
 using ScreenFlow.Core.Diagnostics;
+using ScreenFlow.Core.Room;
 
 namespace ScreenFlow.App.Pages;
 
-/// <summary>Chat da rede: uma conversa só com todo mundo que está com o ScreenFlow aberto na rede, e quem está lá.</summary>
+/// <summary>
+/// Sala da rede, como um servidor do Discord (1.3.0): canais de texto e de voz à esquerda (com quem está em cada canal
+/// de voz), a conversa do canal aberto no meio e quem está na rede à direita.
+/// </summary>
 public partial class ChatPage : UserControl, IShellPage
 {
     private readonly MainWindow _shell;
     private bool _stickToBottom = true;
     private PreparedImage? _attachment;
+    private ObservableCollection<ChatRow>? _messages;
+    /// <summary>Mostrar quem está na rede: null segue a largura da janela; o botão de pessoas escolhe.</summary>
+    private bool? _peopleWanted;
 
     public ChatPage(MainWindow shell)
     {
         _shell = shell;
         InitializeComponent();
         var room = AppServices.Room;
-        MessageList.ItemsSource = room.Messages;
+        TextChannelList.ItemsSource = room.TextChannels;
+        VoiceChannelList.ItemsSource = room.VoiceChannels;
         PeopleList.ItemsSource = room.People;
-        room.Messages.CollectionChanged += OnMessagesChanged;
+        room.CurrentTextChanged += ShowChannel;
         room.Changed += UpdatePeople;
         room.ProfileChanged += UpdatePeople;
+        room.ArchiveChanged += UpdateArchive;
         shell.LiveStateChanged += UpdatePeople;
-        SizeChanged += (_, _) => PeopleColumn.Width = new GridLength(ActualWidth >= 1000 ? 320 : 270);
+        SizeChanged += (_, _) => UpdateColumns();
         Loaded += (_, _) =>
         {
             UpdateAll();
             ScrollToEnd();
         };
+        ShowChannel();
         UpdateComposer();
     }
 
@@ -57,8 +70,32 @@ public partial class ChatPage : UserControl, IShellPage
         ContentGrid.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
         ErrorPanel.Visibility = available ? Visibility.Collapsed : Visibility.Visible;
         ErrorText.Text = $"{room.Error} Feche o programa que está usando a porta UDP {AppServices.Settings.Current.DiscoveryPort} (ou mude a porta de descoberta em Configurações) e abra o ScreenFlow de novo.";
-        NoMessages.Visibility = room.Messages.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateColumns();
         UpdatePeople();
+        UpdateArchive();
+    }
+
+    /// <summary>
+    /// Janela larga: canais, conversa e quem está na rede lado a lado. Estreita: a lista de quem está na rede some (o
+    /// botão de pessoas mostra de novo), como no Discord.
+    /// </summary>
+    private void UpdateColumns()
+    {
+        if (!IsInitialized) return;
+        var width = ActualWidth;
+        var wide = width >= 1400;
+        ChannelsColumn.Width = new GridLength(wide ? 256 : width >= 1040 ? 236 : 216);
+        var showPeople = _peopleWanted ?? width >= 1040;
+        PeopleCard.Visibility = showPeople ? Visibility.Visible : Visibility.Collapsed;
+        PeopleGap.Width = new GridLength(showPeople ? 14 : 0);
+        PeopleColumn.Width = new GridLength(showPeople ? wide ? 290 : 256 : 0);
+        PeopleToggle.IsChecked = showPeople;
+    }
+
+    private void PeopleToggle_Click(object sender, RoutedEventArgs e)
+    {
+        _peopleWanted = PeopleToggle.IsChecked == true;
+        UpdateColumns();
     }
 
     private void UpdatePeople()
@@ -72,11 +109,13 @@ public partial class ChatPage : UserControl, IShellPage
         var others = room.People.Count;
         OnlineText.Text = $"{others + 1} online";
         NoPeople.Visibility = others == 0 ? Visibility.Visible : Visibility.Collapsed;
-        ConversationInfo.Text = others switch
+        var voice = room.VoiceCount;
+        RoomInfo.Text = (others, voice) switch
         {
-            0 => "Só você por aqui agora. As mensagens não ficam salvas depois que o ScreenFlow fecha.",
-            1 => "Vai para 1 pessoa da rede. As mensagens não ficam salvas depois que o ScreenFlow fecha.",
-            var n => $"Vai para {n} pessoas da rede. As mensagens não ficam salvas depois que o ScreenFlow fecha.",
+            (0, 0) => "Só você online",
+            (_, 0) => $"{others + 1} online",
+            (_, 1) => $"{others + 1} online · 1 na voz",
+            _ => $"{others + 1} online · {voice} na voz",
         };
 
         SelfAvatar.Colors = AvatarColors.For(room.SelfId);
@@ -84,15 +123,170 @@ public partial class ChatPage : UserControl, IShellPage
         SelfAvatar.Photo = room.SelfPhoto;
         SelfName.Text = $"{room.SelfName} (você)";
         var status = _shell.IsTransmitting ? $"Ao vivo · {_shell.TransmitPage.LiveSummary}" : _shell.IsWatching ? "Assistindo uma transmissão" : "Online";
-        if (room.InVoice) status += room.Deafened ? " · na voz, sem som" : room.MicrophoneOff ? " · na voz, mudo" : " · na voz";
+        if (room.VoiceChannel is { } channel)
+            status += room.Deafened ? $" · na voz: {channel}, sem som" : room.MicrophoneOff ? $" · na voz: {channel}, mudo" : $" · na voz: {channel}";
         SelfStatus.Text = status;
+        ChannelTopic.Text = room.CurrentText.Topic;
+        ChannelTopic.ToolTip = room.CurrentText.Topic;
+        UpdateComposerHint();
+    }
+
+    // ───────────────────────── Canais ─────────────────────────
+
+    /// <summary>Mostra a conversa do canal de texto aberto.</summary>
+    private void ShowChannel()
+    {
+        var room = AppServices.Room;
+        if (_messages is not null) _messages.CollectionChanged -= OnMessagesChanged;
+        _messages = room.Messages;
+        _messages.CollectionChanged += OnMessagesChanged;
+        MessageList.ItemsSource = _messages;
+        var channel = room.CurrentText;
+        ChannelTitle.Text = channel.Name;
+        ChannelTopic.Text = channel.Topic;
+        ChannelTopic.ToolTip = channel.Topic;
+        Composer.Tag = $"Conversar em #{channel.Name}";
+        EmptyTitle.Text = channel.IsDefaultText ? "Ninguém escreveu nada ainda" : $"Este é o começo do #{channel.Name}";
+        EmptyText.Text = channel.IsDefaultText
+            ? "Mande um oi: a mensagem vai para todo mundo que está com o ScreenFlow aberto na sua rede."
+            : "Mande a primeira mensagem do canal. Quem está na sala vê o canal na lista da esquerda.";
+        NoMessages.Visibility = _messages.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        JumpButton.Visibility = Visibility.Collapsed;
+        UpdateComposerHint();
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, ScrollToEnd);
+    }
+
+    private void TextChannel_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not TextChannelRow channel) return;
+        AppServices.Room.SelectText(channel.Name);
+        if (!AppServices.DemoMode) Composer.Focus();
+    }
+
+    private void TextChannel_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.DataContext is not TextChannelRow channel) return;
+        e.Handled = true;
+        var menu = new ContextMenu { PlacementTarget = element };
+        menu.Items.Add(MenuItemFor("Abrir o canal", "", () => AppServices.Room.SelectText(channel.Name)));
+        if (channel.HasUnread) menu.Items.Add(MenuItemFor("Marcar como lido", "", () => channel.Unread = 0));
+        if (channel.IsMine)
+        {
+            menu.Items.Add(new Separator());
+            menu.Items.Add(MenuItemFor("Apagar o canal", "", () => DeleteChannel(channel.Channel), danger: true));
+        }
+        menu.IsOpen = true;
+    }
+
+    private async void VoiceChannel_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not VoiceChannelRow channel || channel.IsCurrent) return;
+        await JoinVoiceAsync(channel.Name);
+    }
+
+    private void VoiceChannel_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.DataContext is not VoiceChannelRow channel) return;
+        e.Handled = true;
+        var room = AppServices.Room;
+        var menu = new ContextMenu { PlacementTarget = element };
+        if (channel.IsCurrent) menu.Items.Add(MenuItemFor("Sair da voz", "", () => _ = room.LeaveVoiceAsync()));
+        else menu.Items.Add(MenuItemFor(room.InVoice ? "Mudar para este canal" : "Entrar no canal", "", () => _ = JoinVoiceAsync(channel.Name)));
+        if (channel.IsMine)
+        {
+            menu.Items.Add(new Separator());
+            menu.Items.Add(MenuItemFor("Apagar o canal", "", () => DeleteChannel(channel.Channel), danger: true));
+        }
+        menu.IsOpen = true;
+    }
+
+    private async Task JoinVoiceAsync(string channel)
+    {
+        if (await AppServices.Room.JoinVoiceAsync(channel) is not { } error) return;
+        _shell.Toast(error, ToastKind.Warning, "Escolher o microfone", () => _shell.OpenSettings(SettingsTab.Voice));
+    }
+
+    private void Member_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.DataContext is not VoiceMemberRow member) return;
+        e.Handled = true;
+        VoiceMemberMenu.Open(element, member, _shell);
+    }
+
+    private void CreateText_Click(object sender, RoutedEventArgs e) => CreateChannel(RoomChannelKind.Text);
+
+    private void CreateVoice_Click(object sender, RoutedEventArgs e) => CreateChannel(RoomChannelKind.Voice);
+
+    private void CreateChannel(RoomChannelKind kind)
+    {
+        if (ChannelDialog.Ask(Window.GetWindow(this), kind) is not { } name) return;
+        if (AppServices.Room.CreateChannel(kind, name) is { } error)
+        {
+            _shell.Toast(error, ToastKind.Warning);
+            return;
+        }
+        if (kind == RoomChannelKind.Voice) _shell.Toast("Canal de voz criado. Clique nele para entrar.", ToastKind.Success);
+        else if (!AppServices.DemoMode) Composer.Focus();
+    }
+
+    private void DeleteChannel(RoomChannel channel)
+    {
+        var name = channel.Kind == RoomChannelKind.Text ? $"#{channel.Name}" : channel.Name;
+        if (!ConfirmDialog.Ask(Window.GetWindow(this), $"Apagar o canal {name}?",
+                "Ele some da lista de todo mundo. Quem já conversou nele continua vendo as mensagens até fechar o ScreenFlow.", "Apagar", danger: true))
+            return;
+        AppServices.Room.DeleteChannel(channel);
+    }
+
+    private static MenuItem MenuItemFor(string text, string glyph, Action action, bool danger = false)
+    {
+        var item = new MenuItem { Header = text, Tag = glyph };
+        if (danger) item.SetResourceReference(ForegroundProperty, "Danger");
+        item.Click += (_, _) => action();
+        return item;
+    }
+
+    // ───────────────────────── Chat guardado ─────────────────────────
+
+    private void UpdateArchive()
+    {
+        if (!IsInitialized) return;
+        var room = AppServices.Room;
+        var folder = room.ArchiveFolder;
+        var problem = room.ArchiveProblem;
+        ArchivePill.Visibility = folder is not null || problem is not null ? Visibility.Visible : Visibility.Collapsed;
+        ArchiveText.Text = problem is not null ? "Chat não guardado"
+            : AppServices.Settings.Current.ChatArchiveFolder is null ? "Guardado no Google Drive" : "Guardado na pasta";
+        ArchivePill.ToolTip = problem ?? $"As conversas ficam guardadas em {folder}. Clique para abrir a pasta.";
+        ArchivePill.SetResourceReference(TextElement.ForegroundProperty, problem is null ? "AccentText" : "Amber");
+        ArchivePill.SetResourceReference(Border.BackgroundProperty, problem is null ? "AccentSoft" : "AmberSoft");
+        ArchivePill.SetResourceReference(Border.BorderBrushProperty, problem is null ? "AccentBorder" : "AmberSoft");
+    }
+
+    private void ArchivePill_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (AppServices.Room.ArchiveFolder is not { } folder)
+        {
+            _shell.OpenSettings(SettingsTab.Voice);
+            return;
+        }
+        try
+        {
+            Directory.CreateDirectory(folder);
+            Process.Start(new ProcessStartInfo(folder) { UseShellExecute = true });
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"Não abriu a pasta do chat: {exception.Message}");
+            _shell.Toast("O Windows não abriu a pasta do chat guardado.", ToastKind.Warning);
+        }
     }
 
     // ───────────────────────── Conversa ─────────────────────────
 
     private void OnMessagesChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
-        NoMessages.Visibility = AppServices.Room.Messages.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        NoMessages.Visibility = _messages is { Count: > 0 } ? Visibility.Collapsed : Visibility.Visible;
         if (e.Action != NotifyCollectionChangedAction.Add || e.NewItems?[0] is not ChatRow row) return;
         if (row.IsMine) _stickToBottom = true;
         if (_stickToBottom) Dispatcher.BeginInvoke(DispatcherPriority.Loaded, ScrollToEnd);
@@ -172,6 +366,20 @@ public partial class ChatPage : UserControl, IShellPage
         var length = Composer.Text.Length;
         SendButton.IsEnabled = !string.IsNullOrWhiteSpace(Composer.Text) || _attachment is not null;
         CounterText.Text = length >= 400 ? $"{length}/500" : string.Empty;
+    }
+
+    /// <summary>Num canal criado, avisa que quem está numa versão antiga não vê (eles só têm o #geral).</summary>
+    private void UpdateComposerHint()
+    {
+        var room = AppServices.Room;
+        var old = room.CurrentText.IsDefaultText ? 0 : room.OldVersionCount;
+        ComposerHint.Text = old switch
+        {
+            0 => "Enter envia · Shift+Enter pula linha · Ctrl+V cola uma imagem",
+            1 => "1 pessoa está numa versão antiga do ScreenFlow e só vê o #geral",
+            var n => $"{n} pessoas estão numa versão antiga do ScreenFlow e só veem o #geral",
+        };
+        ComposerHint.SetResourceReference(TextBlock.ForegroundProperty, old > 0 ? "Amber" : "TextSubtle");
     }
 
     // ───────────────────────── Imagens ─────────────────────────
@@ -264,20 +472,22 @@ public partial class ChatPage : UserControl, IShellPage
         if (RowOf(sender) is { } row) OpenPicture(row);
     }
 
-    /// <summary>Abre no visualizador de fotos do Windows (com zoom, tela cheia e o resto).</summary>
+    /// <summary>Abre a imagem no visualizador do ScreenFlow e permite passar pelas imagens deste canal.</summary>
     private void OpenPicture(ChatRow row)
     {
-        if (row.Image is not { } image || AppServices.Blobs.Get(image.Id) is not { } data)
+        var images = AppServices.Room.Messages
+            .Where(candidate => candidate.ImageState == ChatImageState.Ready
+                && candidate.Image is { } image
+                && AppServices.Blobs.Get(image.Id) is { Length: > 0 })
+            .ToList();
+        var index = images.IndexOf(row);
+        if (index < 0)
         {
             _shell.Toast("A imagem ainda não chegou.", ToastKind.Warning);
             return;
         }
-        try { Process.Start(new ProcessStartInfo(ImageTools.TempFile(image.Id, data)) { UseShellExecute = true }); }
-        catch (Exception exception)
-        {
-            Log.Warn($"Não abriu a imagem: {exception.Message}");
-            _shell.Toast("O Windows não abriu a imagem. Use \"Salvar como…\" no botão direito.", ToastKind.Warning);
-        }
+        var viewer = new ChatImageViewerWindow(images, index) { Owner = Window.GetWindow(this) };
+        viewer.ShowDialog();
     }
 
     private void SavePicture_Click(object sender, RoutedEventArgs e)
@@ -323,7 +533,7 @@ public partial class ChatPage : UserControl, IShellPage
         if ((sender as FrameworkElement)?.Tag is ChatRow row) AppServices.Room.RetryImage(row);
     }
 
-    private void SelfAvatar_MouseLeftButtonUp(object sender, MouseButtonEventArgs e) => _shell.Navigate(_shell.SettingsPage);
+    private void SelfAvatar_MouseLeftButtonUp(object sender, MouseButtonEventArgs e) => _shell.OpenSettings(SettingsTab.General);
 
     /// <summary>Capturas do CI: uma imagem anexada esperando para ir, com legenda.</summary>
     internal void ShowAttachmentDemo(PreparedImage? image, string caption)
