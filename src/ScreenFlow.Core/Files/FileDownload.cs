@@ -128,14 +128,20 @@ public sealed class FileDownload
         SetState(FileDownloadState.Waiting);
     }
 
-    /// <summary>Para e guarda onde parou (Continuar segue daqui).</summary>
+    /// <summary>Para e guarda onde parou (Continuar segue daqui). Um que estava na fila sai dela e fica pausado.</summary>
     public void Pause()
     {
         lock (_gate)
         {
-            if (!IsRunning) return;
-            _run?.Cancel();
+            if (IsRunning)
+            {
+                _run?.Cancel();
+                return;
+            }
+            if (State != FileDownloadState.Waiting) return;
         }
+        BytesPerSecond = 0;
+        SetState(FileDownloadState.Paused);
     }
 
     /// <summary>Para e apaga o que já tinha baixado.</summary>

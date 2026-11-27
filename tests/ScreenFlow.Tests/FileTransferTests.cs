@@ -241,6 +241,28 @@ public sealed class FileTransferTests : IDisposable
     }
 
     [Fact]
+    public async Task AQueuedDownloadCanBePausedAndContinued()
+    {
+        var (server, shares) = StartServer();
+        using var running = server;
+        var (path, data) = MakeFile(40_000, "na-fila.bin");
+        var file = await Share(shares, path, server.Port);
+        var download = NewDownload(file);
+        download.Queue();
+        Assert.Equal(FileDownloadState.Waiting, download.State);
+        // Pausar quem está na fila tira da fila (o botão de pausar não fica sem efeito).
+        download.Pause();
+        Assert.Equal(FileDownloadState.Paused, download.State);
+        Assert.False(download.IsRunning);
+        await download.StartAsync(Loopback(server.Port));
+        Assert.Equal(FileDownloadState.Completed, download.State);
+        Assert.Equal(data, await File.ReadAllBytesAsync(download.Destination));
+        // Pausar um que já terminou não muda nada.
+        download.Pause();
+        Assert.Equal(FileDownloadState.Completed, download.State);
+    }
+
+    [Fact]
     public async Task TinyFilesWork()
     {
         var (server, shares) = StartServer();

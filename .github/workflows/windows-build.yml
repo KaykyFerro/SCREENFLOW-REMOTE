@@ -103,6 +103,7 @@ jobs:
           Get-PnpDevice -Class AudioEndpoint -ErrorAction SilentlyContinue | Format-Table Status, FriendlyName -AutoSize
           if ($install.ExitCode -gt 1) { throw "A instalação da placa de som virtual falhou (devcon $($install.ExitCode))." }
       - name: Smoke test (diagnostic command)
+        timeout-minutes: 5
         shell: pwsh
         run: |
           $p = Start-Process -FilePath artifacts/publish/ScreenFlow.exe -ArgumentList "--diagnostico" -PassThru -Wait -NoNewWindow
@@ -111,6 +112,7 @@ jobs:
           Get-Content $report
           if (-not (Select-String -Path $report -Pattern "FFmpeg n?7\.")) { throw "FFmpeg não carregou no app publicado." }
       - name: Self-test (music party, network room and PC sound per app)
+        timeout-minutes: 20
         shell: pwsh
         run: |
           # Dois apps tocando fora do ScreenFlow para o teste do som do PC: 440 Hz no powershell.exe (o app que o teste
@@ -174,6 +176,7 @@ jobs:
             throw "Autoteste falhou (código $($p.ExitCode))."
           }
       - name: Screenshots of every screen
+        timeout-minutes: 20
         shell: pwsh
         run: |
           $out = Join-Path $PWD "artifacts/capturas"
@@ -183,6 +186,12 @@ jobs:
             Get-Content (Get-ChildItem "$env:LOCALAPPDATA/ScreenFlow/logs/screenflow-*.log" | Sort-Object LastWriteTime | Select-Object -Last 1) -Tail 120
             throw "As capturas de tela falharam (código $($p.ExitCode))."
           }
+      - name: App log (when a step failed or got stuck)
+        if: failure() || cancelled()
+        shell: pwsh
+        run: |
+          $log = Get-ChildItem "$env:LOCALAPPDATA/ScreenFlow/logs/screenflow-*.log" -ErrorAction SilentlyContinue | Sort-Object LastWriteTime | Select-Object -Last 1
+          if ($log) { Get-Content $log -Tail 150 } else { Write-Host "O ScreenFlow não chegou a gravar log." }
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4

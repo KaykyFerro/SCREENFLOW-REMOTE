@@ -27,10 +27,12 @@ public enum AppSound
 /// </summary>
 public sealed class AppSoundPlayer : IDisposable
 {
-    public static AppSoundPlayer Shared { get; } = new();
-
     private static readonly WaveFormat Format = WaveFormat.CreateIeeeFloatWaveFormat(AudioProfile.SampleRate, AudioProfile.Channels);
     private static readonly TimeSpan IdleClose = TimeSpan.FromSeconds(8);
+
+    // Depois dos campos acima, de propósito: os campos estáticos são preenchidos na ordem do arquivo, e o construtor
+    // usa o Format (antes dele, o Format ainda era null e o ScreenFlow nem abria).
+    public static AppSoundPlayer Shared { get; } = new();
 
     private readonly object _gate = new();
     private readonly MixingSampleProvider _mixer = new(Format) { ReadFully = true };

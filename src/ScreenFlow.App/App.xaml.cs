@@ -16,6 +16,9 @@ public partial class App : Application
     private EventWaitHandle? _showEvent;
     private volatile bool _exiting;
 
+    /// <summary>Rodando sem ninguém olhando (diagnóstico, autoteste, capturas do CI): nunca abre uma janela de aviso.</summary>
+    private bool _headless;
+
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
@@ -23,7 +26,27 @@ public partial class App : Application
         DispatcherUnhandledException += OnDispatcherException;
         AppDomain.CurrentDomain.UnhandledException += (_, args) => Log.Error("Exceção não tratada", args.ExceptionObject as Exception);
         TaskScheduler.UnobservedTaskException += (_, args) => { Log.Error("Task não observada", args.Exception); args.SetObserved(); };
+        _headless = e.Args.Any(a => a is "--diagnostico" or "--diagnostics" or "/diag" or "--autoteste" or "--selftest" or "--capturas");
+        try
+        {
+            await StartAsync(e);
+        }
+        catch (Exception exception)
+        {
+            // Sem isto, um erro aqui deixava o ScreenFlow aberto sem janela nenhuma (e o CI esperando para sempre).
+            Log.Error("O ScreenFlow não abriu", exception);
+            Log.Flush();
+            if (!_headless)
+            {
+                MessageBox.Show($"O ScreenFlow não abriu: {exception.Message}\n\nOs detalhes foram salvos no log ({Log.Directory}).", AppInfo.Name,
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+            Shutdown(3);
+        }
+    }
 
+    private async Task StartAsync(StartupEventArgs e)
+    {
         // Capturas de tela do CI: ScreenFlow.exe --capturas <pasta>. Usa dados de exemplo e configurações descartáveis.
         var captures = ArgumentValue(e.Args, "--capturas");
         if (captures is not null)
@@ -181,7 +204,7 @@ public partial class App : Application
     {
         Log.Error("Erro na interface", e.Exception);
         e.Handled = true;
-        if (AppServices.DemoMode) return;
+        if (AppServices.DemoMode || _headless) return;
         MessageBox.Show($"Algo deu errado: {e.Exception.Message}\n\nOs detalhes foram salvos no log.", AppInfo.Name, MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 

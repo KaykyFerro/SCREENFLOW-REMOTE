@@ -647,7 +647,11 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
             var config = new StreamConfigMessage(VideoCodec.H264, 1280, 720, 60, 8000, true, 48000, 2, "teste", "conexão");
             await ControlFraming.WriteAsync(stream, new WelcomeMessage("PC de quem transmite", Convert.ToBase64String(salt), ((IPEndPoint)udp.LocalEndPoint!).Port, config,
                 [.. StreamModes.HostFeatures]), token);
-            return new FakePublisher(client, stream, udp, new PacketCipher(key, salt), new IPEndPoint(IPAddress.Loopback, hello.UdpPort), accepted.ServerName, hello);
+            var publisher = new FakePublisher(client, stream, udp, new PacketCipher(key, salt), new IPEndPoint(IPAddress.Loopback, hello.UdpPort), accepted.ServerName, hello);
+            // O servidor só põe a transmissão na lista depois de ler o Welcome, e manda o primeiro AudienceMessage logo em
+            // seguida: esperar por ele evita que quem assiste chegue antes e ouça "não está no servidor".
+            await publisher.WaitForAsync<AudienceMessage>(_ => true, token);
+            return publisher;
         }
 
         public void SendMedia(MediaChunk chunk, bool retransmit = false)
@@ -715,6 +719,8 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
             _cipher = cipher;
             Welcome = welcome;
             SawPending = sawPending;
+            // Antes de a thread começar: se o teste acabar logo e fechar o socket, a thread não mexe num socket fechado.
+            _udp.ReceiveTimeout = 200;
             _reader = Task.Run(ReadLoopAsync);
             _media = new Thread(MediaLoop) { IsBackground = true };
             _media.Start();
@@ -732,7 +738,14 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
             using var key = new KeyExchange();
             await ControlFraming.WriteAsync(stream, new HelloMessage(AppInfo.ProtocolVersion, AppInfo.DisplayVersion, name, [VideoCodec.H264], 1280, 720, 60,
                 ((IPEndPoint)udp.LocalEndPoint!).Port, key.PublicKey, [.. StreamModes.ViewerFeatures], streamId.ToString("N")), token);
-            var challenge = Assert.IsType<ChallengeMessage>(await ControlFraming.ReadAsync(stream, token));
+            var first = await ControlFraming.ReadAsync(stream, token);
+            if (first is RejectedMessage refused)
+            {
+                client.Dispose();
+                udp.Dispose();
+                throw new InvalidOperationException($"Recusado antes do desafio ({refused.Code}): {refused.Message}");
+            }
+            var challenge = Assert.IsType<ChallengeMessage>(first);
             var secret = key.DeriveSharedSecret(challenge.PublicKey);
             var transcript = SessionCrypto.Transcript(key.PublicKey, challenge.PublicKey, challenge.Nonce);
             await ControlFraming.WriteAsync(stream, new AuthMessage(SessionCrypto.CreateProof(secret, password, transcript)), token);
@@ -786,7 +799,6 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
             var buffer = new byte[16 * 1024];
             var plain = new byte[16 * 1024];
             EndPoint any = new IPEndPoint(IPAddress.Any, 0);
-            _udp.ReceiveTimeout = 200;
             while (!_stop.IsCancellationRequested)
             {
                 int length;

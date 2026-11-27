@@ -634,10 +634,10 @@ public sealed class FileService
     public void Cancel(FileTransferItem item)
     {
         if (item.Download is not { } download) return;
+        // O cartão continua ligado ao download até ele parar de vez (um que está baixando termina o cancelamento sozinho).
         download.Cancel();
         _downloads.Remove(item.File.Share);
         item.Update(download);
-        item.Download = null;
     }
 
     /// <summary>Abre um arquivo baixado com o programa do Windows (nunca um programa ou script: esses só aparecem na pasta).</summary>
