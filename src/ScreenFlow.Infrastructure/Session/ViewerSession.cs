@@ -47,6 +47,7 @@ public sealed class ViewerSession : IAsyncDisposable
     private volatile MediaStateMessage _media = MediaStateMessage.None;
     private long _mediaReceivedUs;
     private volatile AudioAppsMessage _apps = new([]);
+    private volatile bool _hostMediaSeek;
 
     public ViewerSession(ViewerOptions options)
     {
@@ -110,9 +111,21 @@ public sealed class ViewerSession : IAsyncDisposable
     public Task<bool> RequestQualityAsync(string resolution, int fps, bool adaptive)
         => SendRemoteAsync(new QualityRequestMessage(resolution, fps, adaptive), RemoteState.CanChangeQuality);
 
-    /// <summary>Pausa, volta, pula ou muda o ponto da música que está tocando no host.</summary>
-    public Task<bool> SendMediaCommandAsync(string command, double positionSeconds = 0)
-        => SendRemoteAsync(new MediaCommandMessage(command, positionSeconds), RemoteState.CanControlMedia);
+    /// <summary>
+    /// Pausa, volta, pula ou muda o ponto da música ou do vídeo que está tocando no host. Vai com a chave da sessão de mídia
+    /// que está na tela, para o host recusar se o app mudou no meio do caminho.
+    /// </summary>
+    public Task<bool> SendMediaCommandAsync(string command, double positionSeconds = 0, long requestId = 0, double deltaSeconds = 0)
+    {
+        if (command == MediaCommandMessage.SkipBy && !_hostMediaSeek) return Task.FromResult(false);
+        return SendRemoteAsync(new MediaCommandMessage(command, positionSeconds, _hostMediaSeek ? requestId : 0, _media.SessionKey, deltaSeconds), RemoteState.CanControlMedia);
+    }
+
+    /// <summary>O host é da 1.4.0 ou mais nova: avança e volta alguns segundos e responde a cada busca.</summary>
+    public bool HostConfirmsSeek => _hostMediaSeek && RemoteAvailable;
+
+    /// <summary>A resposta do host a um comando de mídia (1.4.0). Chamado fora da thread da interface.</summary>
+    public event Action<MediaCommandResultMessage>? MediaResult;
 
     /// <summary>Os apps da lista que devem ficar fora do som da transmissão.</summary>
     public Task<bool> RequestAudioAppsAsync(IEnumerable<string> excluded)
@@ -277,6 +290,7 @@ public sealed class ViewerSession : IAsyncDisposable
         _backoff.Reset();
         SetConfig(welcome.Stream);
         _connection = connection;
+        _hostMediaSeek = welcome.Supports(StreamModes.HostFeatureMediaSeek);
         ResetRemote(welcome.Supports(StreamModes.HostFeatureRemoteControl));
         SetState(ConnectionState.Connected, welcome.Stream.Mode == StreamMode.AudioOnly ? $"Na festa de música de {welcome.HostName}." : $"Conectado a {welcome.HostName}.");
         try { await connection.RunAsync(token); }
@@ -432,6 +446,9 @@ public sealed class ViewerSession : IAsyncDisposable
                         break;
                     case AudioAppsMessage apps:
                         _owner.SetRemote(apps: apps);
+                        break;
+                    case MediaCommandResultMessage result:
+                        _owner.MediaResult?.Invoke(result);
                         break;
                     case UnknownControlMessage unknown:
                         Log.Debug($"Mensagem do host que esta versão não conhece: {unknown.Type}");

@@ -21,7 +21,13 @@ public static class StreamModes
     /// </summary>
     public const string FeatureRemoteControl = "remote-control";
 
-    public static IReadOnlyList<string> ViewerFeatures { get; } = [FeatureAudioOnly, FeatureCamera, FeatureCameraOverlay, FeatureSpreadFec, FeatureRemoteControl];
+    /// <summary>
+    /// O viewer entende a minutagem da 1.4.0: chave da sessão de mídia, trecho de busca, avançar e voltar alguns segundos e a
+    /// resposta de cada comando (<c>mediaresult</c>).
+    /// </summary>
+    public const string FeatureMediaSeek = "media-seek";
+
+    public static IReadOnlyList<string> ViewerFeatures { get; } = [FeatureAudioOnly, FeatureCamera, FeatureCameraOverlay, FeatureSpreadFec, FeatureRemoteControl, FeatureMediaSeek];
 
     /// <summary>Recursos anunciados pelo host na boas-vindas. Viewers antigos ignoram a lista.</summary>
     /// <remarks>"frame-nack": o host reenvia um frame inteiro quando o viewer não recebeu nada dele (NACK sem índices).</remarks>
@@ -30,7 +36,10 @@ public static class StreamModes
     /// <summary>O host aceita os pedidos de quem assiste (1.2.0): trocar a qualidade, controlar a música e tirar apps do som.</summary>
     public const string HostFeatureRemoteControl = "remote-control";
 
-    public static IReadOnlyList<string> HostFeatures { get; } = [HostFeatureFrameNack, HostFeatureRemoteControl];
+    /// <summary>O host aceita avançar e voltar alguns segundos, confere cada busca e responde a quem pediu (1.4.0).</summary>
+    public const string HostFeatureMediaSeek = "media-seek";
+
+    public static IReadOnlyList<string> HostFeatures { get; } = [HostFeatureFrameNack, HostFeatureRemoteControl, HostFeatureMediaSeek];
 
     public static string Label(StreamMode mode, bool cameraWithScreen = false) => mode switch
     {

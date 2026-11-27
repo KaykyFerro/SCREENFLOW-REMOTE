@@ -35,6 +35,7 @@ namespace ScreenFlow.Core.Protocol;
 [JsonDerivedType(typeof(QualityRequestMessage), "setquality")]
 [JsonDerivedType(typeof(MediaCommandMessage), "mediacmd")]
 [JsonDerivedType(typeof(AudioAppsRequestMessage), "setapps")]
+[JsonDerivedType(typeof(MediaCommandResultMessage), "mediaresult")]
 public abstract record ControlMessage;
 
 /// <summary>Uma mensagem de um tipo que esta versão não conhece (de uma versão mais nova). Não é enviada: só lida e ignorada.</summary>
@@ -144,6 +145,14 @@ public sealed record RemoteQuality(string Resolution, int Fps);
 /// <summary>O que está tocando no PC de quem transmite (pelos controles de mídia do Windows). Vazio: nada tocando.</summary>
 /// <param name="PositionSeconds">A posição na hora em que a mensagem saiu; quem assiste anda com o relógio dele a partir daí.</param>
 /// <param name="Cover">A capa, em JPEG pequeno (base64), ou null.</param>
+/// <param name="SessionKey">
+/// (1.4.0) Qual sessão de mídia do host é esta: muda quando o host passa a controlar outro app. Um comando com outra chave
+/// é recusado, para nunca mexer num app que não é o que está sendo transmitido. Hosts antigos não mandam.
+/// </param>
+/// <param name="SeekStartSeconds">(1.4.0) Começo do trecho em que dá para buscar (0 para quase tudo).</param>
+/// <param name="SeekEndSeconds">(1.4.0) Fim do trecho em que dá para buscar. 0: o trecho é o vídeo inteiro (0 até a duração).</param>
+/// <param name="Live">(1.4.0) Conteúdo ao vivo: a duração pode crescer e a busca vale só no trecho informado.</param>
+/// <param name="NoSeek">(1.4.0) Por que não dá para buscar (<see cref="MediaSeek"/>), ou null.</param>
 public sealed record MediaStateMessage(
     string AppName,
     string Title,
@@ -155,7 +164,12 @@ public sealed record MediaStateMessage(
     bool CanNext,
     bool CanPlayPause,
     bool CanSeek,
-    string? Cover = null) : ControlMessage
+    string? Cover = null,
+    string? SessionKey = null,
+    double SeekStartSeconds = 0,
+    double SeekEndSeconds = 0,
+    bool Live = false,
+    string? NoSeek = null) : ControlMessage
 {
     public static MediaStateMessage None { get; } = new(string.Empty, string.Empty, string.Empty, false, 0, 0, false, false, false, false);
 
@@ -172,13 +186,27 @@ public sealed record RemoteAudioApp(string Exe, string Name, bool Excluded, bool
 public sealed record QualityRequestMessage(string Resolution, int Fps, bool Adaptive) : ControlMessage;
 
 /// <summary>Quem assiste pede voltar, pausar ou tocar, pular ou ir para um ponto da música ou do vídeo.</summary>
-public sealed record MediaCommandMessage(string Command, double PositionSeconds = 0) : ControlMessage
+/// <param name="RequestId">(1.4.0) Número do pedido, para a resposta (<see cref="MediaCommandResultMessage"/>) e para o host ignorar repetidos.</param>
+/// <param name="SessionKey">(1.4.0) A <see cref="MediaStateMessage.SessionKey"/> que quem assiste estava vendo.</param>
+/// <param name="DeltaSeconds">(1.4.0) Só em <see cref="SkipBy"/>: quanto andar (negativo volta).</param>
+public sealed record MediaCommandMessage(string Command, double PositionSeconds = 0, long RequestId = 0, string? SessionKey = null, double DeltaSeconds = 0) : ControlMessage
 {
     public const string PlayPause = "playpause";
     public const string Previous = "previous";
     public const string Next = "next";
     public const string Seek = "seek";
+
+    /// <summary>(1.4.0) Avança ou volta <see cref="DeltaSeconds"/> a partir da posição de agora no host.</summary>
+    public const string SkipBy = "skip";
 }
+
+/// <summary>
+/// (1.4.0) O host conta a quem pediu como o comando terminou: feito (com a posição conferida depois da busca), recusado
+/// pelo app, sem confirmação ou indisponível. Só vai para quem anunciou <see cref="Media.StreamModes.FeatureMediaSeek"/>.
+/// </summary>
+/// <param name="Outcome">Um dos <see cref="MediaSeek"/>.Outcome*.</param>
+/// <param name="PositionSeconds">A posição lida no app depois do comando (0 se não leu).</param>
+public sealed record MediaCommandResultMessage(long RequestId, string Command, string Outcome, double PositionSeconds = 0) : ControlMessage;
 
 /// <summary>Quem assiste escolhe os apps (da lista que o host mandou) que ficam fora do som da transmissão.</summary>
 public sealed record AudioAppsRequestMessage(string[] Excluded) : ControlMessage;

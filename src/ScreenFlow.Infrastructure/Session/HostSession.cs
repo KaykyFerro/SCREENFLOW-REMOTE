@@ -236,6 +236,11 @@ public sealed partial class HostSession : IAsyncDisposable
             Log.Debug($"Pedido de {viewer.Name} ignorado: pedidos demais seguidos.");
             return;
         }
+        if (message is MediaCommandMessage repeated && !viewer.Requests.IsNew(repeated.RequestId))
+        {
+            Log.Debug($"Pedido repetido de {viewer.Name} ignorado ({repeated.Command} #{repeated.RequestId}).");
+            return;
+        }
         var state = _remoteState;
         var ok = message switch
         {
@@ -247,9 +252,21 @@ public sealed partial class HostSession : IAsyncDisposable
         if (!ok)
         {
             Log.Info($"Pedido de {viewer.Name} recusado: {message.GetType().Name}.");
+            if (message is MediaCommandMessage refused)
+            {
+                var outcome = MediaSeek.SameSession(_mediaState, refused) ? MediaSeek.OutcomeUnavailable : MediaSeek.OutcomeStale;
+                SendMediaResult(viewer.Id, new MediaCommandResultMessage(refused.RequestId, refused.Command, outcome));
+            }
             return;
         }
         RemoteRequested?.Invoke(new RemoteRequest(viewer.Id, viewer.Name, message));
+    }
+
+    /// <summary>Conta a quem pediu como o comando de mídia terminou (só para quem entende, 1.4.0).</summary>
+    public void SendMediaResult(Guid viewerId, MediaCommandResultMessage result)
+    {
+        if (result.RequestId == 0) return;
+        if (_viewers.TryGetValue(viewerId, out var viewer) && viewer.State == ViewerState.Streaming && viewer.SupportsMediaSeek) SendQuietly(viewer, result);
     }
 
     public void Start()
@@ -1098,6 +1115,7 @@ public sealed partial class HostSession : IAsyncDisposable
             Hello = hello;
             SpreadFec = hello.Supports(StreamModes.FeatureSpreadFec);
             Remote = hello.Supports(StreamModes.FeatureRemoteControl);
+            SupportsMediaSeek = Remote && hello.Supports(StreamModes.FeatureMediaSeek);
         }
 
         public Guid Id { get; }
@@ -1116,7 +1134,11 @@ public sealed partial class HostSession : IAsyncDisposable
         /// <summary>Tem os controles de quem assiste (1.2.0): recebe e manda as mensagens novas. As versões antigas não entendem.</summary>
         public bool Remote { get; }
 
+        /// <summary>Entende a minutagem da 1.4.0: recebe a resposta de cada comando de mídia.</summary>
+        public bool SupportsMediaSeek { get; }
+
         public RequestLimiter Limiter { get; } = new();
+        public RequestDeduper Requests { get; } = new();
         public ulong PacketCounter;
         public volatile ViewerState State = ViewerState.Authenticating;
         public StatsMessage? LastStats { get; set; }

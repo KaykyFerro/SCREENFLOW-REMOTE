@@ -1,3 +1,4 @@
+using SeekRules = ScreenFlow.Core.Protocol.MediaSeek;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -42,6 +43,12 @@ public partial class TransmitPage : UserControl, IShellPage
     private MediaControls? _media;
     private string? _mediaId;
     private bool _mediaPinned;
+    // A sessão de mídia ligada ao que é transmitido (1.4.0): só ela vai para quem assiste e recebe os comandos dele.
+    private bool _mediaBound;
+    private string? _mediaKey;
+    private MediaSessionInfo? _mediaInfo;
+    private readonly SeekTracker _hostSeek = new();
+    private readonly SemaphoreSlim _seekGate = new(1, 1);
     private bool _mediaSeeking;
     private bool _fillingMediaSessions;
     private string? _mediaArtKey;
@@ -713,6 +720,10 @@ public partial class TransmitPage : UserControl, IShellPage
         media?.Dispose();
         _mediaId = null;
         _mediaPinned = false;
+        _mediaBound = false;
+        _mediaKey = null;
+        _mediaInfo = null;
+        _hostSeek.Reset();
         _mediaSeeking = false;
         _mediaArtKey = null;
         MediaCard.Visibility = Visibility.Collapsed;
@@ -723,28 +734,40 @@ public partial class TransmitPage : UserControl, IShellPage
 
     private void UpdateMedia()
     {
-        if (_media is not { } media || _session is null)
+        if (_media is not { } media || _session is not { } session)
         {
             MediaCard.Visibility = Visibility.Collapsed;
             return;
         }
+        _hostSeek.Tick(Environment.TickCount64);
         var sessions = media.Sessions;
-        if (media.Pick(SharedAppExe(), _mediaPinned ? _mediaId : null) is not { } info)
+        var binding = media.Bind(SharedAppExe(), _mediaPinned ? _mediaId : null, info => SoundGoesWithStream(session, info));
+        if (binding.Info is not { } info)
         {
             MediaCard.Visibility = Visibility.Collapsed;
+            _mediaBound = false;
+            _mediaInfo = null;
             PublishMedia(null);
             return;
         }
+        // Outro app (ou o mesmo, agora ligado ou desligado): chave nova, e um pedido feito para o app antigo é recusado.
+        if (info.Id != _mediaId || binding.Bound != _mediaBound || _mediaKey is null)
+        {
+            _mediaKey = Guid.NewGuid().ToString("N")[..12];
+            _hostSeek.Reset();
+        }
         _mediaId = info.Id;
-        FillMediaSessions(sessions, info.Id);
+        _mediaBound = binding.Bound;
+        _mediaInfo = info;
+        FillMediaSessions(sessions, info.Id, binding.Bound);
         ShowMedia(info, DateTimeOffset.UtcNow);
-        PublishMedia(info);
+        PublishMedia(binding.Bound ? info : null);
     }
 
     private void ShowMedia(MediaSessionInfo info, DateTimeOffset now)
     {
         MediaCard.Visibility = Visibility.Visible;
-        MediaApp.Text = $"{info.AppName} · {(info.Playing ? "tocando agora" : "pausado")}";
+        MediaApp.Text = $"{info.AppName} · {(info.Live ? "ao vivo" : info.Playing ? "tocando agora" : "pausado")}";
         MediaTitle.Text = info.Title.Length > 0 ? info.Title : info.AppName;
         MediaArtist.Text = info.Artist;
         MediaArtist.Visibility = info.Artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -755,16 +778,30 @@ public partial class TransmitPage : UserControl, IShellPage
         MediaPlayPause.IsEnabled = info.CanPlayPause;
 
         var duration = info.Timeline.Duration;
-        MediaSeekRow.Visibility = duration > TimeSpan.Zero ? Visibility.Visible : Visibility.Collapsed;
-        MediaSeek.IsEnabled = info.CanSeek;
-        MediaDuration.Text = MediaApps.FormatTime(duration);
+        var range = info.CanSeek ? info.SeekRange : SeekRange.Empty;
+        var pending = _hostSeek.Phase == SeekPhase.Pending;
+        MediaSeekRow.Visibility = duration > TimeSpan.Zero || !range.IsEmpty ? Visibility.Visible : Visibility.Collapsed;
+        MediaSeek.IsEnabled = !range.IsEmpty;
+        MediaBack.IsEnabled = MediaForward.IsEnabled = !range.IsEmpty && !pending;
+        MediaBack.Visibility = MediaForward.Visibility = MediaSeekRow.Visibility;
+        MediaDuration.Text = info.Live ? "ao vivo" : MediaApps.FormatTime(duration);
         if (!_mediaSeeking)
         {
-            var position = info.Timeline.PositionAt(now);
-            MediaSeek.Maximum = Math.Max(1, duration.TotalSeconds);
-            MediaSeek.Value = Math.Min(MediaSeek.Maximum, position.TotalSeconds);
+            var position = pending ? TimeSpan.FromSeconds(_hostSeek.Target) : info.Timeline.PositionAt(now);
+            if (range.IsEmpty)
+            {
+                MediaSeek.Minimum = 0;
+                MediaSeek.Maximum = Math.Max(1, duration.TotalSeconds);
+            }
+            else
+            {
+                MediaSeek.Minimum = range.Start;
+                MediaSeek.Maximum = range.End;
+            }
+            MediaSeek.Value = Math.Clamp(position.TotalSeconds, MediaSeek.Minimum, MediaSeek.Maximum);
             MediaPosition.Text = MediaApps.FormatTime(position);
         }
+        ShowSeekNote(info, range);
 
         var artKey = info.Thumbnail is null ? null : $"{info.Id}\n{info.Title}\n{info.Artist}\n{info.Thumbnail.Length}";
         if (artKey == _mediaArtKey) return;
@@ -774,29 +811,58 @@ public partial class TransmitPage : UserControl, IShellPage
         MediaArt.Visibility = image is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    /// <summary>Com mais de um app tocando, uma lista para escolher qual controlar.</summary>
-    private void FillMediaSessions(IReadOnlyList<MediaSessionInfo> sessions, string selected)
+    /// <summary>
+    /// Diz o que está acontecendo com a minutagem: indo para um ponto, pronto, recusado, ao vivo, por que não dá para
+    /// buscar, ou que o app mostrado não está ligado à transmissão (e quem assiste não vê nem controla).
+    /// </summary>
+    private void ShowSeekNote(MediaSessionInfo info, SeekRange range)
     {
-        MediaSessionCombo.Visibility = sessions.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        string? note;
+        if (!_mediaBound)
+            note = SharedAppExe() is not null
+                ? $"{info.AppName} não é o app que você está transmitindo: quem assiste não vê nem controla. Escolha na lista para ligar."
+                : "Mais de um app está tocando. Escolha na lista qual a transmissão controla; até lá, só você vê e controla.";
+        else if (_hostSeek.Phase == SeekPhase.Pending) note = $"Indo para {MediaApps.FormatTime(TimeSpan.FromSeconds(_hostSeek.Target))}…";
+        else if (_hostSeek.Phase is SeekPhase.Done or SeekPhase.Failed && _hostSeek.Outcome is { } outcome) note = SeekRules.Describe(outcome);
+        else if (range.IsEmpty)
+            note = info.Timeline.Duration > TimeSpan.Zero
+                ? "Esse app não deixa mudar o ponto pelos controles de mídia do Windows."
+                : "Esse app não informa a posição e a duração, então não dá para mudar o ponto.";
+        else if (info.Live) note = $"Ao vivo: dá para voltar até {MediaApps.FormatTime(TimeSpan.FromSeconds(range.Length))}.";
+        else if (range.Start > 0.5 || (info.Timeline.Duration.TotalSeconds > 0 && range.End < info.Timeline.Duration.TotalSeconds - 0.5))
+            note = $"O app só deixa buscar entre {MediaApps.FormatTime(TimeSpan.FromSeconds(range.Start))} e {MediaApps.FormatTime(TimeSpan.FromSeconds(range.End))}.";
+        else note = null;
+        MediaSeekNote.Text = note ?? string.Empty;
+        MediaSeekNote.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>A lista para escolher qual app controlar: com mais de um tocando, ou quando o mostrado não está ligado.</summary>
+    private void FillMediaSessions(IReadOnlyList<MediaSessionInfo> sessions, string selected, bool bound)
+    {
+        MediaSessionCombo.Visibility = sessions.Count > 1 || !bound ? Visibility.Visible : Visibility.Collapsed;
         var choices = sessions.Select((s, i) => new Choice<string>(s.Id, sessions.Take(i).Any(o => o.AppName == s.AppName) ? $"{s.AppName} ({i + 1})" : s.AppName)).ToList();
+        if (!bound) choices.Insert(0, new Choice<string>(string.Empty, "Escolher o app…"));
         _fillingMediaSessions = true;
         if (!choices.SequenceEqual(MediaSessionCombo.Items.OfType<Choice<string>>())) MediaSessionCombo.Fill(choices);
-        MediaSessionCombo.SelectValue(selected);
+        MediaSessionCombo.SelectValue(bound ? selected : string.Empty);
         _fillingMediaSessions = false;
     }
 
     private void MediaSession_Changed()
     {
-        if (_fillingMediaSessions || MediaSessionCombo.Value<string>() is not { } id) return;
+        if (_fillingMediaSessions || MediaSessionCombo.Value<string>() is not { Length: > 0 } id) return;
         _mediaId = id;
         _mediaPinned = true;
         _mediaArtKey = null;
+        _mediaKey = null;
         UpdateMedia();
     }
 
     private async void MediaPrevious_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.Previous);
     private async void MediaPlayPause_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.PlayPause);
     private async void MediaNext_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.Next);
+    private async void MediaBack_Click(object sender, RoutedEventArgs e) => await HostSkipAsync(-SeekRules.SkipSeconds);
+    private async void MediaForward_Click(object sender, RoutedEventArgs e) => await HostSkipAsync(SeekRules.SkipSeconds);
 
     private async Task MediaCommandAsync(MediaCommand command)
     {
@@ -804,22 +870,58 @@ public partial class TransmitPage : UserControl, IShellPage
         if (!await media.SendAsync(id, command)) _shell.Toast("O app não aceitou o comando. Alguns apps não deixam pular ou voltar.", ToastKind.Warning);
     }
 
+    private async Task HostSkipAsync(double delta)
+    {
+        if (_media is not { } media || _mediaId is not { } id || _mediaInfo is not { CanSeek: true } info) return;
+        await HostSeekAsync(info.SeekRange.Clamp(media.PositionNow(id) + delta));
+    }
+
+    /// <summary>Quem transmite muda o ponto: mostra "indo para…" e depois o que o app confirmou.</summary>
+    private async Task HostSeekAsync(double target)
+    {
+        if (_media is not { } media || _mediaId is not { } id) return;
+        var now = Environment.TickCount64;
+        if (_hostSeek.Begin(target, now) is not { } request) return;
+        if (_mediaInfo is { } shown) ShowMedia(shown, DateTimeOffset.UtcNow);
+        var outcome = await SeekOneAtATimeAsync(media, id, target);
+        _hostSeek.Resolve(new MediaCommandResultMessage(request, MediaCommandMessage.Seek, outcome), Environment.TickCount64);
+        if (!SeekRules.Succeeded(outcome)) _shell.Toast(SeekRules.Describe(outcome), ToastKind.Warning);
+        UpdateMedia();
+    }
+
+    /// <summary>Uma busca por vez no app (a de quem transmite e as de quem assiste esperam a anterior terminar).</summary>
+    private async Task<string> SeekOneAtATimeAsync(MediaControls media, string id, double target)
+    {
+        await _seekGate.WaitAsync();
+        try { return await media.SeekAsync(id, TimeSpan.FromSeconds(target)); }
+        finally { _seekGate.Release(); }
+    }
+
     private void MediaSeek_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (MediaSeek.IsEnabled) _mediaSeeking = true;
     }
 
+    /// <summary>Arrastando, só a prévia muda aqui; a posição vai para o app uma vez, ao soltar.</summary>
     private async void MediaSeek_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (!_mediaSeeking) return;
         _mediaSeeking = false;
-        if (_media is not { } media || _mediaId is not { } id) return;
-        if (!await media.SeekAsync(id, TimeSpan.FromSeconds(MediaSeek.Value))) _shell.Toast("O app não deixou mudar o ponto da música ou do vídeo.", ToastKind.Warning);
+        await HostSeekAsync(MediaSeek.Value);
+    }
+
+    /// <summary>Pelo teclado (setas, Page Up e Page Down), a busca vai quando a tecla é solta.</summary>
+    private async void MediaSeek_PreviewKeyUp(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (!MediaSeek.IsEnabled || e.Key is not (System.Windows.Input.Key.Left or System.Windows.Input.Key.Right or System.Windows.Input.Key.PageUp
+                or System.Windows.Input.Key.PageDown or System.Windows.Input.Key.Home or System.Windows.Input.Key.End)) return;
+        _mediaSeeking = false;
+        await HostSeekAsync(MediaSeek.Value);
     }
 
     private void MediaSeek_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_mediaSeeking) MediaPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(e.NewValue));
+        if (_mediaSeeking || MediaSeek.IsKeyboardFocusWithin) MediaPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(e.NewValue));
     }
 
     private void ShowError(string message)
@@ -1144,9 +1246,12 @@ public partial class TransmitPage : UserControl, IShellPage
     /// O que está tocando vai para quem assiste só se o som dele vai junto: um app tirado do som (ou fora da festa de um
     /// app só) continua sendo só de quem transmite, e ninguém controla.
     /// </summary>
-    private bool ShareableMedia(HostSession session, MediaSessionInfo info)
+    private bool ShareableMedia(HostSession session, MediaSessionInfo info) => Settings.ViewerControls && SoundGoesWithStream(session, info);
+
+    /// <summary>O som do app vai na transmissão (não foi tirado e, na festa de um app só, é esse app).</summary>
+    private bool SoundGoesWithStream(HostSession session, MediaSessionInfo info)
     {
-        if (!Settings.ViewerControls || !session.AudioEnabled) return false;
+        if (!session.AudioEnabled) return false;
         if (Settings.MutedApps.Any(app => MediaApps.Matches(info.AppId, app.Exe))) return false;
         return !(session.Mode == StreamMode.AudioOnly && Settings.PartyApp is { } party && !MediaApps.Matches(info.AppId, party.Exe));
     }
@@ -1159,7 +1264,12 @@ public partial class TransmitPage : UserControl, IShellPage
         var next = info is null
             ? MediaStateMessage.None
             : new MediaStateMessage(info.AppName, info.Title, info.Artist, info.Playing, info.Timeline.PositionAt(DateTimeOffset.UtcNow).TotalSeconds,
-                info.Timeline.Duration.TotalSeconds, info.CanPrevious, info.CanNext, info.CanPlayPause, info.CanSeek, CoverFor(info.Thumbnail));
+                info.Timeline.Duration.TotalSeconds, info.CanPrevious, info.CanNext, info.CanPlayPause, info.CanSeek, CoverFor(info.Thumbnail),
+                SessionKey: _mediaKey,
+                SeekStartSeconds: info.CanSeek ? info.SeekRange.Start : 0,
+                SeekEndSeconds: info.CanSeek ? info.SeekRange.End : 0,
+                Live: info.Live,
+                NoSeek: info.CanSeek ? null : info.Timeline.Duration > TimeSpan.Zero ? SeekRules.NoSeekUnsupported : SeekRules.NoSeekNoTimeline);
         var now = Environment.TickCount64;
         if (!RemoteControl.ShouldPublish(_publishedMedia, (now - _publishedMediaAt) / 1000.0, next)) return;
         _publishedMedia = next;
@@ -1258,7 +1368,7 @@ public partial class TransmitPage : UserControl, IShellPage
                 ApplyRemoteQuality(session, request.ViewerName, quality);
                 break;
             case MediaCommandMessage command:
-                _ = RemoteMediaAsync(request.ViewerName, command);
+                _ = RemoteMediaAsync(session, request, command);
                 break;
             case AudioAppsRequestMessage apps:
                 ApplyRemoteApps(session, request.ViewerName, apps);
@@ -1287,20 +1397,65 @@ public partial class TransmitPage : UserControl, IShellPage
         if (!ApplyLiveQuality(viewer)) PublishRemoteState();
     }
 
-    private async Task RemoteMediaAsync(string viewer, MediaCommandMessage command)
+    /// <summary>
+    /// Um comando de quem assiste. Só vai para a sessão ligada à transmissão e com a mesma chave que a pessoa estava vendo;
+    /// a busca é no app de origem (todo mundo vê o vídeo no ponto novo) e só conta como feita depois de conferida.
+    /// </summary>
+    private async Task RemoteMediaAsync(HostSession session, RemoteRequest request, MediaCommandMessage command)
     {
-        if (_media is not { } media || _mediaId is not { } id) return;
-        var what = _publishedMedia is { Title.Length: > 0 } playing ? $"“{(playing.Title.Length > 60 ? playing.Title[..60] + "…" : playing.Title)}”" : "o que está tocando";
-        var (ok, done) = command.Command switch
+        var viewer = request.ViewerName;
+        void Reply(string outcome, double position = 0)
+            => session.SendMediaResult(request.ViewerId, new MediaCommandResultMessage(command.RequestId, command.Command, outcome, position));
+
+        if (_media is not { } media || _mediaId is not { } id || !_mediaBound || _publishedMedia is not { Available: true } published)
         {
-            MediaCommandMessage.PlayPause => (await media.SendAsync(id, MediaCommand.PlayPause), _publishedMedia?.Playing == true ? $"{viewer} pausou {what}." : $"{viewer} deu play em {what}."),
-            MediaCommandMessage.Previous => (await media.SendAsync(id, MediaCommand.Previous), $"{viewer} voltou para a anterior."),
-            MediaCommandMessage.Next => (await media.SendAsync(id, MediaCommand.Next), $"{viewer} pulou para a próxima."),
-            MediaCommandMessage.Seek => (await media.SeekAsync(id, TimeSpan.FromSeconds(command.PositionSeconds)), $"{viewer} mudou o ponto de {what}."),
-            _ => (false, string.Empty),
-        };
-        if (ok) _shell.Toast(done);
-        else Log.Info($"O app não aceitou o comando de {viewer} ({command.Command}).");
+            Reply(SeekRules.OutcomeUnavailable);
+            return;
+        }
+        if (!SeekRules.SameSession(published, command))
+        {
+            Reply(SeekRules.OutcomeStale);
+            return;
+        }
+        var what = published.Title.Length > 0 ? $"“{(published.Title.Length > 60 ? published.Title[..60] + "…" : published.Title)}”" : "o que está tocando";
+        string outcome;
+        string done;
+        double position = 0;
+        switch (command.Command)
+        {
+            case MediaCommandMessage.Seek or MediaCommandMessage.SkipBy:
+                if (SeekRules.Target(published, command, media.PositionNow(id)) is not { } target)
+                {
+                    Reply(SeekRules.OutcomeUnavailable);
+                    return;
+                }
+                outcome = await SeekOneAtATimeAsync(media, id, target);
+                position = target;
+                done = command.Command == MediaCommandMessage.SkipBy
+                    ? $"{viewer} {(command.DeltaSeconds > 0 ? "avançou" : "voltou")} {Math.Abs(command.DeltaSeconds):0} s em {what}."
+                    : $"{viewer} levou {what} para {MediaApps.FormatTime(TimeSpan.FromSeconds(target))}.";
+                break;
+            case MediaCommandMessage.PlayPause:
+                outcome = await media.SendAsync(id, MediaCommand.PlayPause) ? SeekRules.OutcomeDone : SeekRules.OutcomeRejected;
+                done = published.Playing ? $"{viewer} pausou {what}." : $"{viewer} deu play em {what}.";
+                break;
+            case MediaCommandMessage.Previous:
+                outcome = await media.SendAsync(id, MediaCommand.Previous) ? SeekRules.OutcomeDone : SeekRules.OutcomeRejected;
+                done = $"{viewer} voltou para a anterior.";
+                break;
+            case MediaCommandMessage.Next:
+                outcome = await media.SendAsync(id, MediaCommand.Next) ? SeekRules.OutcomeDone : SeekRules.OutcomeRejected;
+                done = $"{viewer} pulou para a próxima.";
+                break;
+            default:
+                Reply(SeekRules.OutcomeUnavailable);
+                return;
+        }
+        Reply(outcome, position);
+        if (SeekRules.Succeeded(outcome)) _shell.Toast(done);
+        else Log.Info($"O app não confirmou o comando de {viewer} ({command.Command}): {outcome}.");
+        // A posição nova vai para todo mundo logo, sem esperar a próxima leitura.
+        _publishedMedia = null;
         UpdateMedia();
     }
 
@@ -1386,7 +1541,8 @@ public partial class TransmitPage : UserControl, IShellPage
         UpdateAudioCard();
         var now = DateTimeOffset.UtcNow;
         ShowMedia(new MediaSessionInfo("Spotify.exe", "Spotify.exe", "Spotify", "Noite de Sexta", "Banda da Rede",
-            new PlaybackTimeline(TimeSpan.FromSeconds(83), TimeSpan.FromSeconds(214), now, true), true, true, true, true, null), now);
+            new PlaybackTimeline(TimeSpan.FromSeconds(83), TimeSpan.FromSeconds(214), now, true), true, true, true, true, null,
+            new SeekRange(0, 214)), now);
     }
 
     /// <summary>Abre "Tirar o som de apps" com apps de exemplo (para a captura de tela).</summary>

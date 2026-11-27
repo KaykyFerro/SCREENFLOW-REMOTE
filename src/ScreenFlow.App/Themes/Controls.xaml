@@ -352,6 +352,14 @@
         <Setter Property="Padding" Value="0"/>
     </Style>
 
+    <!-- Avançar e voltar alguns segundos (1.4.0): texto curto ("−10", "+10") em vez de ícone, para ficar claro quanto anda -->
+    <Style x:Key="SkipButton" TargetType="Button" BasedOn="{StaticResource IconButton}">
+        <Setter Property="FontFamily" Value="{DynamicResource FontUi}"/>
+        <Setter Property="FontSize" Value="12.5"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Width" Value="44"/>
+    </Style>
+
     <!-- Botões da janela (minimizar, maximizar, fechar) -->
     <Style x:Key="WindowButton" TargetType="Button">
         <Setter Property="Width" Value="46"/>
