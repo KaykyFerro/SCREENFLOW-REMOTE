@@ -108,16 +108,21 @@ public static class SelfTest
 
     /// <summary>
     /// Região e áreas tapadas (1.4.0), na GPU de verdade: uma imagem branca passa pelo corte com uma máscara e a saída é
-    /// lida de volta. O pedaço tapado tem que sair preto e o resto branco, no tamanho da região. Sem GPU, pula.
+    /// lida de volta. O pedaço tapado tem que sair preto e o resto branco, no tamanho da região. Sem placa de vídeo, usa o Direct3D de software (WARP).
     /// </summary>
     private static bool CaptureCropTest(Action<string> line)
     {
         ScreenFlow.Infrastructure.Capture.GpuDevice gpu;
         try { gpu = ScreenFlow.Infrastructure.Capture.GpuDevice.Create(); }
-        catch (Exception exception)
+        catch (Exception hardware)
         {
-            line($"Corte da captura: pulado, sem GPU com Direct3D 11 ({exception.Message}).");
-            return true;
+            // Sem placa de vídeo (o CI, por exemplo): o mesmo teste no Direct3D de software do Windows.
+            try { gpu = ScreenFlow.Infrastructure.Capture.GpuDevice.CreateSoftware(); }
+            catch (Exception software)
+            {
+                line($"Corte da captura: pulado, sem Direct3D 11 ({hardware.Message}; {software.Message}).");
+                return true;
+            }
         }
         using (gpu)
         {
