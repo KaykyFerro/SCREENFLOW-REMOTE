@@ -185,7 +185,7 @@
                         <TextBlock Style="{StaticResource Caption}" Margin="0,0,0,16" TextWrapping="Wrap"
                                    Text="O tema e a cor valem na hora e só neste PC: cada pessoa escolhe os seus."/>
                         <CheckBox x:Name="TrayToggle" Style="{StaticResource Switch}" Margin="0,0,0,14"
-                                  Content="Fechar e minimizar levam o ScreenFlow para a bandeja, perto do relógio (a transmissão, a voz e o chat continuam)"/>
+                                  Content="Fechar (X) leva o ScreenFlow para a bandeja, perto do relógio (a transmissão, a voz e o chat continuam). Minimizar deixa na barra de tarefas"/>
                         <CheckBox x:Name="ReopenToggle" Style="{StaticResource Switch}"
                                   Content="Abrir o ScreenFlow de novo quando a transmissão acabar ou o player fechar (se ele estiver na bandeja)"/>
                     </StackPanel>
@@ -450,6 +450,12 @@
                             <ComboBox x:Name="MicrophoneCombo"/>
                         </DockPanel>
                         <DockPanel Margin="0,0,0,6">
+                            <TextBlock x:Name="MicGainValue" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
+                            <TextBlock Style="{StaticResource Label}" Text="Volume do microfone" Margin="0"/>
+                        </DockPanel>
+                        <Slider x:Name="MicGainSlider" Minimum="-12" Maximum="24" SmallChange="1" LargeChange="3" TickFrequency="1" IsSnapToTickEnabled="True"
+                                Margin="0,0,0,14" ValueChanged="MicGain_Changed" AutomationProperties.Name="Volume do microfone"/>
+                        <DockPanel Margin="0,0,0,6">
                             <TextBlock x:Name="SensitivityValue" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
                             <TextBlock Style="{StaticResource Label}" Text="Sensibilidade do microfone" Margin="0"/>
                         </DockPanel>
@@ -476,14 +482,12 @@
                             <TextBlock x:Name="MicMonitorText" Style="{StaticResource Caption}" VerticalAlignment="Center"
                                        Text="Toca o seu microfone no fone, para você ouvir como a sua voz está saindo."/>
                         </DockPanel>
-                        <DockPanel Margin="0,0,0,6">
-                            <TextBlock x:Name="VoiceVolumeValue" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
-                            <TextBlock Style="{StaticResource Label}" Text="Volume de quem fala" Margin="0"/>
-                        </DockPanel>
-                        <Slider x:Name="VoiceVolumeSlider" Minimum="0" Maximum="1.5" SmallChange="0.05" LargeChange="0.1" Margin="0,0,0,6"
-                                ValueChanged="VoiceVolume_Changed"/>
+                        <CheckBox x:Name="AutoGainToggle" Style="{StaticResource Switch}" Margin="0,0,0,8" Click="AutoGain_Click"
+                                  Content="Ajustar o volume do microfone sozinho (a sua voz chega no nível de uma chamada, sem estourar)"/>
+                        <CheckBox x:Name="LevelerToggle" Style="{StaticResource Switch}" Margin="0,0,0,8"
+                                  Content="Igualar o volume de quem fala (quem chega baixo, ou numa versão antiga, sobe um pouco)"/>
                         <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,14"
-                                   Text="Vale para todo mundo. Para mudar o volume de uma pessoa só, clique com o botão direito nela na Sala da rede."/>
+                                   Text="O volume da voz de todo mundo fica no Mixer, ao lado. Para mudar o volume de uma pessoa só, clique com o botão direito nela na Sala da rede."/>
                         <TextBlock Style="{StaticResource Label}" Text="Saída do som da voz"/>
                         <DockPanel Margin="{DynamicResource FieldGap}">
                             <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar saídas de som de novo" Margin="8,0,0,0"
@@ -499,12 +503,29 @@
                             <TextBlock Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"
                                        Text="Clique no botão e aperte a tecla (ou um botão lateral do mouse) que quer usar. Esc cancela."/>
                         </DockPanel>
-                        <CheckBox x:Name="VoiceSoundsToggle" Style="{StaticResource Switch}" Content="Sons ao entrar, sair e desligar o microfone (como no Discord)"/>
+                        <CheckBox x:Name="VoiceSoundsToggle" Style="{StaticResource Switch}" Margin="0,0,0,8" Content="Sons ao entrar, sair e desligar o microfone (como no Discord)"/>
+                        <CheckBox x:Name="MessageSoundsToggle" Style="{StaticResource Switch}" Content="Som quando chega mensagem no chat ou numa conversa privada"/>
                     </StackPanel>
                 </Border>
 
                 <!-- Chat guardado -->
                 <StackPanel Grid.Column="2">
+                <!-- Mixer (1.5.0): três volumes separados, só do ScreenFlow -->
+                <Border x:Name="MixerCard" Style="{StaticResource Card}" Margin="0,0,0,22">
+                    <StackPanel>
+                        <DockPanel Margin="0,0,0,18">
+                            <Border Style="{StaticResource IconTileViolet}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
+                                <TextBlock Style="{StaticResource Icon}" Text="&#xE767;"/>
+                            </Border>
+                            <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                <TextBlock Style="{StaticResource Heading}" Text="Mixer"/>
+                                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                           Text="Três volumes separados, só do ScreenFlow: um não muda os outros e o volume do Windows fica como está. Vale na hora."/>
+                            </StackPanel>
+                        </DockPanel>
+                        <controls:MixerPanel x:Name="MixerControls"/>
+                    </StackPanel>
+                </Border>
                 <Border x:Name="ArchiveCard" Style="{StaticResource Card}">
                     <StackPanel>
                         <DockPanel Margin="0,0,0,20">
@@ -775,6 +796,8 @@
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="12"/>
                                 <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="12"/>
+                                <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
                             <StackPanel>
                                 <TextBlock Style="{StaticResource Label}" Text="Mídia (UDP)" TextTrimming="CharacterEllipsis"/>
@@ -787,6 +810,10 @@
                             <StackPanel Grid.Column="4">
                                 <TextBlock Style="{StaticResource Label}" Text="Descoberta (UDP)" TextTrimming="CharacterEllipsis"/>
                                 <TextBox x:Name="DiscoveryPortBox" MaxLength="5" FontFamily="{DynamicResource FontMono}"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="6" ToolTip="Os arquivos do chat vão direto de um PC para o outro por esta porta.">
+                                <TextBlock Style="{StaticResource Label}" Text="Arquivos (TCP)" TextTrimming="CharacterEllipsis"/>
+                                <TextBox x:Name="FilePortBox" MaxLength="5" FontFamily="{DynamicResource FontMono}"/>
                             </StackPanel>
                         </Grid>
                         <Grid Margin="{DynamicResource FieldGap}">

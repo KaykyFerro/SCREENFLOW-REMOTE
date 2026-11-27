@@ -8,6 +8,7 @@
 #define MediaPort "47800"
 #define ControlPort "47801"
 #define DiscoveryPort "47802"
+#define FilePort "47803"
 ; O que o instalador pede ao ScreenFlow (StartupOptions.cs): o app lê na próxima vez que abrir e apaga o arquivo.
 #define RequestsFile "{localappdata}\ScreenFlow\instalador.txt"
 
@@ -80,6 +81,7 @@ const
   RuleMedia = 'ScreenFlow mídia (UDP {#MediaPort})';
   RuleControl = 'ScreenFlow controle (TCP {#ControlPort})';
   RuleDiscovery = 'ScreenFlow descoberta (UDP {#DiscoveryPort})';
+  RuleFiles = 'ScreenFlow arquivos (TCP {#FilePort})';
   RuleApp = 'ScreenFlow (aplicativo)';
 
 function Netsh(const Arguments: String): Boolean;
@@ -94,11 +96,12 @@ begin
   Result := Netsh('advfirewall firewall show rule name="' + Name + '"');
 end;
 
-{ As três regras de porta bastam (quem já liberou pela versão 1.0.0 não recebe outro pedido de permissão). O PC servidor
-  precisa também da regra do aplicativo: o servidor dentro do ScreenFlow usa outras portas (47810 a 47812). }
+{ As regras de porta bastam. A 1.5.0 traz a porta dos arquivos do chat (TCP 47803): quem atualiza recebe um pedido de
+  permissão, uma vez, para criar essa regra. O PC servidor precisa também da regra do aplicativo: o servidor dentro do
+  ScreenFlow usa outras portas (47810 a 47812). }
 function FirewallReady: Boolean;
 begin
-  Result := RuleExists(RuleMedia) and RuleExists(RuleControl) and RuleExists(RuleDiscovery)
+  Result := RuleExists(RuleMedia) and RuleExists(RuleControl) and RuleExists(RuleDiscovery) and RuleExists(RuleFiles)
             and ((ServerPage = nil) or (ServerPage.SelectedValueIndex <> 2) or RuleExists(RuleApp));
 end;
 
@@ -123,6 +126,7 @@ begin
   Script := ReplaceRule(RuleMedia, 'protocol=UDP localport={#MediaPort} program="' + Exe + '"') +
             ReplaceRule(RuleControl, 'protocol=TCP localport={#ControlPort} program="' + Exe + '"') +
             ReplaceRule(RuleDiscovery, 'protocol=UDP localport={#DiscoveryPort} program="' + Exe + '"') +
+            ReplaceRule(RuleFiles, 'protocol=TCP localport={#FilePort} program="' + Exe + '"') +
             ReplaceRule(RuleApp, 'program="' + Exe + '"') +
             'exit /b 0';
   WizardForm.StatusLabel.Caption := 'Liberando as portas do ScreenFlow no Firewall do Windows...';
@@ -139,10 +143,11 @@ var
   Script: String;
   ResultCode: Integer;
 begin
-  if not (RuleExists(RuleMedia) or RuleExists(RuleControl) or RuleExists(RuleDiscovery) or RuleExists(RuleApp)) then exit;
+  if not (RuleExists(RuleMedia) or RuleExists(RuleControl) or RuleExists(RuleDiscovery) or RuleExists(RuleFiles) or RuleExists(RuleApp)) then exit;
   Script := 'netsh advfirewall firewall delete rule name="' + RuleMedia + '" >nul 2>&1 & ' +
             'netsh advfirewall firewall delete rule name="' + RuleControl + '" >nul 2>&1 & ' +
             'netsh advfirewall firewall delete rule name="' + RuleDiscovery + '" >nul 2>&1 & ' +
+            'netsh advfirewall firewall delete rule name="' + RuleFiles + '" >nul 2>&1 & ' +
             'netsh advfirewall firewall delete rule name="' + RuleApp + '" >nul 2>&1 & exit /b 0';
   ShellExec('runas', ExpandConstant('{cmd}'), '/c ' + Script, '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
 end;

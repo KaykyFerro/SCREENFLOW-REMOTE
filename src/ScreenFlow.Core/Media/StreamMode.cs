@@ -27,7 +27,14 @@ public static class StreamModes
     /// </summary>
     public const string FeatureMediaSeek = "media-seek";
 
-    public static IReadOnlyList<string> ViewerFeatures { get; } = [FeatureAudioOnly, FeatureCamera, FeatureCameraOverlay, FeatureSpreadFec, FeatureRemoteControl, FeatureMediaSeek];
+    /// <summary>
+    /// O viewer segue o host (1.5.0): uma despedida com volta prevista (troca de modo, ou o host encerrou e pode começar
+    /// outra) não encerra o player, ele espera e entra sozinho. O servidor só manda essa despedida para quem anunciou isto;
+    /// as versões antigas continuam recebendo a conexão fechada sem despedida, que já as faz reconectar sozinhas.
+    /// </summary>
+    public const string FeatureFollowHost = "follow-host";
+
+    public static IReadOnlyList<string> ViewerFeatures { get; } = [FeatureAudioOnly, FeatureCamera, FeatureCameraOverlay, FeatureSpreadFec, FeatureRemoteControl, FeatureMediaSeek, FeatureFollowHost];
 
     /// <summary>Recursos anunciados pelo host na boas-vindas. Viewers antigos ignoram a lista.</summary>
     /// <remarks>"frame-nack": o host reenvia um frame inteiro quando o viewer não recebeu nada dele (NACK sem índices).</remarks>

@@ -114,23 +114,27 @@ public static class PinDialog
 /// <summary>O nome de um canal novo da sala (1.3.0), ou o nome novo de um canal (1.4.1), com a prévia de como ele vai aparecer.</summary>
 public static class ChannelDialog
 {
-    /// <summary>Null quando a pessoa cancelou. Com <paramref name="rename"/>, muda o nome desse canal.</summary>
-    public static string? Ask(Window? owner, RoomChannelKind kind, RoomChannel? rename = null, bool server = false)
+    /// <summary>
+    /// Null quando a pessoa cancelou. Com <paramref name="rename"/>, muda o nome desse canal (1.5.0: num servidor por rede,
+    /// <paramref name="currentName"/> é o nome que aparece; o canal continua o mesmo).
+    /// </summary>
+    public static string? Ask(Window? owner, RoomChannelKind kind, RoomChannel? rename = null, bool server = false, string? currentName = null)
     {
-        var window = Build(owner, kind, out var box, rename, server);
+        var window = Build(owner, kind, out var box, rename, server, currentName);
         return window.ShowDialog() == true ? box.Text : null;
     }
 
     /// <summary>Monta a janela do canal sem abrir (as capturas de tela do CI usam direto).</summary>
-    internal static Window Build(Window? owner, RoomChannelKind kind, out TextBox nameBox, RoomChannel? rename = null, bool server = false)
+    internal static Window Build(Window? owner, RoomChannelKind kind, out TextBox nameBox, RoomChannel? rename = null, bool server = false, string? currentName = null)
     {
         var text = kind == RoomChannelKind.Text;
-        var box = nameBox = new TextBox { MaxLength = 40, Tag = text ? "ex.: campeonato" : "ex.: Valorant", Text = rename?.Name ?? string.Empty };
+        var shown = rename is null ? null : currentName ?? rename.Name;
+        var box = nameBox = new TextBox { MaxLength = 40, Tag = text ? "ex.: campeonato" : "ex.: Valorant", Text = shown ?? string.Empty };
         var preview = new TextBlock { Style = (Style)Application.Current.FindResource("Caption"), Margin = new Thickness(0, 8, 0, 0) };
         var extra = new StackPanel();
         extra.Children.Add(box);
         extra.Children.Add(preview);
-        var title = rename is not null ? (text ? $"Mudar o nome de #{rename.Name}" : $"Mudar o nome de {rename.Name}")
+        var title = shown is not null ? (text ? $"Mudar o nome de #{shown}" : $"Mudar o nome de {shown}")
             : text ? "Criar canal de texto" : "Criar canal de voz";
         var message = rename is not null
             ? text ? "A conversa do canal vai junto para o nome novo." : "Quem está no canal continua nele com o nome novo."
@@ -145,7 +149,7 @@ public static class ChannelDialog
         void Update()
         {
             var channel = RoomChannels.Create(kind, box.Text);
-            ok.IsEnabled = channel is not null && (rename is null || channel.Name != rename.Name);
+            ok.IsEnabled = channel is not null && (shown is null || channel.Name != shown);
             preview.Text = channel is null
                 ? box.Text.Trim().Length == 0 ? $"Até {RoomChannels.MaxNameLength} letras." : "Use letras ou números."
                 : text ? $"Vai aparecer como #{channel.Name}" : $"Vai aparecer como o canal de voz {channel.Name}";

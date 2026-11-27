@@ -16,18 +16,20 @@ public static class FirewallManager
     private const string RulePrefix = "ScreenFlow";
     public const string ApplicationRule = RulePrefix + " (aplicativo)";
 
-    public static IReadOnlyList<(string Name, string Protocol, int Port)> Rules(int mediaPort, int controlPort, int discoveryPort) =>
+    public static IReadOnlyList<(string Name, string Protocol, int Port)> Rules(int mediaPort, int controlPort, int discoveryPort, int filePort) =>
     [
         ($"{RulePrefix} mídia (UDP {mediaPort})", "UDP", mediaPort),
         ($"{RulePrefix} controle (TCP {controlPort})", "TCP", controlPort),
         ($"{RulePrefix} descoberta (UDP {discoveryPort})", "UDP", discoveryPort),
+        // (1.5.0) Os arquivos do chat chegam direto de um PC para o outro por esta porta.
+        ($"{RulePrefix} arquivos (TCP {filePort})", "TCP", filePort),
     ];
 
-    public static bool RulesExist(int mediaPort, int controlPort, int discoveryPort)
+    public static bool RulesExist(int mediaPort, int controlPort, int discoveryPort, int filePort)
     {
         try
         {
-            foreach (var (name, _, _) in Rules(mediaPort, controlPort, discoveryPort))
+            foreach (var (name, _, _) in Rules(mediaPort, controlPort, discoveryPort, filePort))
             {
                 var info = new ProcessStartInfo("netsh", $"advfirewall firewall show rule name=\"{name}\"")
                 {
@@ -51,11 +53,11 @@ public static class FirewallManager
     }
 
     /// <summary>Cria (ou recria) as regras com elevação. Retorna false se o usuário recusar o UAC.</summary>
-    public static bool CreateRules(int mediaPort, int controlPort, int discoveryPort)
+    public static bool CreateRules(int mediaPort, int controlPort, int discoveryPort, int filePort)
     {
         var program = Environment.ProcessPath ?? Path.Combine(AppContext.BaseDirectory, AppInfo.Name + ".exe");
         var script = new StringBuilder();
-        foreach (var (name, protocol, port) in Rules(mediaPort, controlPort, discoveryPort))
+        foreach (var (name, protocol, port) in Rules(mediaPort, controlPort, discoveryPort, filePort))
         {
             script.Append($"netsh advfirewall firewall delete rule name=\"{name}\" >nul 2>&1 & ");
             script.Append($"netsh advfirewall firewall add rule name=\"{name}\" dir=in action=allow protocol={protocol} localport={port} program=\"{program}\" profile=any enable=yes & ");
@@ -76,7 +78,7 @@ public static class FirewallManager
             using var process = Process.Start(info);
             if (process is null) return false;
             process.WaitForExit(30_000);
-            var ok = RulesExist(mediaPort, controlPort, discoveryPort);
+            var ok = RulesExist(mediaPort, controlPort, discoveryPort, filePort);
             Log.Info(ok ? "Regras do firewall criadas." : "Regras do firewall não foram confirmadas.");
             return ok;
         }

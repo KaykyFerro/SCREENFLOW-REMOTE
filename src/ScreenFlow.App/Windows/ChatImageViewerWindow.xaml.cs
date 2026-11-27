@@ -57,7 +57,7 @@ public partial class ChatImageViewerWindow : Window
     private void LoadCurrentImage()
     {
         var row = _images[_index];
-        _data = row.Image is { } image ? AppServices.Blobs.Get(image.Id) : null;
+        _data = row.ImageData(); // (1.5.0) numa mensagem privada, a imagem guardada é cifrada: abre aqui
         _bitmap = ImageTools.Decode(_data);
         ImagePreview.Source = _bitmap;
         UnavailablePanel.Visibility = _bitmap is null ? Visibility.Visible : Visibility.Collapsed;

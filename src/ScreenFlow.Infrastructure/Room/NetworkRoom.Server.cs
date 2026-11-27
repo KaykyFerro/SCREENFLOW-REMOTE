@@ -110,14 +110,7 @@ public sealed partial class NetworkRoom
     }
 
     /// <summary>Manda como está (sem lacrar): os pacotes para o próprio servidor.</summary>
-    private void SendRaw(ReadOnlySpan<byte> packet, IPEndPoint target)
-    {
-        var socket = _socket;
-        if (socket is null) return;
-        try { socket.SendTo(packet, SocketFlags.None, target); }
-        catch (SocketException) { }
-        catch (ObjectDisposedException) { }
-    }
+    private void SendRaw(ReadOnlySpan<byte> packet, IPEndPoint target) => Transmit(packet, target);
 
     // ───────────────────────── Entrada no servidor ─────────────────────────
 

@@ -9,6 +9,7 @@ using System.Windows.Media.Effects;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using ScreenFlow.App.Pages;
+using ScreenFlow.App.Controls;
 using ScreenFlow.App.Services;
 using ScreenFlow.App.Windows;
 using ScreenFlow.Core;
@@ -17,6 +18,7 @@ using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Room;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Core.Updates;
+using ScreenFlow.Infrastructure.Media;
 using ScreenFlow.Infrastructure.Network;
 using ScreenFlow.Infrastructure.Room;
 
@@ -48,6 +50,7 @@ public partial class MainWindow : Window
     private WindowState _restoreState = WindowState.Normal;
     private Action? _balloonAction;
     private DateTimeOffset _lastChatToast;
+    private DateTimeOffset _lastMessageSound;
     private DateTimeOffset _lastChatBalloon;
     private string? _lastArchiveError;
 
@@ -73,10 +76,19 @@ public partial class MainWindow : Window
         room.ProfileChanged += UpdateProfile;
         room.ArchiveFailed += OnArchiveFailed;
         UpdateProfile();
-        room.IsChatInFront = () => Host.Content is Pages.ChatPage && IsVisible && IsActive && WindowState != WindowState.Minimized;
+        // (1.5.0) Com as mensagens diretas abertas, os canais do servidor não estão na frente (e o contrário também).
+        room.IsChatInFront = () => ChatInFront() && !AppServices.Direct.Showing;
+        var direct = AppServices.Direct;
+        direct.IsChatInFront = ChatInFront;
+        direct.UnreadChanged += UpdateChatBadge;
+        direct.MessageArrived += OnDirectMessage;
+        // (1.5.0) Um arquivo do chat terminou de baixar (conferido) ou parou de vez.
+        AppServices.Files.Finished += OnFileFinished;
         Activated += (_, _) =>
         {
-            if (Host.Content is Pages.ChatPage) AppServices.Room.MarkRead();
+            if (Host.Content is not Pages.ChatPage) return;
+            if (AppServices.Direct.Showing) AppServices.Direct.MarkRead();
+            else AppServices.Room.MarkRead();
         };
         UpdateVoicePanel();
         UpdateChatBadge();
@@ -392,7 +404,7 @@ public partial class MainWindow : Window
     public async Task CheckFirewallAsync()
     {
         var s = AppServices.Settings.Current;
-        var exists = await Task.Run(() => FirewallManager.RulesExist(s.MediaPort, s.ControlPort, s.DiscoveryPort));
+        var exists = await Task.Run(() => FirewallManager.RulesExist(s.MediaPort, s.ControlPort, s.DiscoveryPort, s.FilePort));
         if (exists)
         {
             if (!s.FirewallConfigured)
@@ -413,7 +425,7 @@ public partial class MainWindow : Window
     public async Task<bool> OpenFirewallAsync()
     {
         var s = AppServices.Settings.Current;
-        var ok = await Task.Run(() => FirewallManager.CreateRules(s.MediaPort, s.ControlPort, s.DiscoveryPort));
+        var ok = await Task.Run(() => FirewallManager.CreateRules(s.MediaPort, s.ControlPort, s.DiscoveryPort, s.FilePort));
         s.FirewallConfigured = ok;
         AppServices.Settings.Save();
         if (ok)
@@ -456,8 +468,15 @@ public partial class MainWindow : Window
 
     // ───────────────────────── Rede e status ─────────────────────────
 
-    private void OnNetworkChanged(object? sender, EventArgs e) => Dispatcher.BeginInvoke(RefreshNetworkStatus);
-    private void OnNetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e) => Dispatcher.BeginInvoke(RefreshNetworkStatus);
+    private void OnNetworkChanged(object? sender, EventArgs e) => Dispatcher.BeginInvoke(AfterNetworkChange);
+    private void OnNetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e) => Dispatcher.BeginInvoke(AfterNetworkChange);
+
+    /// <summary>A rede mudou: a linha da rede se atualiza e (1.5.0) os servidores chamam todo mundo de novo.</summary>
+    private void AfterNetworkChange()
+    {
+        RefreshNetworkStatus();
+        AppServices.Room.OnNetworkChanged();
+    }
 
     public async void RefreshNetworkStatus()
     {
@@ -589,11 +608,11 @@ public partial class MainWindow : Window
 
     private void UpdateThemeButton() => ThemeButton.Content = ThemeManager.Current == AppTheme.Dark ? "" : "";
 
-    private void Minimize_Click(object sender, RoutedEventArgs e)
-    {
-        if (TrayEnabled) HideToTray();
-        else WindowState = WindowState.Minimized;
-    }
+    /// <summary>
+    /// (1.5.0) Minimizar deixa o ScreenFlow minimizado na barra de tarefas, como qualquer programa. Só fechar (X ou
+    /// Alt+F4) leva para a bandeja, quando a opção está ligada.
+    /// </summary>
+    private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
 
     private void Maximize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
 
@@ -605,13 +624,13 @@ public partial class MainWindow : Window
         Root.Margin = WindowState == WindowState.Maximized ? SystemParameters.WindowResizeBorderThickness : new Thickness(0);
         MaximizeButton.Content = WindowState == WindowState.Maximized ? "" : "";
         MaximizeButton.ToolTip = WindowState == WindowState.Maximized ? "Restaurar" : "Maximizar";
-        // Minimizada pela barra de tarefas (ou Win+↓): vai para a bandeja em vez de ficar na barra.
-        if (WindowState == WindowState.Minimized && TrayEnabled && IsVisible) HideToTray();
+        // Minimizada (botão, barra de tarefas ou Win+↓) fica na barra de tarefas: só fechar vai para a bandeja (1.5.0).
+        if (WindowState != WindowState.Minimized) _restoreState = WindowState;
     }
 
     // ───────────────────────── Bandeja ─────────────────────────
 
-    /// <summary>Fechar e minimizar mandam para a bandeja (configurável), desde que o ícone esteja lá.</summary>
+    /// <summary>Fechar manda para a bandeja (configurável), desde que o ícone esteja lá. Minimizar fica na barra de tarefas.</summary>
     private bool TrayEnabled => _tray is { IsVisible: true } && AppServices.Settings.Current.MinimizeToTray;
 
     private void SetupTray()
@@ -763,7 +782,7 @@ public partial class MainWindow : Window
         menu.Items.Add(new Separator());
 
         menu.Items.Add(TrayItem("Abrir o ScreenFlow", "\uE8A7", () => ShowFromTray()));
-        if (IsTransmitting) menu.Items.Add(TrayItem("Encerrar a transmissão", "\uE71A", () => _ = TransmitPage.StopAsync()));
+        if (IsTransmitting) menu.Items.Add(TrayItem("Encerrar a transmissão", "\uE71A", () => _ = TransmitPage.StopAsync(TransmitPage.StopKind.Ended)));
         else menu.Items.Add(TrayItem("Transmitir…", "\uE714", () => ShowFromTray(TransmitPage)));
         AddVoiceTrayItems(menu);
         menu.Items.Add(new Separator());
@@ -777,6 +796,9 @@ public partial class MainWindow : Window
     private static string? VoiceTrayLine()
     {
         var room = AppServices.Room;
+        var direct = AppServices.Direct.Unread;
+        if (!room.InVoice && direct > 0)
+            return direct == 1 ? "1 mensagem direta nova" : $"{direct} mensagens diretas novas";
         if (!room.InVoice)
             return room.Unread switch { 0 => null, 1 => "1 mensagem nova na sala", var n => $"{n} mensagens novas na sala" };
         var others = Math.Max(0, room.VoiceMembers.Count - 1);
@@ -866,9 +888,12 @@ public partial class MainWindow : Window
         VoiceMemberMenu.Open(element, member, this);
     }
 
+    /// <summary>A tela do chat está aberta e na frente de quem usa.</summary>
+    private bool ChatInFront() => Host.Content is Pages.ChatPage && IsVisible && IsActive && WindowState != WindowState.Minimized;
+
     private void UpdateChatBadge()
     {
-        var unread = AppServices.Room.Unread;
+        var unread = AppServices.Room.Unread + AppServices.Direct.Unread;
         ChatBadge.Visibility = unread > 0 ? Visibility.Visible : Visibility.Collapsed;
         ChatCount.Text = unread > 9 ? "9+" : unread.ToString();
         SetNavBadge(NavChat, unread > 0);
@@ -892,11 +917,76 @@ public partial class MainWindow : Window
 
     private void OpenChat_Click(object sender, RoutedEventArgs e) => Navigate(ChatPage);
 
-    /// <summary>Abre a Sala da rede num canal de texto (o da mensagem que chegou).</summary>
-    public void OpenChannel(string? channel)
+    /// <summary>Abre o chat num servidor (null: a sala da rede) e num canal de texto (o da mensagem que chegou).</summary>
+    public void OpenChannel(Guid? server, string? channel)
     {
-        AppServices.Room.SelectText(channel);
+        AppServices.Direct.Showing = false;
+        AppServices.Room.OpenChannel(server, channel);
         Navigate(ChatPage);
+    }
+
+    /// <summary>(1.5.0) Abre (ou começa) a conversa privada com alguém que está num servidor.</summary>
+    public void OpenDirect(Guid peer, string name)
+    {
+        if (AppServices.Direct.OpenWith(peer, name, out var problem) is null)
+        {
+            if (problem is not null) Toast(problem, ToastKind.Info);
+            return;
+        }
+        Navigate(ChatPage);
+    }
+
+    /// <summary>(1.5.0) Abre uma conversa privada que já existe (o aviso de mensagem nova).</summary>
+    public void OpenConversation(Guid peer)
+    {
+        AppServices.Direct.Show(peer);
+        ShowFromTray(ChatPage);
+    }
+
+    /// <summary>(1.5.0) Mensagem direta nova sem ninguém ver: som, aviso e bandeja (como as do chat, com o som próprio).</summary>
+    private void OnFileFinished(FileTransferItem item)
+    {
+        if (item.State == Core.Files.FileDownloadState.Completed)
+            Toast($"\"{item.Name}\" baixado e conferido.", ToastKind.Success, "Mostrar na pasta", () => AppServices.Files.ShowInFolder(item));
+        else if (item.Error is { } problem)
+            Toast($"\"{item.Name}\": {problem}", ToastKind.Warning);
+    }
+
+    private void OnDirectMessage(DirectArrival arrival)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (AppServices.Settings.Current.MessageSounds && now - _lastMessageSound > TimeSpan.FromSeconds(2))
+        {
+            _lastMessageSound = now;
+            AppSoundPlayer.Shared.Play(AppSound.DirectMessage);
+        }
+        var peer = arrival.Peer;
+        var preview = Preview(arrival.Preview, 110);
+        if (IsInBackground)
+        {
+            if (now - _lastChatBalloon < TimeSpan.FromSeconds(10)) return;
+            _lastChatBalloon = now;
+            TrayNotify($"{arrival.Name} mandou uma mensagem direta", preview, () => OpenConversation(peer));
+            return;
+        }
+        if (now - _lastChatToast < TimeSpan.FromSeconds(3)) return;
+        _lastChatToast = now;
+        Toast($"{arrival.Name} (mensagem direta): {preview}", ToastKind.Info, "Responder", () => OpenConversation(peer));
+    }
+
+    // ───────────────────────── Mixer rápido (1.5.0) ─────────────────────────
+
+    private void MixerButton_Click(object sender, RoutedEventArgs e)
+    {
+        MixerHost.Content ??= new MixerPanel(compact: true);
+        ((MixerPanel)MixerHost.Content).Refresh();
+        MixerPopup.IsOpen = !MixerPopup.IsOpen;
+    }
+
+    private void MixerMore_Click(object sender, RoutedEventArgs e)
+    {
+        MixerPopup.IsOpen = false;
+        OpenSettings(SettingsTab.Voice);
     }
 
     /// <summary>
@@ -907,21 +997,38 @@ public partial class MainWindow : Window
     {
         if (AppServices.Room.IsChatInFront?.Invoke() == true) return;
         var now = DateTimeOffset.UtcNow;
-        var preview = row.HasImage
-            ? (row.HasText ? $"📷 {Preview(row.Text, 100)}" : "📷 mandou uma imagem")
-            : Preview(row.Text, 110);
-        var where = RoomChannels.IsDefaultText(row.ChannelName) ? null : $"#{row.ChannelName}";
+        // (1.5.0) Som de mensagem nova (no volume "Sons do aplicativo"), no máximo um a cada 2 segundos.
+        if (AppServices.Settings.Current.MessageSounds && now - _lastMessageSound > TimeSpan.FromSeconds(2))
+        {
+            _lastMessageSound = now;
+            AppSoundPlayer.Shared.Play(AppSound.Message);
+        }
+        var preview = row.Transfer is { } file
+            ? (row.HasText ? $"📎 {Preview(row.Text, 100)}" : $"📎 mandou {file.Name} ({file.File.SizeText})")
+            : row.HasImage
+                ? (row.HasText ? $"📷 {Preview(row.Text, 100)}" : "📷 mandou uma imagem")
+                : Preview(row.Text, 110);
+        // (1.5.0) Num servidor por rede, o aviso diz de qual servidor é (e o canal pelo nome que aparece).
+        var channelName = RoomChannels.IsDefaultText(row.ChannelName) ? null : $"#{(row.ChannelDisplay is { Length: > 0 } shown ? shown : row.ChannelName)}";
+        var where = (channelName, row.ServerName) switch
+        {
+            (null, null) => null,
+            ({ } name, null) => name,
+            (null, { } server) => server,
+            ({ } name, { } server) => $"{name} · {server}",
+        };
         var channel = row.ChannelName;
+        var serverId = row.ServerId;
         if (IsInBackground)
         {
             if (now - _lastChatBalloon < TimeSpan.FromSeconds(20)) return;
             _lastChatBalloon = now;
-            TrayNotify(where is null ? $"{row.Author} na sala da rede" : $"{row.Author} em {where}", preview, () => OpenChannel(channel));
+            TrayNotify(where is null ? $"{row.Author} na sala da rede" : $"{row.Author} em {where}", preview, () => OpenChannel(serverId, channel));
             return;
         }
         if (now - _lastChatToast < TimeSpan.FromSeconds(4)) return;
         _lastChatToast = now;
-        Toast(where is null ? $"{row.Author}: {preview}" : $"{row.Author} em {where}: {preview}", ToastKind.Info, "Responder", () => OpenChannel(channel));
+        Toast(where is null ? $"{row.Author}: {preview}" : $"{row.Author} em {where}: {preview}", ToastKind.Info, "Responder", () => OpenChannel(serverId, channel));
     }
 
     /// <summary>O chat guardado não conseguiu gravar na pasta (o Drive fechou, a pasta sumiu): avisa uma vez por problema.</summary>

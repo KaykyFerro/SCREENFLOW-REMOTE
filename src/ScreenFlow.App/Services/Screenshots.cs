@@ -211,6 +211,16 @@ public static class Screenshots
             AppServices.Room.SelectText("campeonato");
             return Go(window, window.ChatPage, 500);
         });
+        // (1.5.0) Arquivos no chat: um vídeo com prévia, um .zip baixando, um programa com o aviso, um seu sendo baixado
+        // e dois anexados na caixa de escrever (conferidos, com a prévia da imagem).
+        await Shot("43-arquivos-no-chat.png", async () =>
+        {
+            AppServices.Room.Open.LoadDemoFiles();
+            AppServices.Room.SelectText("campeonato");
+            window.ChatPage.ShowFilesDemo(DemoAttachments(), "Placar da final e o print");
+            await Go(window, window.ChatPage, 1200);
+        });
+        window.ChatPage.ShowFilesDemo([]);
         AppServices.Room.SelectText(null);
         ContextMenu? memberMenu = null;
         await Shot("28-volume-por-pessoa.png", async () =>
@@ -303,6 +313,34 @@ public static class Screenshots
             return Task.Delay(300);
         }, () => WindowRoot(dialog!));
         dialog?.Close();
+        dialog = null;
+
+        // (1.5.0) Um servidor por rede do Radmin aberto (só as pessoas, os canais e a conversa dele) e a janela de adicionar.
+        await Shot("40-servidor-por-rede.png", () =>
+        {
+            AppServices.Room.ShowServer(AppServices.Room.AllServers[1]);
+            return Go(window, window.ChatPage, 500);
+        });
+        AppServices.Room.ShowServer(AppServices.Room.Open);
+        // (1.5.0) Mensagens diretas: a lista de conversas, a conversa aberta (com o estado de entrega) e quem é a pessoa.
+        await Shot("42-mensagens-diretas.png", () =>
+        {
+            var direct = AppServices.Direct;
+            direct.Show(direct.Conversations.FirstOrDefault(c => c.DemoMessages.Count > 1) ?? direct.Conversations.FirstOrDefault());
+            direct.Showing = true;
+            return Go(window, window.ChatPage, 500);
+        });
+        AppServices.Direct.Showing = false;
+        await Shot("41-adicionar-servidor.png", () =>
+        {
+            dialog = ServerDialogs.BuildAdd(window, ServerDialogs.AddMode.Network, out _, ("amigos-do-cs", "senha-da-rede", "Amigos do CS"));
+            dialog.WindowStartupLocation = WindowStartupLocation.Manual;
+            dialog.Left = dialog.Top = -30000;
+            dialog.ShowActivated = false;
+            dialog.Show();
+            return Task.Delay(300);
+        }, () => WindowRoot(dialog!));
+        dialog?.Close();
 
         // Janela no tamanho mínimo: o menu vira ícones e as colunas se empilham.
         Resize(window, new Size(window.MinWidth, window.MinHeight));
@@ -326,6 +364,18 @@ public static class Screenshots
         return failed == 0 && saved > 0;
     }
 
+
+    /// <summary>(1.5.0) Dois arquivos de verdade numa pasta temporária, para a captura dos anexos (uma imagem e uma planilha).</summary>
+    private static IReadOnlyList<string> DemoAttachments()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "ScreenFlow-capturas");
+        Directory.CreateDirectory(folder);
+        var picture = Path.Combine(folder, "print da final.jpg");
+        File.WriteAllBytes(picture, DemoData.ChatPicture().Data);
+        var sheet = Path.Combine(folder, "placar da final.xlsx");
+        File.WriteAllBytes(sheet, System.Security.Cryptography.RandomNumberGenerator.GetBytes(48 * 1024));
+        return [picture, sheet];
+    }
     private static async Task Go(MainWindow window, UserControl page, int wait = 300)
     {
         window.Navigate(page);

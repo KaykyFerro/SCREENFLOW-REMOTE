@@ -22,8 +22,9 @@ namespace ScreenFlow.App.Services;
 /// ScreenFlow.exe --autoteste: abre uma festa de música de verdade no 127.0.0.1 (com um tom de teste no lugar do som do
 /// PC), conecta um viewer nela e confere se o áudio chega e é decodificado. Depois abre duas salas da rede no mesmo PC
 /// e confere presença, chat e voz entre elas. Depois (1.4.1) faz o mesmo pelo servidor ScreenFlow: um servidor dentro do
-/// app, a festa publicada nele e um viewer assistindo por ele, e duas salas conversando pelo servidor. Por fim, se o PC
-/// tiver saída de som, confere a separação do som do PC por app. Usa portas próprias (47900 a 47905 e 47910 a 47922).
+/// app, a festa publicada nele e um viewer assistindo por ele, e duas salas conversando pelo servidor. Depois (1.5.0)
+/// confere os servidores por rede do Radmin (isolamento entre redes na mesma porta). Por fim, se o PC tiver saída de som,
+/// confere a separação do som do PC por app. Usa portas próprias (47900 a 47905 e 47910 a 47922).
 /// </summary>
 public static class SelfTest
 {
@@ -31,6 +32,7 @@ public static class SelfTest
     private const int RoomPortA = 47910, RoomPortB = 47911, RoomPortC = 47912;
     private const int ServerHostMediaPort = 47903, ServerHostControlPort = 47904, ServerHostDiscoveryPort = 47905;
     private const int ServerRoomA = 47913, ServerRoomB = 47914;
+    private const int SpaceHubA = 47915, SpaceHubB = 47916;
     private const int ServerControlPort = 47920, ServerMediaPort = 47921, ServerRoomPort = 47922;
 
     public static async Task<(bool Ok, string Report)> RunAsync()
@@ -40,13 +42,7 @@ public static class SelfTest
         void Line(string text) => report.AppendLine($"[{clock.Elapsed.TotalSeconds,5:0.0}s] {text}");
         Line($"{AppInfo.Name} {AppInfo.DisplayVersion}: autoteste da festa de música no 127.0.0.1");
 
-        var hostOptions = new HostOptions(
-            "Autoteste", IPAddress.Loopback, IPAddress.Loopback, MediaPort, ControlPort, DiscoveryPort,
-            null, false, 4,
-            new CaptureTarget(CaptureKind.Monitor, string.Empty, "Festa de música", 0, 0, 0), null, Resolution.P720, 30, 0,
-            null, null, [],
-            true, 160, false, 10, 0,
-            StreamMode.AudioOnly, 256, profile => new ToneAudioSource(profile));
+        var hostOptions = PartyOptions(256);
 
         var ok = false;
         HostSession? host = null;
@@ -105,13 +101,94 @@ public static class SelfTest
             Line("Festa encerrada.");
         }
 
+        var followOk = await FollowHostTestAsync(Line);
         var roomOk = await RoomTestAsync(Line);
         var serverOk = await ServerTestAsync(Line);
+        var spacesOk = await SpacesTestAsync(Line);
         var soundOk = await PcSoundTestAsync(Line);
         var cropOk = CaptureCropTest(Line);
-        var all = ok && roomOk && serverOk && soundOk && cropOk;
+        var all = ok && followOk && roomOk && serverOk && spacesOk && soundOk && cropOk;
         Line(all ? "PASSOU: tudo certo." : "FALHOU: veja as linhas acima.");
         return (all, report.ToString());
+    }
+
+    /// <summary>Uma festa de música no 127.0.0.1 com um tom de teste no lugar do som do PC.</summary>
+    private static HostOptions PartyOptions(int musicKbps) => new(
+        "Autoteste", IPAddress.Loopback, IPAddress.Loopback, MediaPort, ControlPort, DiscoveryPort,
+        null, false, 4,
+        new CaptureTarget(CaptureKind.Monitor, string.Empty, "Festa de música", 0, 0, 0), null, Resolution.P720, 30, 0,
+        null, null, [],
+        true, 160, false, 10, 0,
+        StreamMode.AudioOnly, musicKbps, profile => new ToneAudioSource(profile));
+
+    /// <summary>
+    /// (1.5.0) Quem assiste segue o host na troca de modo: a festa se despede avisando a troca, outra começa nas mesmas
+    /// portas e o mesmo player (a mesma sessão, sem sair e entrar) entra sozinho nela.
+    /// </summary>
+    private static async Task<bool> FollowHostTestAsync(Action<string> line)
+    {
+        HostSession? host = null;
+        ViewerSession? viewer = null;
+        try
+        {
+            host = new HostSession(PartyOptions(128));
+            await Task.Run(host.Start);
+            viewer = new ViewerSession(new ViewerOptions("127.0.0.1", ControlPort, "Autoteste viewer", null, 0.8f, [], 1280, 720, 60, AudioOutput: false));
+            var connections = 0;
+            var waited = false;
+            var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var back = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var session = viewer;
+            session.StateChanged += (state, message) =>
+            {
+                if (state == ConnectionState.Connected)
+                {
+                    if (Interlocked.Increment(ref connections) == 1) first.TrySetResult();
+                    else back.TrySetResult();
+                }
+                if (state == ConnectionState.Reconnecting && session.WaitingForHost)
+                {
+                    if (!waited) line($"viewer esperando: {message}");
+                    waited = true;
+                }
+                if (state is ConnectionState.Error or ConnectionState.Closed)
+                {
+                    line($"viewer: {state} · {message}");
+                    first.TrySetResult();
+                    back.TrySetResult();
+                }
+            };
+            viewer.Start();
+            await first.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            if (connections != 1)
+            {
+                line("FALHOU: o viewer não entrou na primeira festa.");
+                return false;
+            }
+            host.Farewell = new ByeMessage("Autoteste trocando de modo.", ByeMessage.Switching, ByeMessage.SwitchResumeSeconds, StreamMode.AudioOnly);
+            await host.DisposeAsync();
+            host = null;
+            await Task.Delay(800);
+            host = new HostSession(PartyOptions(256));
+            await Task.Run(host.Start);
+            await back.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            var ok = connections >= 2 && waited && viewer.State == ConnectionState.Connected;
+            line(ok
+                ? "PASSOU: na troca de modo o player esperou e entrou sozinho na transmissão nova (sem sair e entrar)."
+                : $"FALHOU: o player não seguiu a troca (conexões {connections}, esperou {waited}, estado {viewer.State}).");
+            return ok;
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Autoteste da troca de modo falhou", exception);
+            line($"FALHOU (troca de modo) com erro: {exception.GetType().Name}: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            if (viewer is not null) await viewer.DisposeAsync();
+            if (host is not null) await host.DisposeAsync();
+        }
     }
 
     /// <summary>
@@ -277,11 +354,18 @@ public static class SelfTest
             var pictureOk = await WaitAsync(() => filesB.TryGetValue(RoomBlob.IdOf(picture), out var got) && got.AsSpan().SequenceEqual(picture), 20);
             line(pictureOk ? $"Imagem do chat: B baixou {picture.Length / 1024} KB em {started.ElapsedMilliseconds} ms, com o hash conferido." : "FALHOU: a imagem do chat não chegou em B.");
 
-            a.JoinVoice(new ToneVoiceInput());
+            // (1.5.0) A fala com um microfone bem baixo (−37 dBFS, como muitos microfones no Windows): o ganho automático
+            // de A precisa levar a voz para perto de −20 dBFS em B, que é o que corrige a "voz baixa" das versões antigas.
+            a.JoinVoice(new ToneVoiceInput(amplitude: 0.02));
             b.JoinVoice(new ToneVoiceInput());
             var voiceOk = await WaitAsync(() => a.Voice?.FramesDecoded > 50 && b.Voice?.FramesDecoded > 50, 10);
             line($"Voz: A mandou {a.Voice?.FramesSent ?? 0} quadros e tocou {a.Voice?.FramesDecoded ?? 0}; " +
                  $"B mandou {b.Voice?.FramesSent ?? 0} e tocou {b.Voice?.FramesDecoded ?? 0} (recuperados pela cópia: {(a.Voice?.FramesRecovered ?? 0) + (b.Voice?.FramesRecovered ?? 0)}).");
+            var levelOk = await WaitAsync(() => b.Voice?.HeardLevelDb is >= -26 and <= -14, 10);
+            line(levelOk
+                ? $"Volume da voz: A falou baixo (−37 dBFS) e chegou em B a {b.Voice?.HeardLevelDb:0.0} dBFS (alvo −20; o ganho automático de A subiu {a.Voice?.AutoGainDb:+0.0;-0.0} dB)."
+                : $"FALHOU: a voz baixa de A chegou em B a {b.Voice?.HeardLevelDb?.ToString("0.0") ?? "?"} dBFS (o alvo é perto de −20).");
+            voiceOk &= levelOk;
             var peerInVoice = a.Peers.FirstOrDefault()?.Presence.InVoice == true && b.Peers.FirstOrDefault()?.Presence.InVoice == true;
             if (!peerInVoice) line("FALHOU: um não viu o outro entrar na voz.");
             if (!voiceOk) line("FALHOU: a voz não chegou dos dois lados.");
@@ -767,6 +851,231 @@ public static class SelfTest
             await a.DisposeAsync();
             await b.DisposeAsync();
         }
+    }
+
+    /// <summary>
+    /// (1.5.0) Servidores por rede do Radmin, com dois PCs de mentira que dividem a porta da sala como o app: cada um com a
+    /// sala da rede e o servidor da mesma rede ("rede-autoteste", mesma senha); A tem ainda o servidor de outra rede e B o
+    /// da mesma rede com outra senha. Confere que A e B se veem no servidor e na sala da rede, que os servidores de outra
+    /// chave não veem ninguém, que o chat do servidor só chega no servidor (e o da sala só na sala), que um canal criado
+    /// em A aparece em B com a conversa dele e que a voz do servidor chega. (A fofoca de quem está no servidor só vale
+    /// para IPs das redes do PC, não para o 127.0.0.1: ela fica para o teste em PCs de verdade.)
+    /// </summary>
+    private static async Task<bool> SpacesTestAsync(Action<string> line)
+    {
+        line("Servidores por rede: dois PCs de mentira no 127.0.0.1, cada um dividindo a sua porta da sala.");
+        var selfA = Guid.NewGuid();
+        var selfB = Guid.NewGuid();
+        using var hubA = new RoomHub(SpaceHubA);
+        using var hubB = new RoomHub(SpaceHubB);
+        using var identityA = DirectIdentity.Create();
+        using var identityB = DirectIdentity.Create();
+        var rooms = new List<NetworkRoom>();
+        NetworkRoom Room(Guid self, string name, RoomHub hub, byte[]? key)
+        {
+            var room = new NetworkRoom(self, hub.Port, new RoomLocalState(name), hub)
+            {
+                BroadcastTargets = () => [],
+                OutputEnabled = false,
+                SpaceChannels = key is null ? null : new SpaceChannelTable(),
+                IdentityKey = (self == selfA ? identityA : identityB).PublicKey,
+            };
+            if (key is not null) room.UseSpaceKey(key);
+            rooms.Add(room);
+            return room;
+        }
+        try
+        {
+            hubA.Start();
+            hubB.Start();
+            if (!hubA.IsRunning || !hubB.IsRunning)
+            {
+                line($"FALHOU: a porta da sala não abriu ({hubA.Error ?? hubB.Error}).");
+                return false;
+            }
+            var same = SpaceKeys.FromNetwork("rede-autoteste", "senha do autoteste");
+            var openA = Room(selfA, "Autoteste A", hubA, null);
+            var openB = Room(selfB, "Autoteste B", hubB, null);
+            var spaceA = Room(selfA, "Autoteste A", hubA, same);
+            var spaceB = Room(selfB, "Autoteste B", hubB, same);
+            var otherA = Room(selfA, "Autoteste A", hubA, SpaceKeys.FromNetwork("outra-rede", "senha do autoteste"));
+            var otherB = Room(selfB, "Autoteste B", hubB, SpaceKeys.FromNetwork("rede-autoteste", "outra senha"));
+            foreach (var room in rooms)
+            {
+                room.Start();
+                if (!room.IsRunning)
+                {
+                    line($"FALHOU: uma sala não abriu na porta dividida ({room.Error}).");
+                    return false;
+                }
+                room.AddManualPeer(IPAddress.Loopback, room.Port == SpaceHubA ? SpaceHubB : SpaceHubA);
+            }
+
+            var metOk = await WaitAsync(() => spaceA.Peers.Any(p => p.Id == selfB) && spaceB.Peers.Any(p => p.Id == selfA)
+                && openA.Peers.Any(p => p.Id == selfB) && openB.Peers.Any(p => p.Id == selfA), 10);
+            if (!metOk)
+                line($"FALHOU: A e B não se acharam (servidor: A vê {spaceA.Peers.Count}, B vê {spaceB.Peers.Count}; sala da rede: A vê {openA.Peers.Count}, B vê {openB.Peers.Count}).");
+            await Task.Delay(2500);
+            var isolatedOk = otherA.Peers.Count == 0 && otherB.Peers.Count == 0 && spaceA.Peers.Count == 1 && spaceB.Peers.Count == 1
+                && openA.Peers.Count == 1 && openB.Peers.Count == 1;
+            if (!isolatedOk)
+                line($"FALHOU: as redes se misturaram (outra rede em A vê {otherA.Peers.Count}, outra senha em B vê {otherB.Peers.Count}, servidor em A vê {spaceA.Peers.Count}, sala em A vê {openA.Peers.Count}).");
+
+            // O chat do servidor só chega no servidor; o da sala da rede só na sala da rede.
+            const string inSpaceText = "Só no servidor da rede-autoteste";
+            const string inOpenText = "Só na sala da rede";
+            var spaceGot = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var openGot = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var leaks = 0;
+            spaceB.MessageReceived += message =>
+            {
+                if (message.AuthorId != selfA) return;
+                if (message.Text == inSpaceText) spaceGot.TrySetResult(true);
+                if (message.Text == inOpenText) Interlocked.Increment(ref leaks);
+            };
+            openB.MessageReceived += message =>
+            {
+                if (message.AuthorId != selfA) return;
+                if (message.Text == inOpenText) openGot.TrySetResult(true);
+                if (message.Text == inSpaceText) Interlocked.Increment(ref leaks);
+            };
+            otherB.MessageReceived += message =>
+            {
+                if (message.AuthorId == selfA) Interlocked.Increment(ref leaks);
+            };
+            spaceA.SendChat(inSpaceText);
+            openA.SendChat(inOpenText);
+            await Task.WhenAny(Task.WhenAll(spaceGot.Task, openGot.Task), Task.Delay(5000));
+            var chatOk = spaceGot.Task.IsCompletedSuccessfully && openGot.Task.IsCompletedSuccessfully;
+            await Task.Delay(1000);
+            var leakOk = Volatile.Read(ref leaks) == 0;
+            if (!chatOk) line($"FALHOU: o chat não chegou (no servidor: {spaceGot.Task.IsCompletedSuccessfully}, na sala da rede: {openGot.Task.IsCompletedSuccessfully}).");
+            if (!leakOk) line($"FALHOU: {leaks} mensagem(ns) chegaram onde não deviam.");
+
+            // Um canal criado em A aparece em B (com o id, o nome e a conversa).
+            var created = spaceA.SpaceChannels!.Create(RoomChannelKind.Text, "estratégia", selfA, DateTimeOffset.UtcNow, out var problem);
+            if (created is not null) spaceA.PublishChannels([created]);
+            var tableOk = created is not null && await WaitAsync(() => spaceB.SpaceChannels!.Find(RoomChannelKind.Text, created.Id) is { Deleted: false, Name: "estratégia" }, 6);
+            if (!tableOk) line($"FALHOU: o canal criado em A não apareceu em B ({problem ?? "não chegou"}).");
+            var inChannel = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            spaceB.MessageReceived += message =>
+            {
+                if (message.AuthorId == selfA && message.Text == "No canal novo") inChannel.TrySetResult(message.ChannelName);
+            };
+            if (created is not null) spaceA.SendChat("No canal novo", channel: created.Id);
+            var channelOk = created is not null && await Task.WhenAny(inChannel.Task, Task.Delay(5000)) == inChannel.Task && inChannel.Task.Result == created.Id;
+            if (!channelOk) line("FALHOU: a mensagem do canal novo não chegou no canal certo.");
+
+            // A voz do servidor, lacrada com a chave dele.
+            spaceA.JoinVoice(new ToneVoiceInput());
+            spaceB.JoinVoice(new ToneVoiceInput());
+            var voiceOk = await WaitAsync(() => spaceA.Voice?.FramesDecoded > 50 && spaceB.Voice?.FramesDecoded > 50, 10);
+            if (!voiceOk) line($"FALHOU: a voz do servidor não chegou (A tocou {spaceA.Voice?.FramesDecoded ?? 0} quadros, B tocou {spaceB.Voice?.FramesDecoded ?? 0}).");
+            var quietOk = openB.Voice is null && otherB.Voice is null;
+            if (!quietOk) line("FALHOU: a voz abriu numa sala que não entrou nela.");
+            await spaceA.LeaveVoiceAsync();
+            await spaceB.LeaveVoiceAsync();
+
+            // (1.5.0) Mensagem direta de A para B pelo servidor: cifrada só para B, entregue e confirmada, e nada na sala da rede.
+            var directOk = await DirectTestAsync(selfA, selfB, identityA, identityB, spaceA, spaceB, openB, line);
+
+            var ok = metOk && isolatedOk && chatOk && leakOk && tableOk && channelOk && voiceOk && quietOk && directOk;
+            line(ok
+                ? $"PASSOU: na mesma porta, A e B se viram no servidor e na sala da rede, as outras chaves ficaram sozinhas, o chat de cada um ficou no seu lugar, o canal #estratégia de A chegou em B e a voz do servidor tocou ({spaceB.Voice?.FramesDecoded ?? 0} quadros em B)."
+                : "FALHOU: os servidores por rede não funcionaram como deveriam.");
+            return ok;
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Autoteste dos servidores falhou", exception);
+            line($"FALHOU com erro nos servidores: {exception.GetType().Name}: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            foreach (var room in rooms) await room.DisposeAsync();
+            line("Servidores fechados.");
+        }
+    }
+
+    /// <summary>O chat privado de verdade (cifra, envio, confirmação e histórico) entre duas salas do autoteste.</summary>
+    private static async Task<bool> DirectTestAsync(Guid selfA, Guid selfB, DirectIdentity identityA, DirectIdentity identityB,
+        NetworkRoom from, NetworkRoom to, NetworkRoom elsewhere, Action<string> line)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "ScreenFlow-autoteste-dm-" + Guid.NewGuid().ToString("N"));
+        var gate = new object();
+        try
+        {
+            var key = RandomNumberGenerator.GetBytes(32);
+            var chatA = new DirectChat(selfA, identityA, new DirectStore(Path.Combine(folder, "a"), key), new RoomTransport(from));
+            var chatB = new DirectChat(selfB, identityB, new DirectStore(Path.Combine(folder, "b"), key), new RoomTransport(to));
+            var received = new TaskCompletionSource<DirectRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var leaked = 0;
+            chatB.MessageChanged += (_, record) =>
+            {
+                if (record.State == DirectState.Received) received.TrySetResult(record);
+            };
+            void Wire(NetworkRoom room, DirectChat chat) => room.DirectReceived += packet =>
+            {
+                lock (gate) chat.Receive(packet.Type, packet.Sender, packet.SenderName, packet.IdentityKey, packet.Body, DateTimeOffset.UtcNow,
+                    reply => room.SendDirect(packet.Sender, reply));
+            };
+            Wire(from, chatA);
+            Wire(to, chatB);
+            elsewhere.DirectReceived += _ => Interlocked.Increment(ref leaked);
+            const string text = "Mensagem direta do autoteste 🔒";
+            var announced = from.IdentityKeyOf(selfB);
+            if (announced is null)
+            {
+                line("FALHOU: B não anunciou a chave do chat privado na presença.");
+                return false;
+            }
+            lock (gate)
+            {
+                chatA.Open(selfB, "Autoteste B", announced);
+                chatA.Send(selfB, new DirectPayload(text), DateTimeOffset.UtcNow);
+            }
+            var arrivedOk = await Task.WhenAny(received.Task, Task.Delay(6000)) == received.Task
+                && received.Task.Result is { Author: var author, Text: text } && author == selfA;
+            var deliveredOk = await WaitAsync(() =>
+            {
+                lock (gate)
+                {
+                    chatA.Tick(DateTimeOffset.UtcNow);
+                    return chatA.PendingCount == 0 && chatA.Store.Load(selfB).SingleOrDefault()?.State == DirectState.Delivered;
+                }
+            }, 8);
+            bool storedOk;
+            lock (gate) storedOk = chatB.Store.Find(selfA) is { Unread: 1, IdentityKey: { } pinned } && pinned == identityA.PublicKey
+                && chatB.Store.Load(selfA).Count == 1;
+            await Task.Delay(500);
+            var leakOk = Volatile.Read(ref leaked) == 0;
+            if (!arrivedOk) line("FALHOU: a mensagem direta não chegou em B (ou chegou diferente).");
+            if (!deliveredOk) line("FALHOU: A não recebeu a confirmação de entrega da mensagem direta.");
+            if (!storedOk) line("FALHOU: B não guardou a conversa com a chave de A.");
+            if (!leakOk) line($"FALHOU: a mensagem direta apareceu em outra sala ({leaked} pacote(s)).");
+            var ok = arrivedOk && deliveredOk && storedOk && leakOk;
+            if (ok) line("PASSOU: a mensagem direta foi de A para B pelo servidor, cifrada só para B, voltou a confirmação de entrega e ficou guardada (cifrada) nos dois lados.");
+            return ok;
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Autoteste das mensagens diretas falhou", exception);
+            line($"FALHOU com erro nas mensagens diretas: {exception.GetType().Name}: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (Exception) { }
+        }
+    }
+
+    /// <summary>O chat privado do autoteste vai só pela sala indicada.</summary>
+    private sealed class RoomTransport(NetworkRoom room) : IDirectTransport
+    {
+        public bool CanReach(Guid peer, string identityKey) => room.IdentityKeyOf(peer) == identityKey;
+
+        public bool Send(Guid peer, string identityKey, byte[] packet) => CanReach(peer, identityKey) && room.SendDirect(peer, packet);
     }
 
     private static async Task<bool> WaitAsync(Func<bool> condition, int seconds)

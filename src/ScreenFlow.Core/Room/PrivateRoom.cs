@@ -23,34 +23,52 @@ public sealed record RoomInvite(byte[] Secret, Guid Owner, uint Epoch = 0)
         Secret.CopyTo(raw, 0);
         Owner.TryWriteBytes(raw.AsSpan(RoomKeys.SecretBytes, 16), bigEndian: true, out _);
         BinaryPrimitives.WriteUInt32BigEndian(raw.AsSpan(RoomKeys.SecretBytes + 16), Epoch);
+        return EncodeCode(Prefix, raw);
+    }
+
+    /// <summary>
+    /// (1.5.0) Monta um código de convite: o prefixo e os bytes em grupos de 5 letras e números (Crockford), com os 2
+    /// últimos bytes trocados pelo verificador (o começo do SHA-256 do resto). Usado também pelo convite de servidor.
+    /// </summary>
+    internal static string EncodeCode(string prefix, byte[] raw)
+    {
         var check = SHA256.HashData(raw.AsSpan(0, raw.Length - 2));
         raw[^2] = check[0];
         raw[^1] = check[1];
         var text = Base32(raw);
         var groups = Enumerable.Range(0, (text.Length + 4) / 5).Select(i => text.Substring(i * 5, Math.Min(5, text.Length - i * 5)));
-        return Prefix + string.Join('-', groups);
+        return prefix + string.Join('-', groups);
+    }
+
+    /// <summary>
+    /// (1.5.0) Lê um código colado (minúsculas, espaços e traços em qualquer lugar; O e I/L viram 0 e 1) e confere o
+    /// verificador. Null se o prefixo, as letras ou o verificador não batem.
+    /// </summary>
+    internal static byte[]? DecodeCode(string prefix, string? code)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return null;
+        var text = code.Trim().ToUpperInvariant();
+        if (!text.StartsWith(prefix, StringComparison.Ordinal)) return null;
+        var clean = new StringBuilder();
+        foreach (var c in text[prefix.Length..])
+        {
+            if (c is '-' or ' ' or '\t' or '\r' or '\n') continue;
+            var normalized = c switch { 'O' => '0', 'I' or 'L' => '1', _ => c };
+            if (Alphabet.IndexOf(normalized) < 0) return null;
+            clean.Append(normalized);
+        }
+        var raw = FromBase32(clean.ToString());
+        if (raw is null || raw.Length < 3) return null;
+        var check = SHA256.HashData(raw.AsSpan(0, raw.Length - 2));
+        return raw[^2] == check[0] && raw[^1] == check[1] ? raw : null;
     }
 
     /// <summary>Lê um código colado (aceita minúsculas, espaços e os traços em qualquer lugar).</summary>
     public static bool TryParse(string? code, out RoomInvite invite)
     {
         invite = null!;
-        if (string.IsNullOrWhiteSpace(code)) return false;
-        var text = code.Trim().ToUpperInvariant();
-        if (!text.StartsWith(Prefix, StringComparison.Ordinal)) return false;
-        var clean = new StringBuilder();
-        foreach (var c in text[Prefix.Length..])
-        {
-            if (c is '-' or ' ' or '\t' or '\r' or '\n') continue;
-            // Letras que parecem números (como o Crockford manda).
-            var normalized = c switch { 'O' => '0', 'I' or 'L' => '1', _ => c };
-            if (Alphabet.IndexOf(normalized) < 0) return false;
-            clean.Append(normalized);
-        }
-        var raw = FromBase32(clean.ToString());
+        var raw = DecodeCode(Prefix, code);
         if (raw is null || raw.Length != RoomKeys.SecretBytes + 16 + 4 + 2) return false;
-        var check = SHA256.HashData(raw.AsSpan(0, raw.Length - 2));
-        if (raw[^2] != check[0] || raw[^1] != check[1]) return false;
         var owner = new Guid(raw.AsSpan(RoomKeys.SecretBytes, 16), bigEndian: true);
         if (owner == Guid.Empty) return false;
         invite = new RoomInvite(raw[..RoomKeys.SecretBytes], owner, BinaryPrimitives.ReadUInt32BigEndian(raw.AsSpan(RoomKeys.SecretBytes + 16)));
@@ -90,6 +108,9 @@ public sealed record RoomInvite(byte[] Secret, Guid Owner, uint Epoch = 0)
             }
             buffer &= (1 << bits) - 1;
         }
+        // O que sobra no fim é só enchimento: num código de verdade é zero e menor que uma letra. Diferente disso é erro
+        // de digitação na última letra (que, sem esta conferência, podia passar despercebido).
+        if (bits >= 5 || buffer != 0) return null;
         return output.ToArray();
     }
 }
@@ -206,6 +227,19 @@ public sealed class RoomKeyring
             _previous = keepPrevious ? _current : null;
             _previousUntil = now + Grace;
             _current = secret is null ? null : new Generation(secret.ToArray(), epoch, RoomKeys.Tag(secret), RoomKeys.Key(secret, epoch));
+        }
+    }
+
+    /// <summary>
+    /// (1.5.0) O pacote lacrado é desta sala (a etiqueta é a da chave atual, ou da anterior ainda no prazo)? Não abre
+    /// nada: serve para o PC entregar cada pacote para a sala certa quando vários servidores dividem a mesma porta.
+    /// </summary>
+    public bool Matches(ReadOnlySpan<byte> roomTag, DateTimeOffset now)
+    {
+        lock (_gate)
+        {
+            if (_current is { } current && roomTag.SequenceEqual(current.Tag)) return true;
+            return _previous is { } previous && now <= _previousUntil && roomTag.SequenceEqual(previous.Tag);
         }
     }
 

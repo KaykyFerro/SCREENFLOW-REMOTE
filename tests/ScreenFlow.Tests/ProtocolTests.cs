@@ -123,4 +123,26 @@ public class ProtocolTests
         Assert.False(DiscoveryAnnouncement.TryParse("{\"app\":\"Outro\",\"address\":\"1.1.1.1\"}"u8, out _));
         Assert.False(DiscoveryAnnouncement.TryParse("lixo"u8, out _));
     }
+
+    [Fact]
+    public void Bye_CarriesTheResumeHintAndOldByesAreFinal()
+    {
+        // 1.5.0: a despedida com volta prevista vai e volta pelo JSON.
+        var bye = new ByeMessage("Trocando.", ByeMessage.Switching, 45, StreamMode.AudioOnly);
+        var read = Assert.IsType<ByeMessage>(ControlFraming.Deserialize(ControlFraming.Serialize(bye).AsSpan(4)));
+        Assert.Equal(bye, read);
+        Assert.True(read.CanResume);
+        Assert.Equal(TimeSpan.FromSeconds(45), read.ResumeWindow);
+
+        // A despedida de uma versão antiga (só o motivo) é de vez.
+        var old = Assert.IsType<ByeMessage>(ControlFraming.Deserialize("{\"t\":\"bye\",\"reason\":\"O host encerrou a transmissão.\"}"u8));
+        Assert.False(old.CanResume);
+        Assert.Null(old.Code);
+
+        // Tirado da transmissão nunca espera, mesmo que venha com tempo; e o tempo é limitado.
+        Assert.False(new ByeMessage("Saiu.", ByeMessage.Removed, 60).CanResume);
+        Assert.False(new ByeMessage("Servidor desligado.", ByeMessage.ServerStopped, 60).CanResume);
+        Assert.Equal(TimeSpan.FromSeconds(ByeMessage.MaxResumeSeconds), new ByeMessage("x", ByeMessage.Ended, 99_999).ResumeWindow);
+        Assert.Contains(StreamModes.FeatureFollowHost, StreamModes.ViewerFeatures);
+    }
 }

@@ -38,6 +38,16 @@ public static class AppServices
     /// <summary>Sala da rede: quem está com o ScreenFlow aberto na rede, a voz e o chat. Criada na thread da interface.</summary>
     public static RoomService Room => _room ??= new RoomService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
 
+    private static DirectService? _direct;
+
+    /// <summary>(1.5.0) As mensagens diretas (chat privado, cifrado só para a outra pessoa). Criadas na thread da interface.</summary>
+    public static DirectService Direct => _direct ??= new DirectService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+
+    private static FileService? _files;
+
+    /// <summary>(1.5.0) Os arquivos do chat (mandar e baixar direto de um PC para o outro). Criados na thread da interface.</summary>
+    public static FileService Files => _files ??= new FileService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+
     /// <summary>(1.4.1) O que o instalador pediu ao abrir o ScreenFlow (instalar o Tailscale ou o Radmin VPN junto).</summary>
     public static StartupOptions Startup { get; set; } = StartupOptions.None;
 
@@ -51,7 +61,19 @@ public static class AppServices
         ? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ScreenFlow-exemplo", "imagens")
         : System.IO.Path.Combine(AppInfo.DataDirectory, "imagens"));
 
-    public static void Initialize(string? settingsPath = null) => Settings = settingsPath is null ? new SettingsStore() : new SettingsStore(settingsPath);
+    public static void Initialize(string? settingsPath = null)
+    {
+        // (1.5.0) Senhas, PIN e convites vão cifrados para o arquivo (DPAPI desta conta do Windows), nunca em texto puro.
+        Core.Security.SecretProtection.Register(new Infrastructure.Security.WindowsSecretProtector());
+        Settings = settingsPath is null ? new SettingsStore() : new SettingsStore(settingsPath);
+        AudioMixer.Apply(Settings.Current.Mixer);
+        AppSoundPlayer.Shared.SpeakerId = Settings.Current.SpeakerId;
+        Settings.Saved += settings =>
+        {
+            AudioMixer.Apply(settings.Mixer);
+            AppSoundPlayer.Shared.SpeakerId = settings.SpeakerId;
+        };
+    }
 
     /// <summary>Detecção de hardware em segundo plano (abre encoders de verdade, leva ~1–2 s).</summary>
     public static Task<HardwareProfile> Hardware => _hardware ??= DemoMode ? Task.FromResult(DemoData.Hardware) : Task.Run(() => HardwareDetector.Detect());
@@ -136,8 +158,8 @@ public static class AppServices
         foreach (var adapter in RadminNetwork.GetIPv4Adapters())
             builder.AppendLine($"  {(adapter.IsUp ? "●" : "○")} {adapter.Description}: {adapter.Address}{(adapter.IsRadmin ? " [Radmin]" : "")}");
         var s = Settings.Current;
-        builder.AppendLine($"  Portas: mídia UDP {s.MediaPort}, controle TCP {s.ControlPort}, descoberta UDP {s.DiscoveryPort}");
-        builder.AppendLine($"  Firewall: {(FirewallManager.RulesExist(s.MediaPort, s.ControlPort, s.DiscoveryPort) ? "regras criadas" : "regras NÃO encontradas")}");
+        builder.AppendLine($"  Portas: mídia UDP {s.MediaPort}, controle TCP {s.ControlPort}, descoberta UDP {s.DiscoveryPort}, arquivos TCP {s.FilePort}");
+        builder.AppendLine($"  Firewall: {(FirewallManager.RulesExist(s.MediaPort, s.ControlPort, s.DiscoveryPort, s.FilePort) ? "regras criadas" : "regras NÃO encontradas")}");
         builder.AppendLine($"  Upload medido: {(s.UploadMbps > 0 ? $"{s.UploadMbps:0} Mbps" : "ainda não medido (use 'Testar banda' com alguém conectado)")}");
         builder.AppendLine();
 

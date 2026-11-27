@@ -13,6 +13,7 @@ public static class AppInfo
     public const int DefaultMediaPort = 47800;      // UDP: vídeo, áudio, FEC
     public const int DefaultControlPort = 47801;    // TCP: handshake, controle, NACK, estatísticas
     public const int DefaultDiscoveryPort = 47802;  // UDP broadcast: descoberta de hosts
+    public const int DefaultFilePort = 47803;       // TCP (1.5.0): arquivos do chat, direto de um PC para o outro
 
     // Servidor ScreenFlow (1.4.1): um PC que recebe a tela e o chat de todo mundo e repassa para quem assiste.
     public const int DefaultServerControlPort = 47810; // TCP: quem transmite e quem assiste entram por aqui

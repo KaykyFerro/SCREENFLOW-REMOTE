@@ -409,6 +409,61 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ViewersFollowThePublisherWhenItSwitchesModes()
+    {
+        using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var token = cancel.Token;
+        var streamId = Guid.NewGuid();
+        var publisher = await FakePublisher.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", token);
+        await using (var viewer = await FakeViewer.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", "Ana", token))
+        {
+            // Quem transmite troca de modo (1.5.0): a despedida diz que volta, e quem assiste (1.5.0) recebe a mesma
+            // despedida, sabe que é uma troca e fica esperando em vez de encerrar.
+            await publisher.SendAsync(new ByeMessage("Trocando de modo.", ByeMessage.Switching, ByeMessage.SwitchResumeSeconds, StreamMode.AudioOnly), token);
+            var bye = await viewer.WaitForAsync<ByeMessage>(_ => true, token);
+            Assert.True(bye.CanResume);
+            Assert.Equal(ByeMessage.Switching, bye.Code);
+            Assert.Equal(StreamMode.AudioOnly, bye.NextMode);
+            await viewer.WaitForCloseAsync(token);
+        }
+        await publisher.DisposeAsync();
+        // A transmissão continua no servidor, esperando quem transmite voltar.
+        await WaitUntil(() => _server.Streams.Streams is [{ Online: false }], token);
+        var waiting = FakeViewer.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", "Ana", token, acceptPending: true);
+        await Task.Delay(400, token);
+        Assert.False(waiting.IsCompleted);
+        await using var back = await FakePublisher.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", token);
+        await using var viewerAgain = await waiting.WaitAsync(Wait, token);
+        Assert.True(viewerAgain.SawPending);
+    }
+
+    [Fact]
+    public async Task AFinalByeStillEndsTheStreamAndMissingStreamsAreNotFound()
+    {
+        using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var token = cancel.Token;
+        var streamId = Guid.NewGuid();
+        var publisher = await FakePublisher.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", token);
+        await using var viewer = await FakeViewer.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", "Ana", token);
+        // Uma despedida sem volta (o app fechou): a transmissão sai do servidor e quem assiste recebe um tchau final.
+        await publisher.SendAsync(new ByeMessage("O host encerrou a transmissão."), token);
+        var bye = await viewer.WaitForAsync<ByeMessage>(_ => true, token);
+        Assert.False(bye.CanResume);
+        await WaitUntil(() => _server.Streams.Streams.Count == 0, token);
+        await publisher.DisposeAsync();
+        // Pedir uma transmissão que não está lá responde "não está aqui" (quem espera o host voltar continua esperando).
+        using var client = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
+        await client.ConnectAsync(IPAddress.Loopback, _server.Streams.ControlPort, token);
+        var stream = client.GetStream();
+        using var key = new KeyExchange();
+        await ControlFraming.WriteAsync(stream, new HelloMessage(AppInfo.ProtocolVersion, AppInfo.DisplayVersion, "Ana", [VideoCodec.H264], 1280, 720, 60,
+            40000, key.PublicKey, [.. StreamModes.ViewerFeatures], streamId.ToString("N")), token);
+        var rejected = Assert.IsType<RejectedMessage>(await ControlFraming.ReadAsync(stream, token));
+        Assert.Equal(RejectedMessage.NotFound, rejected.Code);
+        Assert.Contains("não está mais no servidor", rejected.Message);
+    }
+
+    [Fact]
     public async Task RoomGoesThroughTheServerWithPasswordChannelsAndHistory()
     {
         using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));
@@ -592,7 +647,11 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
             var config = new StreamConfigMessage(VideoCodec.H264, 1280, 720, 60, 8000, true, 48000, 2, "teste", "conexão");
             await ControlFraming.WriteAsync(stream, new WelcomeMessage("PC de quem transmite", Convert.ToBase64String(salt), ((IPEndPoint)udp.LocalEndPoint!).Port, config,
                 [.. StreamModes.HostFeatures]), token);
-            return new FakePublisher(client, stream, udp, new PacketCipher(key, salt), new IPEndPoint(IPAddress.Loopback, hello.UdpPort), accepted.ServerName, hello);
+            var publisher = new FakePublisher(client, stream, udp, new PacketCipher(key, salt), new IPEndPoint(IPAddress.Loopback, hello.UdpPort), accepted.ServerName, hello);
+            // O servidor só põe a transmissão na lista depois de ler o Welcome, e manda o primeiro AudienceMessage logo em
+            // seguida: esperar por ele evita que quem assiste chegue antes e ouça "não está no servidor".
+            await publisher.WaitForAsync<AudienceMessage>(_ => true, token);
+            return publisher;
         }
 
         public void SendMedia(MediaChunk chunk, bool retransmit = false)
@@ -660,6 +719,8 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
             _cipher = cipher;
             Welcome = welcome;
             SawPending = sawPending;
+            // Antes de a thread começar: se o teste acabar logo e fechar o socket, a thread não mexe num socket fechado.
+            _udp.ReceiveTimeout = 200;
             _reader = Task.Run(ReadLoopAsync);
             _media = new Thread(MediaLoop) { IsBackground = true };
             _media.Start();
@@ -677,7 +738,14 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
             using var key = new KeyExchange();
             await ControlFraming.WriteAsync(stream, new HelloMessage(AppInfo.ProtocolVersion, AppInfo.DisplayVersion, name, [VideoCodec.H264], 1280, 720, 60,
                 ((IPEndPoint)udp.LocalEndPoint!).Port, key.PublicKey, [.. StreamModes.ViewerFeatures], streamId.ToString("N")), token);
-            var challenge = Assert.IsType<ChallengeMessage>(await ControlFraming.ReadAsync(stream, token));
+            var first = await ControlFraming.ReadAsync(stream, token);
+            if (first is RejectedMessage refused)
+            {
+                client.Dispose();
+                udp.Dispose();
+                throw new InvalidOperationException($"Recusado antes do desafio ({refused.Code}): {refused.Message}");
+            }
+            var challenge = Assert.IsType<ChallengeMessage>(first);
             var secret = key.DeriveSharedSecret(challenge.PublicKey);
             var transcript = SessionCrypto.Transcript(key.PublicKey, challenge.PublicKey, challenge.Nonce);
             await ControlFraming.WriteAsync(stream, new AuthMessage(SessionCrypto.CreateProof(secret, password, transcript)), token);
@@ -731,7 +799,6 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
             var buffer = new byte[16 * 1024];
             var plain = new byte[16 * 1024];
             EndPoint any = new IPEndPoint(IPAddress.Any, 0);
-            _udp.ReceiveTimeout = 200;
             while (!_stop.IsCancellationRequested)
             {
                 int length;

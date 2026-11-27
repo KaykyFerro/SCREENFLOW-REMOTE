@@ -65,7 +65,9 @@ public sealed partial class NetworkRoom : IAsyncDisposable
     private readonly ConcurrentDictionary<IPEndPoint, byte> _manual = new();
     private readonly CancellationTokenSource _cancellation = new();
     private readonly object _voiceGate = new();
-    private readonly DateTimeOffset _started = DateTimeOffset.UtcNow;
+    private DateTimeOffset _started = DateTimeOffset.UtcNow;
+    private readonly RoomHub? _hub;
+    private volatile bool _attached;
     private Socket? _socket;
     private Thread? _receiver;
     private Task? _ticker;
@@ -93,12 +95,17 @@ public sealed partial class NetworkRoom : IAsyncDisposable
     private float _volume = 1f;
     private double _sensitivity = 0.6;
 
-    public NetworkRoom(Guid self, int port, RoomLocalState local)
+    /// <summary>
+    /// Uma sala da rede. Com <paramref name="hub"/> (1.5.0), a sala divide a porta com as outras (a sala da rede e os
+    /// servidores): o <see cref="RoomHub"/> recebe tudo e entrega cada pacote para a sala dele. Sem, a sala abre a porta.
+    /// </summary>
+    public NetworkRoom(Guid self, int port, RoomLocalState local, RoomHub? hub = null)
     {
         if (self == Guid.Empty) throw new ArgumentException("Id da sala vazio.", nameof(self));
         SelfId = self;
-        _port = port;
+        _port = hub?.Port ?? port;
         _local = local;
+        _hub = hub;
     }
 
     public Guid SelfId { get; }
@@ -248,7 +255,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
     /// <summary>Por que a sala não abriu (porta ocupada, por exemplo). Null quando está funcionando.</summary>
     public string? Error { get; private set; }
 
-    public bool IsRunning => _socket is not null && !_cancellation.IsCancellationRequested;
+    public bool IsRunning => (_socket is not null || (_attached && _hub?.IsRunning == true)) && !_cancellation.IsCancellationRequested;
     public bool InVoice => _inVoice;
 
     /// <summary>O canal de voz em que você está (null fora da voz).</summary>
@@ -305,6 +312,20 @@ public sealed partial class NetworkRoom : IAsyncDisposable
 
     public void Start()
     {
+        if (_hub is { } hub)
+        {
+            // (1.5.0) Pela porta dividida: o hub já abriu a porta; esta sala só passa a receber o que é dela.
+            if (!hub.IsRunning)
+            {
+                Error = hub.Error ?? $"A porta {_port} (UDP) não abriu: a sala ficou desligada.";
+                return;
+            }
+            hub.Attach(this);
+            _attached = true;
+            _ticker = Task.Run(TickLoopAsync);
+            Log.Info(IsSpace ? "Servidor por rede aberto na porta da sala." : $"Sala da rede aberta na porta UDP {_port}.");
+            return;
+        }
         try { _socket = Bind(exclusive: true); }
         catch (SocketException first)
         {
@@ -326,7 +347,10 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         Log.Info($"Sala da rede aberta na porta UDP {_port}.");
     }
 
-    private Socket Bind(bool exclusive)
+    private Socket Bind(bool exclusive) => Bind(_port, exclusive);
+
+    /// <summary>Abre a porta UDP da sala (exclusiva; ou compartilhada, quando outro programa já está nela).</summary>
+    internal static Socket Bind(int port, bool exclusive)
     {
         var socket = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp)
         {
@@ -346,7 +370,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
             socket.ExclusiveAddressUse = false;
             socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
         }
-        try { socket.Bind(new IPEndPoint(IPAddress.Any, _port)); }
+        try { socket.Bind(new IPEndPoint(IPAddress.Any, port)); }
         catch
         {
             socket.Dispose();
@@ -373,9 +397,11 @@ public sealed partial class NetworkRoom : IAsyncDisposable
             _inVoice = false;
         }
         if (_ticker is not null) try { await _ticker; } catch { }
+        if (_attached) _hub?.Detach(this);
+        _attached = false;
         _socket?.Dispose();
         _receiver?.Join(1000);
-        Log.Info("Sala da rede fechada.");
+        Log.Info(IsSpace ? "Servidor por rede fechado." : "Sala da rede fechada.");
     }
 
     // ───────────────────────── Estado local ─────────────────────────
@@ -413,11 +439,12 @@ public sealed partial class NetworkRoom : IAsyncDisposable
     /// arquivo dela precisa estar em <see cref="BlobSource"/>: quem recebe pede os pedaços). As mensagens dos outros
     /// canais só vão para quem entende canais (1.3.0 ou mais nova). Retorna a mensagem (já no histórico) ou null se vazia.
     /// </summary>
-    public RoomChatMessage? SendChat(string text, ChatImage? image = null, string? channel = null)
+    public RoomChatMessage? SendChat(string text, ChatImage? image = null, string? channel = null, ChatFile? file = null)
     {
         text = RoomPacket.CleanText(text);
-        if (text.Length == 0 && image is null) return null;
-        if (text.Length == 0) text = RoomPacket.ImagePlaceholder;
+        if (file is { IsValid: false }) file = null;
+        if (text.Length == 0 && image is null && file is null) return null;
+        if (text.Length == 0) text = file?.Placeholder ?? RoomPacket.ImagePlaceholder;
         string? channelName = null;
         if (!RoomChannels.IsDefaultText(channel))
         {
@@ -425,7 +452,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
             if (channelName.Length == 0) return null;
         }
         var message = new RoomChatMessage(SelfId, _local.Name, BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)), DateTimeOffset.UtcNow, text,
-            Image: image, Channel: channelName);
+            Image: image, Channel: channelName, File: file);
         _history.Add(message);
         var packet = RoomPacket.Chat(SelfId, message);
         var peers = _peers.All().Where(p => message.InDefaultChannel || p.Presence.SupportsChannels).ToList();
@@ -454,6 +481,43 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         {
             _sensitivity = value;
             if (_voice is { } voice) voice.Sensitivity = value;
+        }
+    }
+
+    private double _micGainDb;
+    private volatile bool _autoGain = true;
+    private volatile bool _leveler = true;
+
+    /// <summary>(1.5.0) Volume do microfone em dB (−12 a +24). Vale na hora, inclusive com a voz ligada.</summary>
+    public double MicGainDb
+    {
+        get => _micGainDb;
+        set
+        {
+            _micGainDb = value;
+            if (_voice is { } voice) voice.MicGainDb = value;
+        }
+    }
+
+    /// <summary>(1.5.0) Ajuste automático do volume do microfone (leva a fala ao nível de uma chamada).</summary>
+    public bool AutoGain
+    {
+        get => _autoGain;
+        set
+        {
+            _autoGain = value;
+            if (_voice is { } voice) voice.AutoGain = value;
+        }
+    }
+
+    /// <summary>(1.5.0) Iguala o volume de quem chega baixo com o dos outros.</summary>
+    public bool Leveler
+    {
+        get => _leveler;
+        set
+        {
+            _leveler = value;
+            if (_voice is { } voice) voice.Leveler = value;
         }
     }
 
@@ -487,7 +551,14 @@ public sealed partial class NetworkRoom : IAsyncDisposable
             input ??= new MicrophoneInput(MicrophoneId);
             try
             {
-                engine = new VoiceEngine(input, _volume, _sensitivity, OutputEnabled, SpeakerId) { Muted = _muted, Deafened = _deafened };
+                engine = new VoiceEngine(input, _volume, _sensitivity, OutputEnabled, SpeakerId)
+                {
+                    Muted = _muted,
+                    Deafened = _deafened,
+                    MicGainDb = _micGainDb,
+                    AutoGain = _autoGain,
+                    Leveler = _leveler,
+                };
                 engine.PushToTalk.Enabled = _pushToTalk;
             }
             catch
@@ -623,7 +694,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         return new RoomPresence(local.Name, AppInfo.DisplayVersion, flags, local.LiveMode, local.Viewers, local.ControlPort,
             local.Live ? local.LiveAddress : null, Interlocked.Increment(ref _presenceSequence), local.Avatar,
             _inVoice && !defaultVoice ? channel : null, _createdChannels,
-            Keys.Active ? _exchange.PublicKey : null);
+            Keys.Active ? _exchange.PublicKey : null, IdentityKey);
     }
 
     private byte[] PresencePacket(bool wantsReply) => RoomPacket.Presence(SelfId, LocalPresence(wantsReply));
@@ -645,6 +716,9 @@ public sealed partial class NetworkRoom : IAsyncDisposable
             if (sent.Add(peer.EndPoint)) yield return peer.EndPoint;
         foreach (var manual in _manual.Keys)
             if (sent.Add(manual)) yield return manual;
+        // (1.5.0) Quem os outros do servidor disseram que também está nele (e ainda não respondeu).
+        foreach (var candidate in Candidates(now))
+            if (sent.Add(candidate)) yield return candidate;
     }
 
     private void SendPresence()
@@ -681,13 +755,32 @@ public sealed partial class NetworkRoom : IAsyncDisposable
 
     private void Send(ReadOnlySpan<byte> packet, IPEndPoint target)
     {
-        var socket = _socket;
-        if (socket is null) return;
         // Na sala privada, tudo vai lacrado com a chave dela (os pacotes de troca de chave já vêm lacrados com a antiga).
         var sealedPacket = packet.Length > RoomPacket.HeaderSize && packet[3] != (byte)RoomPacketType.Sealed ? Keys.Seal(packet, SelfId) : null;
-        try { socket.SendTo(sealedPacket is null ? packet : sealedPacket, SocketFlags.None, target); }
+        Transmit(sealedPacket is null ? packet : sealedPacket, target);
+    }
+
+    /// <summary>Põe o datagrama na rede: pela porta dividida (1.5.0) ou pela porta desta sala.</summary>
+    private void Transmit(ReadOnlySpan<byte> data, IPEndPoint target)
+    {
+        if (_hub is { } hub)
+        {
+            if (_attached) hub.Send(data, target);
+            return;
+        }
+        var socket = _socket;
+        if (socket is null) return;
+        try { socket.SendTo(data, SocketFlags.None, target); }
         catch (SocketException) { }
         catch (ObjectDisposedException) { }
+    }
+
+    /// <summary>(1.5.0) Um datagrama desta sala, entregue pelo <see cref="RoomHub"/> (na thread de recepção dele).</summary>
+    internal void Deliver(ReadOnlySpan<byte> data, IPEndPoint from)
+    {
+        if (_cancellation.IsCancellationRequested) return;
+        try { Handle(data, from); }
+        catch (Exception exception) { Log.Debug($"Pacote da sala descartado ({from}): {exception.Message}"); }
     }
 
     private async Task TickLoopAsync()
@@ -715,6 +808,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
                     foreach (var ask in asks)
                         if (_peers.Find(ask.Source) is { } source) SendTo(RoomPacket.BlobRequest(SelfId, ask.Id, ask.Missing), source);
                     if (_server is { } link) ServerTick(link, now);
+                    if (IsSpace) SpaceTick(now);
                     foreach (var id in failed)
                     {
                         Log.Info($"Sala da rede: ninguém mandou o arquivo {id}.");
@@ -790,9 +884,11 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         }
         if (_blocked.ContainsKey(sender)) return;
         var sealedNow = false;
+        var wasSealed = false;
         byte[]? opened = null;
         if (type == RoomPacketType.Sealed)
         {
+            wasSealed = true;
             // De uma sala privada: só abre com a chave desta sala (outra sala, ou chave velha demais, é ignorada).
             opened = Keys.Active ? Keys.Open(data, sender, now, out sealedNow) : null;
             if (opened is null || !RoomPacket.TryReadHeader(opened, out type, out _)) return;
@@ -856,6 +952,17 @@ public sealed partial class NetworkRoom : IAsyncDisposable
             case RoomPacketType.BlobChunk:
                 OnBlobChunk(sender, body, from, now);
                 break;
+            // (1.5.0) Servidores por rede: só lacrados com a chave do servidor.
+            case RoomPacketType.PeerList when wasSealed && IsSpace:
+                OnPeerList(sender, body, from, now);
+                break;
+            case RoomPacketType.ChannelTable when wasSealed && IsSpace:
+                OnChannelTable(sender, body, from, now);
+                break;
+            // (1.5.0) Chat privado: em qualquer sala (o conteúdo já vem cifrado só para este PC).
+            case RoomPacketType.Direct or RoomPacketType.DirectAck:
+                OnDirect(type, sender, body, now);
+                break;
         }
     }
 
@@ -884,6 +991,8 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         {
             Log.Info($"Sala da rede: {presence.Name} ({from.Address}) apareceu.");
             SendTo(PresencePacket(wantsReply: false), sender, from);
+            _candidates.TryRemove(from, out _);
+            if (IsSpace) OnSpacePeerJoined(peer);
             // Acabou de abrir: pede as mensagens recentes para os primeiros que aparecerem (pelo servidor, o histórico
             // vem do próprio servidor, que guarda o chat).
             if (_server is null && now - _started < TimeSpan.FromSeconds(45) && Interlocked.Increment(ref _historyRequests) <= 3)
