@@ -175,7 +175,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         var now = DateTimeOffset.UtcNow;
         var next = new RoomInvite(System.Security.Cryptography.RandomNumberGenerator.GetBytes(RoomKeys.SecretBytes), SelfId, Keys.Epoch + 1);
         var packets = new List<(Guid Id, byte[] Packet)>();
-        foreach (var peer in _peers.Snapshot())
+        foreach (var peer in _peers.All())
         {
             if (exclude.Contains(peer.Id) || peer.Presence.ExchangeKey is not { } key) continue;
             if (policy.ApprovedOnly && _roster is { } roster && !roster.Contains(peer.Id)) continue;
@@ -404,7 +404,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
     /// (1.4.1) Os endereços de quem está na sala direta (vazio pelo servidor): a transmissão também é anunciada direto
     /// para eles, porque o broadcast não chega em todo lugar (no Tailscale, por exemplo).
     /// </summary>
-    public IReadOnlyList<IPAddress> PeerAddresses => _server is not null ? [] : _peers.Snapshot().Select(p => p.EndPoint.Address).Distinct().ToArray();
+    public IReadOnlyList<IPAddress> PeerAddresses => _server is not null ? [] : _peers.All().Select(p => p.EndPoint.Address).Distinct().ToArray();
 
     // ───────────────────────── Chat ─────────────────────────
 
@@ -428,7 +428,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
             Image: image, Channel: channelName);
         _history.Add(message);
         var packet = RoomPacket.Chat(SelfId, message);
-        var peers = _peers.Snapshot().Where(p => message.InDefaultChannel || p.Presence.SupportsChannels).ToList();
+        var peers = _peers.All().Where(p => message.InDefaultChannel || p.Presence.SupportsChannels).ToList();
         SendToMany(packet, peers);
         _outbox.Add(message, packet, peers.Select(p => p.Id), DateTimeOffset.UtcNow);
         MessageReceived?.Invoke(message);
@@ -518,7 +518,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         if (_voice is { } voice)
         {
             // Quem ficou no canal antigo para de tocar aqui; quem está no novo começa no próximo quadro.
-            foreach (var peer in _peers.Snapshot()) voice.RemovePeer(peer.Id);
+            foreach (var peer in _peers.All()) voice.RemovePeer(peer.Id);
             PlayCue(VoiceCue.Join);
             Log.Info($"Voz da rede: mudou para o canal {name}.");
         }
@@ -596,7 +596,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         var channel = _voiceChannel;
         Span<byte> packet = stackalloc byte[RoomPacket.HeaderSize + 7 + current.Length + previous.Length];
         var length = RoomPacket.WriteVoice(packet, SelfId, sequence, level, current, previous);
-        var listeners = _peers.Snapshot().Where(peer => peer.Presence.InVoiceChannel(channel) && !peer.Presence.Deafened).ToList();
+        var listeners = _peers.All().Where(peer => peer.Presence.InVoiceChannel(channel) && !peer.Presence.Deafened).ToList();
         // Pelo servidor, um pacote só (com a lista de quem ouve) e o servidor manda para cada um.
         if (listeners.Count > 0) SendToMany(packet[..length], listeners);
     }
@@ -641,7 +641,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         foreach (var address in _broadcasts)
             if (sent.Add(new IPEndPoint(address, _port))) yield return new IPEndPoint(address, _port);
         // Direto também para quem já é conhecido ou foi adicionado pelo IP: funciona mesmo se o broadcast não chegar.
-        foreach (var peer in _peers.Snapshot())
+        foreach (var peer in _peers.All())
             if (sent.Add(peer.EndPoint)) yield return peer.EndPoint;
         foreach (var manual in _manual.Keys)
             if (sent.Add(manual)) yield return manual;

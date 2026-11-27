@@ -40,7 +40,8 @@ public sealed class ServerService
     private (ServerRole Role, string? Address, string? Password, string? HostedName, string? HostedPassword)? _applied;
     private int _version;
     private bool _started;
-    private DateTimeOffset _lastHostedChange;
+    private int _hostedChangePending;
+    private Task _stopping = Task.CompletedTask;
 
     public ServerService(Dispatcher dispatcher) => _dispatcher = dispatcher;
 
@@ -208,20 +209,32 @@ public sealed class ServerService
 
     private void OnHostedChanged()
     {
-        // Muita coisa muda junto (quem entra manda presença, transmissão e voz): a tela atualiza no máximo 2 vezes por segundo.
-        var now = DateTimeOffset.UtcNow;
-        if (now - _lastHostedChange < TimeSpan.FromMilliseconds(500)) return;
-        _lastHostedChange = now;
-        _dispatcher.BeginInvoke(() => HostedChanged?.Invoke(), DispatcherPriority.Background);
+        // Muita coisa muda junto (quem entra manda presença, transmissão e voz): a tela atualiza no máximo 2 vezes por
+        // segundo, e sempre chega a mostrar a última mudança (a que vem durante a espera entra na mesma atualização).
+        if (Interlocked.Exchange(ref _hostedChangePending, 1) == 1) return;
+        _ = Task.Delay(TimeSpan.FromMilliseconds(500)).ContinueWith(_ => _dispatcher.BeginInvoke(() =>
+        {
+            Volatile.Write(ref _hostedChangePending, 0);
+            HostedChanged?.Invoke();
+        }, DispatcherPriority.Background), TaskScheduler.Default);
     }
 
-    private async Task StopHostedAsync()
+    /// <summary>
+    /// Desliga o servidor deste PC. Se ele ainda está desligando, devolve essa espera: as portas só ficam livres no fim,
+    /// e um servidor novo (outra senha, outro nome) só abre depois disso.
+    /// </summary>
+    private Task StopHostedAsync()
     {
         var server = _hosted;
         _hosted = null;
         _hostedWith = null;
-        if (server is null) return;
+        if (server is null) return _stopping;
         server.Changed -= OnHostedChanged;
+        return _stopping = DisposeHostedAsync(server);
+    }
+
+    private async Task DisposeHostedAsync(ScreenFlowServer server)
+    {
         try { await server.DisposeAsync(); }
         catch (Exception exception) { Log.Warn($"Servidor deste PC: erro ao desligar: {exception.Message}"); }
         HostedChanged?.Invoke();

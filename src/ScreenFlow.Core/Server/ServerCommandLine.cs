@@ -128,7 +128,7 @@ public sealed record ServerCommandLine(ServerOptions Options, bool ShowHelp, boo
         }
         if (Limit(maxStreams, 1, 64, "--max-transmissoes", out var streams) is { } streamsError) return Fail(streamsError);
         if (Limit(maxViewers, 1, 256, "--max-assistindo", out var viewers) is { } viewersError) return Fail(viewersError);
-        if (Limit(maxMembers, 2, 512, "--max-pessoas", out var members) is { } membersError) return Fail(membersError);
+        if (Limit(maxMembers, 2, Room.RoomPeerTable.MaxPeers, "--max-pessoas", out var members) is { } membersError) return Fail(membersError);
         if (streams is { } s) options = options with { MaxStreams = s };
         if (viewers is { } v) options = options with { MaxViewersPerStream = v };
         if (members is { } m) options = options with { MaxMembers = m };

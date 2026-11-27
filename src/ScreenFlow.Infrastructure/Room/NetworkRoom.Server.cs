@@ -51,7 +51,7 @@ public sealed partial class NetworkRoom
             try { SendRelay(RoomPacket.Leave(SelfId), null, previous); } catch { }
         }
         _server = server is null ? null : new ServerLink(server, string.IsNullOrEmpty(password) ? null : password);
-        foreach (var peer in _peers.Snapshot())
+        foreach (var peer in _peers.All())
             if (_peers.Remove(peer.Id, out var gone) && gone is not null) OnPeerGone(gone, server is null ? "ficou no servidor" : "ficou na sala direta");
         _hosts.Clear();
         _historyAsked.Clear();

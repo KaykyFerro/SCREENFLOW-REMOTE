@@ -43,7 +43,7 @@ public sealed record ServerOptions
             RoomPort = Port(RoomPort, AppInfo.DefaultServerRoomPort),
             MaxStreams = Math.Clamp(MaxStreams, 1, 64),
             MaxViewersPerStream = Math.Clamp(MaxViewersPerStream, 1, 256),
-            MaxMembers = Math.Clamp(MaxMembers, 2, 512),
+            MaxMembers = Math.Clamp(MaxMembers, 2, Room.RoomPeerTable.MaxPeers),
         };
     }
 }

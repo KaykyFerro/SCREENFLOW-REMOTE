@@ -210,11 +210,20 @@ public class ServerCommandLineTests
     [InlineData("--endereco", "servidor")]
     [InlineData("--endereco", "fd7a::1")]
     [InlineData("--max-pessoas", "1")]
+    [InlineData("--max-pessoas", "513")]
     [InlineData("--desconhecida", "x")]
     public void ExplainsBadOptions(string option, string value)
     {
         var command = Parse([option, value]);
         Assert.NotNull(command.Error);
+    }
+
+    [Fact]
+    public void TheServerTakesNoMorePeopleThanTheRoomShows()
+    {
+        // Todo mundo que entrou no servidor aparece para todo mundo: o servidor não aceita mais gente do que a sala guarda.
+        Assert.Equal(Core.Room.RoomPeerTable.MaxPeers, new ServerOptions { MaxMembers = 100_000 }.Normalized().MaxMembers);
+        Assert.Null(Parse(["--max-pessoas", Core.Room.RoomPeerTable.MaxPeers.ToString()]).Error);
     }
 
     [Fact]

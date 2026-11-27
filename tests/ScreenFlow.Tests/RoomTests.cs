@@ -161,6 +161,16 @@ public class RoomStateTests
     }
 
     [Fact]
+    public void Peers_AllHasEveryoneThatTheSortedListHas()
+    {
+        var table = new RoomPeerTable();
+        foreach (var name in new[] { "Zé", "ana", "Bruno" })
+            table.Update(Guid.NewGuid(), new RoomPresence(name, "1.4.1", PresenceFlags.None), Radmin, DateTimeOffset.UtcNow);
+        Assert.Equal(["ana", "Bruno", "Zé"], table.Snapshot().Select(p => p.Presence.Name));
+        Assert.Equal(table.Snapshot().Select(p => p.Id).Order(), table.All().Select(p => p.Id).Order());
+    }
+
+    [Fact]
     public void Outbox_RetriesUntilAcknowledged()
     {
         var outbox = new ChatOutbox();

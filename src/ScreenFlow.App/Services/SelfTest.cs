@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -7,6 +8,7 @@ using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Protocol;
 using ScreenFlow.Core.Room;
+using ScreenFlow.Core.Server;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
@@ -19,13 +21,17 @@ namespace ScreenFlow.App.Services;
 /// <summary>
 /// ScreenFlow.exe --autoteste: abre uma festa de música de verdade no 127.0.0.1 (com um tom de teste no lugar do som do
 /// PC), conecta um viewer nela e confere se o áudio chega e é decodificado. Depois abre duas salas da rede no mesmo PC
-/// e confere presença, chat e voz entre elas. Por fim, se o PC tiver saída de som, confere a separação do som do PC por
-/// app. Usa portas próprias (47900 a 47902, 47910 e 47911).
+/// e confere presença, chat e voz entre elas. Depois (1.4.1) faz o mesmo pelo servidor ScreenFlow: um servidor dentro do
+/// app, a festa publicada nele e um viewer assistindo por ele, e duas salas conversando pelo servidor. Por fim, se o PC
+/// tiver saída de som, confere a separação do som do PC por app. Usa portas próprias (47900 a 47905 e 47910 a 47922).
 /// </summary>
 public static class SelfTest
 {
     private const int MediaPort = 47900, ControlPort = 47901, DiscoveryPort = 47902;
     private const int RoomPortA = 47910, RoomPortB = 47911, RoomPortC = 47912;
+    private const int ServerHostMediaPort = 47903, ServerHostControlPort = 47904, ServerHostDiscoveryPort = 47905;
+    private const int ServerRoomA = 47913, ServerRoomB = 47914;
+    private const int ServerControlPort = 47920, ServerMediaPort = 47921, ServerRoomPort = 47922;
 
     public static async Task<(bool Ok, string Report)> RunAsync()
     {
@@ -100,10 +106,12 @@ public static class SelfTest
         }
 
         var roomOk = await RoomTestAsync(Line);
+        var serverOk = await ServerTestAsync(Line);
         var soundOk = await PcSoundTestAsync(Line);
         var cropOk = CaptureCropTest(Line);
-        Line(ok && roomOk && soundOk && cropOk ? "PASSOU: tudo certo." : "FALHOU: veja as linhas acima.");
-        return (ok && roomOk && soundOk && cropOk, report.ToString());
+        var all = ok && roomOk && serverOk && soundOk && cropOk;
+        Line(all ? "PASSOU: tudo certo." : "FALHOU: veja as linhas acima.");
+        return (all, report.ToString());
     }
 
     /// <summary>
@@ -628,6 +636,136 @@ public static class SelfTest
         {
             _capture.DataAvailable -= OnData;
             try { _capture.Dispose(); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Servidor ScreenFlow (1.4.1), tudo no 127.0.0.1 e com senha: um servidor como o de "Este PC é o servidor", a festa de
+    /// música publicada nele pela transmissão de verdade (com o tom de teste) e um viewer assistindo pelo servidor, com a
+    /// senha dele. Depois, duas salas pelo servidor: presença, chat e um canal criado, renomeado e apagado.
+    /// </summary>
+    private static async Task<bool> ServerTestAsync(Action<string> line)
+    {
+        line("Servidor ScreenFlow: servidor, festa e viewer no 127.0.0.1, com senha.");
+        const string password = "senha do autoteste";
+        var folder = Path.Combine(Path.GetTempPath(), $"screenflow-autoteste-servidor-{Guid.NewGuid():N}");
+        var server = new ScreenFlowServer(new ServerOptions
+        {
+            Name = "Autoteste",
+            BindAddress = IPAddress.Loopback,
+            ControlPort = ServerControlPort,
+            MediaPort = ServerMediaPort,
+            RoomPort = ServerRoomPort,
+            Password = password,
+            DataDirectory = folder,
+        });
+        HostSession? host = null;
+        ViewerSession? viewer = null;
+        try
+        {
+            server.Start();
+            var stream = Guid.NewGuid();
+            host = new HostSession(new HostOptions(
+                "Autoteste servidor", IPAddress.Loopback, IPAddress.Loopback, ServerHostMediaPort, ServerHostControlPort, ServerHostDiscoveryPort,
+                null, false, 4,
+                new CaptureTarget(CaptureKind.Monitor, string.Empty, "Festa de música", 0, 0, 0), null, Resolution.P720, 30, 0,
+                null, null, [],
+                true, 160, false, 10, 0,
+                StreamMode.AudioOnly, 256, profile => new ToneAudioSource(profile),
+                Server: new ServerPublish(IPAddress.Loopback.ToString(), ServerControlPort, password, stream)));
+            host.ServerChanged += () => line($"host: {host.ServerStatus}");
+            await Task.Run(host.Start);
+            if (!await WaitAsync(() => host.ServerState == ServerLinkState.Live, 10))
+            {
+                line($"FALHOU: a festa não chegou no servidor em 10 segundos ({host.ServerState}: {host.ServerStatus}).");
+                return false;
+            }
+
+            viewer = new ViewerSession(new ViewerOptions("127.0.0.1", ServerControlPort, "Autoteste pelo servidor", password, 0.8f, [], 1280, 720, 60,
+                AudioOutput: false, StreamId: stream.ToString("N"), ViaServer: true));
+            ViewerStatistics? last = null;
+            viewer.StateChanged += (state, message) => line($"viewer pelo servidor: {state} · {message}");
+            viewer.StatisticsUpdated += stats => last = stats;
+            viewer.Start();
+            var heard = await WaitAsync(() => viewer.State == ConnectionState.Connected && viewer.AudioMeter is { Updates: > 20, Level: > 0.01f } && last is { AudioKbps: > 0 }, 15);
+            var audience = await WaitAsync(() => host.WatchingCount == 1, 5);
+            var relayed = server.Streams.Streams.FirstOrDefault(s => s.Id == stream);
+            line($"Pelo servidor: modo {viewer.Config?.Mode}, {last?.AudioKbps ?? 0:0} kbps, medidor {viewer.AudioMeter?.Updates ?? 0} blocos; " +
+                 $"quem transmite vê {host.WatchingCount} pessoa(s); o servidor tem {relayed?.Viewers ?? 0} assistindo.");
+            var streamOk = heard && audience && relayed is { Online: true, Viewers: 1 } && viewer.Config?.Mode == StreamMode.AudioOnly;
+            line(streamOk ? "PASSOU: a festa foi para o servidor e chegou em quem assiste por ele, com a senha do servidor."
+                : "FALHOU: o som não chegou pelo servidor.");
+
+            var roomOk = await ServerRoomTestAsync(password, line);
+            line(server.Describe());
+            return streamOk && roomOk;
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Autoteste do servidor falhou", exception);
+            line($"FALHOU com erro no servidor: {exception.GetType().Name}: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            if (viewer is not null) await viewer.DisposeAsync();
+            if (host is not null) await host.DisposeAsync();
+            await server.DisposeAsync();
+            try { Directory.Delete(folder, recursive: true); } catch { }
+            line("Servidor desligado.");
+        }
+    }
+
+    /// <summary>Duas salas pelo servidor do autoteste: presença, chat e um canal criado, renomeado e apagado por A.</summary>
+    private static async Task<bool> ServerRoomTestAsync(string password, Action<string> line)
+    {
+        var endpoint = new IPEndPoint(IPAddress.Loopback, ServerRoomPort);
+        var a = new NetworkRoom(Guid.NewGuid(), ServerRoomA, new RoomLocalState("Autoteste A")) { BroadcastTargets = () => [], OutputEnabled = false };
+        var b = new NetworkRoom(Guid.NewGuid(), ServerRoomB, new RoomLocalState("Autoteste B")) { BroadcastTargets = () => [], OutputEnabled = false };
+        try
+        {
+            a.Start();
+            b.Start();
+            if (!a.IsRunning || !b.IsRunning)
+            {
+                line($"FALHOU: a sala não abriu ({a.Error ?? b.Error}).");
+                return false;
+            }
+            a.UseServer(endpoint, password);
+            b.UseServer(endpoint, password);
+            if (!await WaitAsync(() => a.ServerStatus?.State == RoomServerState.Connected && b.ServerStatus?.State == RoomServerState.Connected
+                                       && a.Peers.Count == 1 && b.Peers.Count == 1, 10))
+            {
+                line($"FALHOU: as salas não se encontraram pelo servidor em 10 segundos ({a.ServerStatus?.Text} / {b.ServerStatus?.Text}).");
+                return false;
+            }
+            line($"Sala pelo servidor: A vê \"{a.Peers[0].Presence.Name}\" e B vê \"{b.Peers[0].Presence.Name}\".");
+
+            var received = new TaskCompletionSource<RoomChatMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            b.MessageReceived += message =>
+            {
+                if (message.AuthorId == a.SelfId && !message.History) received.TrySetResult(message);
+            };
+            const string text = "Olá pelo servidor! ação, pão, 🎮";
+            a.SendChat(text);
+            var chatOk = await Task.WhenAny(received.Task, Task.Delay(5000)) == received.Task && received.Task.Result.Text == text;
+            line(chatOk ? "Chat pelo servidor: B recebeu a mensagem de A." : "FALHOU: a mensagem não chegou pelo servidor.");
+
+            bool Has(NetworkRoom room, string name) => room.ServerChannels.Any(c => c.Kind == RoomChannelKind.Text && c.Name == name);
+            a.ChangeServerChannel(RoomChannelOperation.Create, RoomChannelKind.Text, "autoteste");
+            var created = await WaitAsync(() => Has(b, "autoteste"), 5);
+            a.ChangeServerChannel(RoomChannelOperation.Rename, RoomChannelKind.Text, "autoteste", "autoteste-novo");
+            var renamed = await WaitAsync(() => Has(b, "autoteste-novo") && !Has(b, "autoteste"), 5);
+            a.ChangeServerChannel(RoomChannelOperation.Delete, RoomChannelKind.Text, "autoteste-novo");
+            var deleted = await WaitAsync(() => !Has(b, "autoteste-novo"), 5);
+            var channelsOk = created && renamed && deleted;
+            line(channelsOk ? "Canais do servidor: B viu A criar, renomear e apagar um canal." : $"FALHOU: canais do servidor (criou {created}, renomeou {renamed}, apagou {deleted}).");
+            return chatOk && channelsOk;
+        }
+        finally
+        {
+            await a.DisposeAsync();
+            await b.DisposeAsync();
         }
     }
 
