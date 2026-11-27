@@ -189,16 +189,6 @@ public static class ImageTools
         throw new InvalidDataException("Não deu para deixar a imagem pequena o bastante para mandar.");
     }
 
-    /// <summary>Grava numa pasta temporária, com a extensão certa, para abrir no visualizador de fotos do Windows.</summary>
-    public static string TempFile(string id, byte[] data)
-    {
-        var folder = Path.Combine(Path.GetTempPath(), "ScreenFlow");
-        Directory.CreateDirectory(folder);
-        var path = Path.Combine(folder, $"imagem-{id[..Math.Min(12, id.Length)]}{Extension(data)}");
-        if (!File.Exists(path)) File.WriteAllBytes(path, data);
-        return path;
-    }
-
     // ───────────────────────── Ajudantes ─────────────────────────
 
     /// <summary>Tamanho e orientação (EXIF) sem abrir os pixels.</summary>

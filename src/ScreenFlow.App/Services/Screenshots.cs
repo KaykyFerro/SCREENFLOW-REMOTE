@@ -129,6 +129,28 @@ public static class Screenshots
             AppServices.Room.LoadDemo(inVoice: true, unread: 0);
             return Go(window, window.ChatPage, 500);
         });
+        ChatImageViewerWindow? imageViewer = null;
+        await Shot("31-chat-visualizador-de-imagens.png", () =>
+        {
+            var first = AppServices.Room.Messages.First(row => row.Image is not null && row.ImageState == ChatImageState.Ready);
+            var second = new ChatRow(first.Message with { MessageId = first.MessageId + 1, Time = first.Time.AddMinutes(1), Text = "Outra imagem deste canal" }, first.IsMine);
+            var third = new ChatRow(first.Message with { MessageId = first.MessageId + 2, Time = first.Time.AddMinutes(2), Text = "Mais uma imagem deste canal" }, first.IsMine);
+            imageViewer = new ChatImageViewerWindow([first, second, third], 1)
+            {
+                Owner = window,
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Left = -30000,
+                Top = -30000,
+                ShowActivated = false,
+                ShowInTaskbar = false,
+            };
+            AllowAnySize(imageViewer);
+            imageViewer.Show();
+            Resize(imageViewer, new Size(1000, 640));
+            imageViewer.SetDemoView(1.25);
+            return Task.Delay(500);
+        }, () => WindowRoot(imageViewer!));
+        imageViewer?.Close();
         await Shot("16-chat-tema-claro.png", async () =>
         {
             ThemeManager.Apply(AppTheme.Light);

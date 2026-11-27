@@ -472,20 +472,22 @@ public partial class ChatPage : UserControl, IShellPage
         if (RowOf(sender) is { } row) OpenPicture(row);
     }
 
-    /// <summary>Abre no visualizador de fotos do Windows (com zoom, tela cheia e o resto).</summary>
+    /// <summary>Abre a imagem no visualizador do ScreenFlow e permite passar pelas imagens deste canal.</summary>
     private void OpenPicture(ChatRow row)
     {
-        if (row.Image is not { } image || AppServices.Blobs.Get(image.Id) is not { } data)
+        var images = AppServices.Room.Messages
+            .Where(candidate => candidate.ImageState == ChatImageState.Ready
+                && candidate.Image is { } image
+                && AppServices.Blobs.Get(image.Id) is { Length: > 0 })
+            .ToList();
+        var index = images.IndexOf(row);
+        if (index < 0)
         {
             _shell.Toast("A imagem ainda não chegou.", ToastKind.Warning);
             return;
         }
-        try { Process.Start(new ProcessStartInfo(ImageTools.TempFile(image.Id, data)) { UseShellExecute = true }); }
-        catch (Exception exception)
-        {
-            Log.Warn($"Não abriu a imagem: {exception.Message}");
-            _shell.Toast("O Windows não abriu a imagem. Use \"Salvar como…\" no botão direito.", ToastKind.Warning);
-        }
+        var viewer = new ChatImageViewerWindow(images, index) { Owner = Window.GetWindow(this) };
+        viewer.ShowDialog();
     }
 
     private void SavePicture_Click(object sender, RoutedEventArgs e)

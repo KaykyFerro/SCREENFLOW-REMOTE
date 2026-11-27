@@ -21,6 +21,7 @@ public partial class UpdatesPage : UserControl, IShellPage
         "Guardar o chat no Google Drive (ou em qualquer pasta): as últimas conversas voltam quando o app abre.",
         "Configurações em abas, e quem está na sua rede entra na transmissão direto, sem pedir permissão.",
         "A barra do player não muda mais de tamanho, as telas foram revisadas para janelas pequenas e o app ficou mais leve.",
+        "As imagens do chat abrem dentro do ScreenFlow: zoom, arraste, setas entre imagens, copiar e salvar.",
     ];
 
     private readonly MainWindow _shell;

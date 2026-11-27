@@ -267,7 +267,7 @@
                                                   ToolTip="{Binding ImageInfo}" MouseLeftButtonUp="Picture_MouseLeftButtonUp">
                                                 <Grid.ContextMenu>
                                                     <ContextMenu>
-                                                        <MenuItem Header="Abrir a imagem" Click="OpenPicture_Click"/>
+                                                        <MenuItem Header="Abrir no visualizador" Click="OpenPicture_Click"/>
                                                         <MenuItem Header="Salvar como…" Click="SavePicture_Click"/>
                                                         <MenuItem Header="Copiar a imagem" Click="CopyPicture_Click"/>
                                                     </ContextMenu>
