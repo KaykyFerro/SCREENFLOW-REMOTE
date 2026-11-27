@@ -24,19 +24,23 @@ public sealed record RoomChannel(RoomChannelKind Kind, string Name)
 }
 
 /// <summary>
-/// Os canais da sala. Todo mundo tem os mesmos canais padrão; quem cria um canal anuncia na presença e ele aparece para
-/// todo mundo enquanto essa pessoa está na sala (ou enquanto tem alguém na voz dele). As versões 1.1 e 1.2 só conhecem
-/// o chat "geral" e a voz "Geral": continuam conversando com quem está neles.
+/// Os canais da sala. Toda sala tem só o chat "geral" e a voz "Geral" (1.4.1: os outros canais prontos saíram, e cada
+/// grupo monta os seus). Quem cria um canal anuncia na presença e ele aparece para todo mundo enquanto essa pessoa está
+/// na sala. Num servidor ScreenFlow, os canais ficam guardados no servidor e qualquer pessoa cria, renomeia e apaga.
+/// As versões 1.1 e 1.2 só conhecem o chat "geral" e a voz "Geral": continuam conversando com quem está neles.
 /// </summary>
 public static class RoomChannels
 {
     public const int MaxNameLength = 24;
 
     /// <summary>Canais que cada PC pode criar (a presença tem espaço limitado).</summary>
-    public const int MaxPerPerson = 6;
+    public const int MaxPerPerson = 12;
+
+    /// <summary>Canais guardados num servidor ScreenFlow (1.4.1), dos dois tipos juntos.</summary>
+    public const int MaxPerServer = 40;
 
     /// <summary>Canais mostrados de cada tipo, no máximo (contra uma enxurrada de canais de alguém).</summary>
-    public const int MaxListed = 40;
+    public const int MaxListed = 60;
 
     public const string DefaultTextName = "geral";
     public const string DefaultVoiceName = "Geral";
@@ -44,16 +48,8 @@ public static class RoomChannels
     public static readonly RoomChannel DefaultText = new(RoomChannelKind.Text, DefaultTextName);
     public static readonly RoomChannel DefaultVoice = new(RoomChannelKind.Voice, DefaultVoiceName);
 
-    /// <summary>Os canais que toda sala tem.</summary>
-    public static readonly IReadOnlyList<RoomChannel> Defaults =
-    [
-        DefaultText,
-        new(RoomChannelKind.Text, "música"),
-        new(RoomChannelKind.Text, "prints-e-clipes"),
-        DefaultVoice,
-        new(RoomChannelKind.Voice, "Jogando"),
-        new(RoomChannelKind.Voice, "Música"),
-    ];
+    /// <summary>Os canais que toda sala tem: o chat "geral" e a voz "Geral" (os das versões antigas).</summary>
+    public static readonly IReadOnlyList<RoomChannel> Defaults = [DefaultText, DefaultVoice];
 
     /// <summary>
     /// Nome limpo: sem caracteres de controle, até <see cref="MaxNameLength"/> letras. Canais de texto ficam como no

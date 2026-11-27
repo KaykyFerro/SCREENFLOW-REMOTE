@@ -13,6 +13,12 @@ namespace ScreenFlow.Core.Protocol;
 /// <see cref="MediaCommandMessage"/> e <see cref="AudioAppsRequestMessage"/>. Um tipo desconhecido vira
 /// <see cref="UnknownControlMessage"/> e é ignorado (as versões até a 1.1.1 derrubavam a conexão).
 /// </summary>
+/// <remarks>
+/// Servidor (1.4.1): quem transmite abre a conexão com o servidor e manda <see cref="PublishMessage"/>; o servidor confere a
+/// senha (Challenge/Auth) e responde <see cref="PublishAcceptedMessage"/>. Daí os papéis se invertem na mesma conexão: o
+/// servidor faz o papel de quem assiste (Hello → Challenge → Auth → Welcome) e conta quem está assistindo por ele com
+/// <see cref="AudienceMessage"/>. Quem assiste pelo servidor manda o <see cref="HelloMessage.StreamId"/> da transmissão.
+/// </remarks>
 [JsonPolymorphic(TypeDiscriminatorPropertyName = "t")]
 [JsonDerivedType(typeof(HelloMessage), "hello")]
 [JsonDerivedType(typeof(ChallengeMessage), "challenge")]
@@ -36,6 +42,9 @@ namespace ScreenFlow.Core.Protocol;
 [JsonDerivedType(typeof(MediaCommandMessage), "mediacmd")]
 [JsonDerivedType(typeof(AudioAppsRequestMessage), "setapps")]
 [JsonDerivedType(typeof(MediaCommandResultMessage), "mediaresult")]
+[JsonDerivedType(typeof(PublishMessage), "publish")]
+[JsonDerivedType(typeof(PublishAcceptedMessage), "published")]
+[JsonDerivedType(typeof(AudienceMessage), "audience")]
 public abstract record ControlMessage;
 
 /// <summary>Uma mensagem de um tipo que esta versão não conhece (de uma versão mais nova). Não é enviada: só lida e ignorada.</summary>
@@ -51,10 +60,34 @@ public sealed record HelloMessage(
     int MaxFps,
     int UdpPort,
     string PublicKey,
-    string[]? Features = null) : ControlMessage
+    string[]? Features = null,
+    string? StreamId = null) : ControlMessage
 {
     public bool Supports(string feature) => Features is not null && Features.Contains(feature, StringComparer.OrdinalIgnoreCase);
 }
+
+/// <summary>
+/// (1.4.1) Quem transmite se apresenta ao servidor. <paramref name="StreamId"/> é o id da pessoa na sala, então quem vê
+/// a pessoa ao vivo na sala sabe qual transmissão pedir ao servidor.
+/// </summary>
+public sealed record PublishMessage(
+    int Protocol,
+    string AppVersion,
+    string HostName,
+    string StreamId,
+    string PublicKey,
+    StreamMode Mode,
+    bool CameraOverlay = false,
+    bool AudioEnabled = true) : ControlMessage;
+
+/// <summary>(1.4.1) O servidor aceitou a transmissão. A seguir ele manda o Hello, no papel de quem assiste.</summary>
+public sealed record PublishAcceptedMessage(string ServerName, string ServerVersion) : ControlMessage;
+
+/// <summary>
+/// (1.4.1) Do servidor para quem transmite: quantas pessoas estão assistindo por ele, os nomes, e o que todas conseguem
+/// decodificar (o codec e o tamanho do vídeo valem para todo mundo). Com 0 pessoas, quem transmite para de capturar.
+/// </summary>
+public sealed record AudienceMessage(int Viewers, string[] Names, VideoCodec[] Decoders, int MaxWidth, int MaxHeight, int MaxFps) : ControlMessage;
 
 public sealed record ChallengeMessage(string HostName, string PublicKey, string Nonce, bool PinRequired) : ControlMessage;
 
@@ -183,13 +216,16 @@ public sealed record AudioAppsMessage(RemoteAudioApp[] Apps) : ControlMessage;
 public sealed record RemoteAudioApp(string Exe, string Name, bool Excluded, bool Playing);
 
 /// <summary>Quem assiste pede outra qualidade. Vale para a transmissão toda (um encoder só para todo mundo).</summary>
-public sealed record QualityRequestMessage(string Resolution, int Fps, bool Adaptive) : ControlMessage;
+/// <param name="From">(1.4.1) Quem pediu, quando o pedido passa pelo servidor (o host vê o nome da pessoa, não o do servidor).</param>
+public sealed record QualityRequestMessage(string Resolution, int Fps, bool Adaptive, string? From = null) : ControlMessage;
 
 /// <summary>Quem assiste pede voltar, pausar ou tocar, pular ou ir para um ponto da música ou do vídeo.</summary>
 /// <param name="RequestId">(1.4.0) Número do pedido, para a resposta (<see cref="MediaCommandResultMessage"/>) e para o host ignorar repetidos.</param>
 /// <param name="SessionKey">(1.4.0) A <see cref="MediaStateMessage.SessionKey"/> que quem assiste estava vendo.</param>
 /// <param name="DeltaSeconds">(1.4.0) Só em <see cref="SkipBy"/>: quanto andar (negativo volta).</param>
-public sealed record MediaCommandMessage(string Command, double PositionSeconds = 0, long RequestId = 0, string? SessionKey = null, double DeltaSeconds = 0) : ControlMessage
+/// <param name="From">(1.4.1) Quem pediu, quando o pedido passa pelo servidor.</param>
+public sealed record MediaCommandMessage(string Command, double PositionSeconds = 0, long RequestId = 0, string? SessionKey = null, double DeltaSeconds = 0,
+    string? From = null) : ControlMessage
 {
     public const string PlayPause = "playpause";
     public const string Previous = "previous";
@@ -209,7 +245,8 @@ public sealed record MediaCommandMessage(string Command, double PositionSeconds 
 public sealed record MediaCommandResultMessage(long RequestId, string Command, string Outcome, double PositionSeconds = 0) : ControlMessage;
 
 /// <summary>Quem assiste escolhe os apps (da lista que o host mandou) que ficam fora do som da transmissão.</summary>
-public sealed record AudioAppsRequestMessage(string[] Excluded) : ControlMessage;
+/// <param name="From">(1.4.1) Quem pediu, quando o pedido passa pelo servidor.</param>
+public sealed record AudioAppsRequestMessage(string[] Excluded, string? From = null) : ControlMessage;
 
 public static class ControlFraming
 {

@@ -24,7 +24,16 @@ namespace ScreenFlow.Core.Room;
 /// (<see cref="RoomSeal"/>); <see cref="Rekey"/> (a chave nova, cifrada para uma pessoa) e <see cref="Roster"/> (quem o
 /// dono aprovou) só valem dentro de um pacote lacrado.
 /// </remarks>
-public enum RoomPacketType : byte { Presence = 1, Leave = 2, Chat = 3, ChatAck = 4, Voice = 5, HistoryRequest = 6, BlobRequest = 7, BlobChunk = 8, Sealed = 9, Rekey = 10, Roster = 11 }
+/// <remarks>
+/// 1.4.1: servidor. <see cref="Relay"/> leva qualquer outro pacote (aberto ou lacrado) para o servidor repassar a uma
+/// lista de pessoas ou a todo mundo; <see cref="ServerInfo"/> é a sondagem e a resposta do servidor (nome, senha, quantos
+/// estão nele); <see cref="ChannelOp"/> cria, renomeia ou apaga um canal do servidor. Só o servidor entende esses tipos.
+/// </remarks>
+public enum RoomPacketType : byte
+{
+    Presence = 1, Leave = 2, Chat = 3, ChatAck = 4, Voice = 5, HistoryRequest = 6, BlobRequest = 7, BlobChunk = 8, Sealed = 9, Rekey = 10, Roster = 11,
+    Relay = 12, ServerInfo = 13, ChannelOp = 14,
+}
 
 [Flags]
 public enum PresenceFlags : ushort
@@ -45,6 +54,10 @@ public enum PresenceFlags : ushort
     Channels = 512,
     /// <summary>Na voz, num canal que não é o "Geral" (o nome vai no campo do canal de voz).</summary>
     InVoiceChannel = 1024,
+    /// <summary>(1.4.1) É um servidor ScreenFlow: os canais dele são os do servidor, e ele não aparece entre as pessoas.</summary>
+    Server = 2048,
+    /// <summary>(1.4.1) Ao vivo pelo servidor: quem quiser assistir entra no servidor e pede a transmissão pelo id desta pessoa.</summary>
+    ViaServer = 4096,
 }
 
 /// <summary>Um arquivo da sala (a foto do perfil ou uma imagem do chat): o id (hash do conteúdo) e o tamanho em bytes.</summary>
@@ -98,6 +111,12 @@ public sealed record RoomPresence(
     public bool Live => Flags.HasFlag(PresenceFlags.Live);
     public bool Watching => Flags.HasFlag(PresenceFlags.Watching);
 
+    /// <summary>É um servidor ScreenFlow (1.4.1), não uma pessoa.</summary>
+    public bool IsServer => Flags.HasFlag(PresenceFlags.Server);
+
+    /// <summary>Ao vivo pelo servidor (1.4.1): assistir é pedir ao servidor a transmissão com o id desta pessoa.</summary>
+    public bool LiveViaServer => Live && Flags.HasFlag(PresenceFlags.ViaServer);
+
     /// <summary>O que está ao vivo, em palavras ("tela, câmera e áudio"). Vazio se não está transmitindo.</summary>
     public string LiveSummary => Live ? StreamModes.Summary(LiveMode, Flags.HasFlag(PresenceFlags.LiveAudio), Flags.HasFlag(PresenceFlags.LiveCamera)) : string.Empty;
 }
@@ -120,7 +139,7 @@ public sealed record RoomChatMessage(Guid AuthorId, string AuthorName, ulong Mes
     public bool InDefaultChannel => RoomChannels.IsDefaultText(Channel);
 }
 
-public static class RoomPacket
+public static partial class RoomPacket
 {
     public const ushort Magic = 0x5352; // "SR"
     public const byte Version = 1;
@@ -151,8 +170,14 @@ public static class RoomPacket
         if (data.Length < HeaderSize) return false;
         if (BinaryPrimitives.ReadUInt16BigEndian(data) != Magic || data[2] != Version) return false;
         type = (RoomPacketType)data[3];
-        if (type is < RoomPacketType.Presence or > RoomPacketType.Roster) return false;
-        if (data.Length > (type == RoomPacketType.Sealed ? RoomSeal.MaximumSealedSize : MaximumSize)) return false;
+        if (type is < RoomPacketType.Presence or > RoomPacketType.ChannelOp) return false;
+        var limit = type switch
+        {
+            RoomPacketType.Sealed => RoomSeal.MaximumSealedSize,
+            RoomPacketType.Relay => MaximumRelaySize,
+            _ => MaximumSize,
+        };
+        if (data.Length > limit) return false;
         sender = new Guid(data.Slice(4, 16), bigEndian: true);
         return sender != Guid.Empty;
     }
@@ -271,11 +296,13 @@ public static class RoomPacket
             buffer[offset++] = (byte)exchangeBytes.Length;
             exchangeBytes.CopyTo(buffer, offset); offset += exchangeBytes.Length;
         }
-        // Um campo por canal criado (cada campo tem no máximo 255 bytes).
-        foreach (var channel in RoomChannels.Normalize(presence.Channels))
+        // Um campo por canal criado (cada campo tem no máximo 255 bytes). Os que não cabem no pacote ficam de fora.
+        var maxChannels = presence.IsServer ? RoomChannels.MaxPerServer : RoomChannels.MaxPerPerson;
+        foreach (var channel in RoomChannels.Normalize(presence.Channels, maxChannels))
         {
-            buffer[offset++] = CreatedChannelField;
             var bytes = Encoding.UTF8.GetBytes(TrimToBytes(channel.Name, MaxChannelBytes));
+            if (offset + 3 + bytes.Length > MaximumSize) break;
+            buffer[offset++] = CreatedChannelField;
             buffer[offset++] = (byte)(bytes.Length + 1);
             buffer[offset++] = (byte)channel.Kind;
             bytes.CopyTo(buffer, offset); offset += bytes.Length;
@@ -305,6 +332,7 @@ public static class RoomPacket
         string? voiceChannel = null;
         List<RoomChannel>? created = null;
         string? exchangeKey = null;
+        var maxChannels = flags.HasFlag(PresenceFlags.Server) ? RoomChannels.MaxPerServer : RoomChannels.MaxPerPerson;
         while (offset + 2 <= body.Length)
         {
             var field = body[offset];
@@ -327,7 +355,7 @@ public static class RoomPacket
             {
                 exchangeKey = Convert.ToBase64String(value);
             }
-            else if (field == CreatedChannelField && length > 1 && (created?.Count ?? 0) < RoomChannels.MaxPerPerson
+            else if (field == CreatedChannelField && length > 1 && (created?.Count ?? 0) < maxChannels
                      && RoomChannels.Create((RoomChannelKind)value[0], Encoding.UTF8.GetString(value[1..])) is { IsDefault: false } channel)
             {
                 created ??= [];
