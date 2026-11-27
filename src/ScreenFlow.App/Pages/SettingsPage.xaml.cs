@@ -62,6 +62,8 @@ public partial class SettingsPage : UserControl, IShellPage
         ThemeCombo.Fill([new Choice<AppTheme>(AppTheme.Dark, "Escuro"), new Choice<AppTheme>(AppTheme.Light, "Claro")]);
         _micTimer.Tick += (_, _) => UpdateMicMeter();
         AppServices.Room.ArchiveChanged += UpdateArchiveCard;
+        AppServices.Room.PrivateRoomChanged += UpdatePrivateRoomCard;
+        AppServices.Room.Changed += () => { if (_tab == SettingsTab.Voice && AppServices.Room.IsPrivateRoomOwner) UpdatePrivateRoomCard(); };
         Unloaded += (_, _) =>
         {
             StopMicTest();
@@ -160,6 +162,7 @@ public partial class SettingsPage : UserControl, IShellPage
         VoiceSoundsToggle.IsChecked = s.VoiceSounds;
         UpdateVoiceLabels();
         UpdateArchiveCard();
+        UpdatePrivateRoomCard();
         if (AppServices.DemoMode) ShowDemoMeter();
         SavedText.Text = string.Empty;
         AutoResult.Text = s.LastAutoConfig is { } when
@@ -517,6 +520,119 @@ public partial class SettingsPage : UserControl, IShellPage
     // ───────────────────────── Chat guardado (Google Drive) ─────────────────────────
 
     /// <summary>Mostra se o chat está sendo guardado, onde, ou por que não está.</summary>
+    // ───────────────────────── Sala privada e moderação (1.4.0) ─────────────────────────
+
+    private void UpdatePrivateRoomCard()
+    {
+        var room = AppServices.Room;
+        var on = room.InPrivateRoom;
+        var owner = room.IsPrivateRoomOwner;
+        PrivateOffPanel.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
+        PrivateOnPanel.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        PrivateOwnerPanel.Visibility = owner ? Visibility.Visible : Visibility.Collapsed;
+        PrivateRotateButton.Visibility = owner ? Visibility.Visible : Visibility.Collapsed;
+        PrivateDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, on ? "Accent" : "TextSubtle");
+        PrivateStatus.Text = !on ? "Sala aberta: todo mundo da rede do Radmin com o ScreenFlow vê a sala."
+            : owner ? "Sala privada ativa. Você é o dono: mande o convite para quem pode entrar."
+            : "Sala privada ativa. Só quem tem o convite vê e ouve a sala.";
+        PrivateFingerprint.Text = on && room.PrivateRoomFingerprint is { } fingerprint
+            ? $"Código de conferência da chave: {fingerprint}. Todo mundo na mesma sala vê o mesmo código."
+            : string.Empty;
+        PrivateFingerprint.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        PrivateCodeBox.Text = room.PrivateRoomCode ?? string.Empty;
+        PrivateApprovedOnlyToggle.IsChecked = AppServices.Settings.Current.PrivateRoomApprovedOnly;
+
+        if (owner)
+        {
+            var pending = room.PrivateRoomPending;
+            PrivatePendingTitle.Visibility = pending.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            FillPeople(PrivatePendingList, pending.Select(p => (p.Key, p.Value)), "Aprovar", (id, _) => room.ApprovePrivateMember(id));
+            var approvedOnly = AppServices.Settings.Current.PrivateRoomApprovedOnly;
+            var approved = AppServices.Settings.Current.PrivateRoomApproved;
+            var members = room.People.Where(p => p.Id != room.SelfId && !pending.ContainsKey(p.Id))
+                .Select(p => (p.Id, approvedOnly && !approved.Contains(p.Id.ToString("N")) ? $"{p.Name} (sem aprovação)" : p.Name));
+            FillPeople(PrivateMembersList, members, "Remover", (id, name) =>
+            {
+                if (room.RemovePrivateMember(id, name)) _shell.Toast($"{name} saiu da sala privada e a chave foi trocada para os outros.", ToastKind.Success);
+            }, "Ninguém além de você por enquanto.");
+        }
+
+        var blocked = room.Blocked;
+        BlockedTitle.Visibility = blocked.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        FillPeople(BlockedList, blocked, "Desbloquear", (id, name) => room.SetBlocked(id, name, false));
+    }
+
+    /// <summary>Uma linha por pessoa, com o nome e um botão.</summary>
+    private static void FillPeople(StackPanel list, IEnumerable<(Guid Id, string Name)> people, string action, Action<Guid, string> onClick, string? empty = null)
+    {
+        list.Children.Clear();
+        foreach (var (id, name) in people)
+        {
+            var button = new Button { Content = action, MinHeight = 30, Padding = new Thickness(12, 0, 12, 0), Margin = new Thickness(8, 0, 0, 0) };
+            button.SetResourceReference(StyleProperty, "GhostButton");
+            System.Windows.Automation.AutomationProperties.SetName(button, $"{action} {name}");
+            button.Click += (_, _) => onClick(id, name);
+            var row = new DockPanel { Margin = new Thickness(0, 2, 0, 2) };
+            DockPanel.SetDock(button, Dock.Right);
+            row.Children.Add(button);
+            row.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
+            list.Children.Add(row);
+        }
+        if (list.Children.Count == 0 && empty is not null)
+        {
+            var text = new TextBlock { Text = empty, TextWrapping = TextWrapping.Wrap };
+            text.SetResourceReference(StyleProperty, "Caption");
+            list.Children.Add(text);
+        }
+    }
+
+    private void PrivateCreate_Click(object sender, RoutedEventArgs e)
+    {
+        var code = AppServices.Room.CreatePrivateRoom(PrivateApprovedOnlyNew.IsChecked == true);
+        CopyInvite(code);
+        UpdatePrivateRoomCard();
+    }
+
+    private void PrivateJoin_Click(object sender, RoutedEventArgs e)
+    {
+        if (!AppServices.Room.JoinPrivateRoom(PrivateInviteBox.Text))
+        {
+            _shell.Toast("Esse convite não é válido. Confira se copiou o código inteiro, começando por SF1-.", ToastKind.Warning);
+            return;
+        }
+        PrivateInviteBox.Text = string.Empty;
+        _shell.Toast("Você entrou na sala privada.", ToastKind.Success);
+        UpdatePrivateRoomCard();
+    }
+
+    private void PrivateCopy_Click(object sender, RoutedEventArgs e) => CopyInvite(AppServices.Room.PrivateRoomCode);
+
+    private void CopyInvite(string? code)
+    {
+        if (code is null) return;
+        try
+        {
+            Clipboard.SetText(code);
+            _shell.Toast("Convite copiado. Mande só para quem pode entrar na sala.", ToastKind.Success);
+        }
+        catch (System.Runtime.InteropServices.COMException) { _shell.Toast("Não deu para copiar agora. Selecione o código e copie com Ctrl+C.", ToastKind.Warning); }
+    }
+
+    private void PrivateApprovedOnly_Click(object sender, RoutedEventArgs e)
+        => AppServices.Room.SetPrivateRoomApprovedOnly(PrivateApprovedOnlyToggle.IsChecked == true);
+
+    private void PrivateRotate_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Room.RotatePrivateRoomKey())
+            _shell.Toast("Chave trocada. Quem está na sala agora recebeu a nova; para os outros, mande o convite novo.", ToastKind.Success);
+    }
+
+    private void PrivateLeave_Click(object sender, RoutedEventArgs e)
+    {
+        AppServices.Room.LeavePrivateRoom();
+        _shell.Toast("Você voltou para a sala aberta da rede.", ToastKind.Info);
+    }
+
     private void UpdateArchiveCard()
     {
         if (!IsInitialized) return;

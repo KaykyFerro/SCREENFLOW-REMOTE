@@ -446,7 +446,8 @@
                 </Border>
 
                 <!-- Chat guardado -->
-                <Border x:Name="ArchiveCard" Grid.Column="2" Style="{StaticResource Card}">
+                <StackPanel Grid.Column="2">
+                <Border x:Name="ArchiveCard" Style="{StaticResource Card}">
                     <StackPanel>
                         <DockPanel Margin="0,0,0,20">
                             <Border Style="{StaticResource IconTileBlue}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
@@ -484,6 +485,70 @@
                                    Text="Fica uma pasta ScreenFlow Chat com um arquivo de texto por canal e por dia, mais as imagens. Precisa do Google Drive para computador instalado e conectado; sem ele, escolha qualquer pasta. Quando o ScreenFlow abre, as últimas conversas voltam da pasta. Liga e desliga na hora."/>
                     </StackPanel>
                 </Border>
+
+                <!-- Sala privada e moderação (1.4.0): independente do PIN e da aprovação para assistir à transmissão -->
+                <Border x:Name="PrivateRoomCard" Style="{StaticResource Card}" Margin="0,22,0,0">
+                    <StackPanel>
+                        <DockPanel Margin="0,0,0,16">
+                            <Border Style="{StaticResource IconTilePink}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
+                                <TextBlock Style="{StaticResource Icon}" Text="&#xE72E;"/>
+                            </Border>
+                            <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                <TextBlock Style="{StaticResource Heading}" Text="Sala privada"/>
+                                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                           Text="Só quem tem o convite vê e ouve a sala. Presença, chat, voz e imagens vão cifrados de ponta a ponta."/>
+                            </StackPanel>
+                        </DockPanel>
+                        <Border Style="{StaticResource InsetCard}" Padding="14,12" Margin="0,0,0,14">
+                            <DockPanel>
+                                <Ellipse x:Name="PrivateDot" Width="9" Height="9" Fill="{DynamicResource TextSubtle}" VerticalAlignment="Top" Margin="2,6,12,0"/>
+                                <StackPanel>
+                                    <TextBlock x:Name="PrivateStatus" Style="{StaticResource Body}" FontSize="13.5" TextWrapping="Wrap" Text="Sala aberta: todo mundo da rede do Radmin vê a sala."/>
+                                    <TextBlock x:Name="PrivateFingerprint" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"/>
+                                </StackPanel>
+                            </DockPanel>
+                        </Border>
+
+                        <StackPanel x:Name="PrivateOffPanel">
+                            <CheckBox x:Name="PrivateApprovedOnlyNew" Style="{StaticResource Switch}" Margin="0,0,0,10"
+                                      Content="Só participa quem eu aprovar (mesmo com o convite)"/>
+                            <Button HorizontalAlignment="Left" Style="{StaticResource PrimaryButton}" MinHeight="34" Padding="16,0" Margin="0,0,0,16"
+                                    Content="Criar sala privada" Click="PrivateCreate_Click"/>
+                            <TextBlock Style="{StaticResource Label}" Text="Recebeu um convite?"/>
+                            <DockPanel>
+                                <Button DockPanel.Dock="Right" Content="Entrar" MinHeight="34" Padding="16,0" Margin="8,0,0,0" Click="PrivateJoin_Click"/>
+                                <TextBox x:Name="PrivateInviteBox" AutomationProperties.Name="Código do convite" ToolTip="Cole aqui o código SF1-… que você recebeu"/>
+                            </DockPanel>
+                        </StackPanel>
+
+                        <StackPanel x:Name="PrivateOnPanel" Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource Label}" Text="Convite"/>
+                            <DockPanel Margin="0,0,0,12">
+                                <Button DockPanel.Dock="Right" Content="Copiar" MinHeight="34" Padding="14,0" Margin="8,0,0,0" Click="PrivateCopy_Click"/>
+                                <TextBox x:Name="PrivateCodeBox" IsReadOnly="True" FontFamily="{DynamicResource FontMono}" FontSize="12" AutomationProperties.Name="Código do convite da sala"/>
+                            </DockPanel>
+                            <StackPanel x:Name="PrivateOwnerPanel">
+                                <CheckBox x:Name="PrivateApprovedOnlyToggle" Style="{StaticResource Switch}" Margin="0,0,0,10" Click="PrivateApprovedOnly_Click"
+                                          Content="Só participa quem eu aprovar (mesmo com o convite)"/>
+                                <TextBlock x:Name="PrivatePendingTitle" Style="{StaticResource Label}" Text="Pedindo para entrar"/>
+                                <StackPanel x:Name="PrivatePendingList" Margin="0,0,0,10"/>
+                                <TextBlock Style="{StaticResource Label}" Text="Na sala agora"/>
+                                <StackPanel x:Name="PrivateMembersList" Margin="0,0,0,10"/>
+                            </StackPanel>
+                            <WrapPanel Margin="0,0,0,6">
+                                <Button x:Name="PrivateRotateButton" Content="Trocar a chave" MinHeight="34" Padding="14,0" Margin="0,0,8,8" Click="PrivateRotate_Click"
+                                        ToolTip="Todo mundo que está na sala agora recebe a chave nova; o convite antigo deixa de valer."/>
+                                <Button Style="{StaticResource GhostButton}" Content="Sair da sala privada" MinHeight="34" Padding="12,0" Margin="0,0,8,8" Click="PrivateLeave_Click"/>
+                            </WrapPanel>
+                        </StackPanel>
+
+                        <TextBlock x:Name="BlockedTitle" Style="{StaticResource Label}" Text="Pessoas bloqueadas" Margin="0,8,0,6" Visibility="Collapsed"/>
+                        <StackPanel x:Name="BlockedList"/>
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0"
+                                   Text="A sala privada não muda quem assiste às transmissões (isso continua pelo PIN e pela aprovação em Transmissão). Quem tem o convite consegue ler a sala até ser removido: Remover troca a chave para todo mundo que está na sala, e quem estiver offline nessa hora precisa de um convite novo. Quem está na 1.3 ou mais antiga não entra em sala privada."/>
+                    </StackPanel>
+                </Border>
+                </StackPanel>
             </Grid>
 
             <!-- ═════════════ Rede e diagnóstico ═════════════ -->

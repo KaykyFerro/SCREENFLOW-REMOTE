@@ -186,6 +186,13 @@ public sealed class RoomService
         foreach (var (key, volume) in settings.PeerVolumes)
             if (Guid.TryParseExact(key, "N", out var peer)) room.SetPeerVolume(peer, (float)volume);
         room.SetMuted(settings.VoiceMuted);
+        // Sala privada e bloqueios (1.4.0).
+        foreach (var key in settings.BlockedPeers)
+            if (Guid.TryParseExact(key, "N", out var blocked)) room.SetBlocked(blocked, true);
+        if (RoomInvite.TryParse(settings.PrivateRoomCode, out var invite))
+            room.UsePrivateRoom(invite, settings.PrivateRoomApprovedOnly, Approved(settings));
+        room.KeyChanged += next => _dispatcher.BeginInvoke(() => OnKeyChanged(next));
+        room.PendingChanged += () => _dispatcher.BeginInvoke(OnPendingChanged);
         room.PeersChanged += QueueRefresh;
         room.VoiceChanged += QueueRefresh;
         room.MessageReceived += message => _dispatcher.BeginInvoke(() => OnMessage(message));
@@ -471,6 +478,173 @@ public sealed class RoomService
         }
         else if (current <= 0.001) SetPeerVolume(id, _volumeBeforeMute.Remove(id, out var before) ? before : 1);
     }
+
+    // ───────────────────────── Sala privada e moderação (1.4.0) ─────────────────────────
+
+    /// <summary>A sala privada mudou (entrou, saiu, chave nova, alguém pediu para entrar ou foi aprovado).</summary>
+    public event Action? PrivateRoomChanged;
+
+    /// <summary>O convite da sala privada em uso, ou null (sala aberta).</summary>
+    public string? PrivateRoomCode => AppServices.Settings.Current.PrivateRoomCode;
+
+    public bool InPrivateRoom => PrivateRoomCode is not null;
+
+    /// <summary>Este PC criou a sala privada (aprova, remove e troca a chave).</summary>
+    public bool IsPrivateRoomOwner => RoomInvite.TryParse(PrivateRoomCode, out var invite) && invite.Owner == SelfId;
+
+    /// <summary>O resumo da chave atual ("7F3A-91C2"): todo mundo na mesma sala vê o mesmo.</summary>
+    public string? PrivateRoomFingerprint => _room?.Keys.Fingerprint
+        ?? (RoomInvite.TryParse(PrivateRoomCode, out var invite) ? RoomKeys.Fingerprint(invite.Secret, invite.Epoch) : null);
+
+    /// <summary>Quem tem o convite e espera a aprovação (só o dono vê).</summary>
+    public IReadOnlyDictionary<Guid, string> PrivateRoomPending => _room?.Pending ?? new Dictionary<Guid, string>();
+
+    /// <summary>Quem o dono aprovou, com o nome de agora (ou "Fora da sala").</summary>
+    public IReadOnlyList<(Guid Id, string Name)> PrivateRoomApproved
+        => Approved(AppServices.Settings.Current).Select(id => (id, _room?.Peers.FirstOrDefault(p => p.Id == id)?.Presence.Name ?? "Fora da sala agora")).ToList();
+
+    /// <summary>Quem você bloqueou, com o nome que aparecia.</summary>
+    public IReadOnlyList<(Guid Id, string Name)> Blocked
+        => AppServices.Settings.Current.BlockedPeers.Select(key => Guid.ParseExact(key, "N"))
+            .Select(id => (id, _blockedNames.GetValueOrDefault(id) ?? "Pessoa bloqueada")).ToList();
+
+    private readonly Dictionary<Guid, string> _blockedNames = [];
+
+    private static IReadOnlyList<Guid> Approved(AppSettings settings)
+        => settings.PrivateRoomApproved.Select(key => Guid.ParseExact(key, "N")).ToList();
+
+    /// <summary>Cria uma sala privada com este PC de dono e entra nela. Devolve o código do convite.</summary>
+    public string CreatePrivateRoom(bool approvedOnly)
+    {
+        var invite = RoomInvite.Create(SelfId);
+        var settings = AppServices.Settings.Current;
+        settings.PrivateRoomCode = invite.ToCode();
+        settings.PrivateRoomApprovedOnly = approvedOnly;
+        settings.PrivateRoomApproved = [];
+        AppServices.Settings.Save();
+        _room?.UsePrivateRoom(invite, approvedOnly, []);
+        Log.Info("Sala privada criada.");
+        PrivateRoomChanged?.Invoke();
+        return settings.PrivateRoomCode;
+    }
+
+    /// <summary>Entra numa sala privada pelo convite. false se o código não é válido.</summary>
+    public bool JoinPrivateRoom(string code)
+    {
+        if (!RoomInvite.TryParse(code, out var invite)) return false;
+        var settings = AppServices.Settings.Current;
+        settings.PrivateRoomCode = invite.ToCode();
+        settings.PrivateRoomApprovedOnly = false;
+        settings.PrivateRoomApproved = [];
+        AppServices.Settings.Save();
+        _room?.UsePrivateRoom(invite);
+        Log.Info("Entrou numa sala privada pelo convite.");
+        PrivateRoomChanged?.Invoke();
+        return true;
+    }
+
+    /// <summary>Volta para a sala aberta da rede.</summary>
+    public void LeavePrivateRoom()
+    {
+        var settings = AppServices.Settings.Current;
+        settings.PrivateRoomCode = null;
+        settings.PrivateRoomApprovedOnly = false;
+        settings.PrivateRoomApproved = [];
+        AppServices.Settings.Save();
+        _room?.UsePrivateRoom(null);
+        PrivateRoomChanged?.Invoke();
+    }
+
+    /// <summary>O dono liga ou desliga "só quem eu aprovar".</summary>
+    public void SetPrivateRoomApprovedOnly(bool approvedOnly)
+    {
+        if (!IsPrivateRoomOwner) return;
+        var settings = AppServices.Settings.Current;
+        settings.PrivateRoomApprovedOnly = approvedOnly;
+        AppServices.Settings.Save();
+        _room?.SetRoster(approvedOnly, Approved(settings));
+        PrivateRoomChanged?.Invoke();
+    }
+
+    /// <summary>O dono aprova quem tem o convite.</summary>
+    public void ApprovePrivateMember(Guid id)
+    {
+        if (!IsPrivateRoomOwner || id == SelfId) return;
+        var settings = AppServices.Settings.Current;
+        var key = id.ToString("N");
+        if (!settings.PrivateRoomApproved.Contains(key)) settings.PrivateRoomApproved.Add(key);
+        AppServices.Settings.Save();
+        _room?.SetRoster(settings.PrivateRoomApprovedOnly, Approved(settings));
+        PrivateRoomChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// O dono remove alguém: a chave da sala troca para todo mundo que está nela agora, menos essa pessoa, que fica
+    /// bloqueada aqui. Quem estiver fora da sala agora precisa de um convite novo.
+    /// </summary>
+    public bool RemovePrivateMember(Guid id, string name)
+    {
+        if (!IsPrivateRoomOwner || _room is not { } room || id == SelfId) return false;
+        var settings = AppServices.Settings.Current;
+        settings.PrivateRoomApproved.Remove(id.ToString("N"));
+        room.SetRoster(settings.PrivateRoomApprovedOnly, Approved(settings));
+        if (room.RotateKey([id]) is not { } next) return false;
+        settings.PrivateRoomCode = next.ToCode();
+        _blockedNames[id] = name;
+        var blocked = id.ToString("N");
+        if (!settings.BlockedPeers.Contains(blocked)) settings.BlockedPeers.Add(blocked);
+        AppServices.Settings.Save();
+        PrivateRoomChanged?.Invoke();
+        QueueRefresh();
+        return true;
+    }
+
+    /// <summary>O dono troca a chave da sala sem tirar ninguém (o convite antigo deixa de valer).</summary>
+    public bool RotatePrivateRoomKey()
+    {
+        if (!IsPrivateRoomOwner || _room?.RotateKey([]) is not { } next) return false;
+        AppServices.Settings.Current.PrivateRoomCode = next.ToCode();
+        AppServices.Settings.Save();
+        PrivateRoomChanged?.Invoke();
+        return true;
+    }
+
+    /// <summary>Bloqueia (ou desbloqueia) alguém só para você: nada dele chega, nem chat, nem voz, nem arquivos.</summary>
+    public void SetBlocked(Guid id, string name, bool blocked)
+    {
+        if (id == SelfId) return;
+        var settings = AppServices.Settings.Current;
+        var key = id.ToString("N");
+        if (blocked)
+        {
+            _blockedNames[id] = name;
+            if (!settings.BlockedPeers.Contains(key)) settings.BlockedPeers.Add(key);
+        }
+        else settings.BlockedPeers.Remove(key);
+        AppServices.Settings.Save();
+        _room?.SetBlocked(id, blocked);
+        PrivateRoomChanged?.Invoke();
+        QueueRefresh();
+    }
+
+    private void OnKeyChanged(RoomInvite next)
+    {
+        AppServices.Settings.Current.PrivateRoomCode = next.ToCode();
+        AppServices.Settings.Save();
+        PrivateRoomChanged?.Invoke();
+    }
+
+    private readonly HashSet<Guid> _pendingSeen = [];
+
+    private void OnPendingChanged()
+    {
+        foreach (var (id, name) in PrivateRoomPending)
+            if (_pendingSeen.Add(id)) PendingMember?.Invoke(name);
+        PrivateRoomChanged?.Invoke();
+    }
+
+    /// <summary>Alguém com o convite pediu para entrar na sala privada (só o dono recebe).</summary>
+    public event Action<string>? PendingMember;
 
     // ───────────────────────── Canais ─────────────────────────
 

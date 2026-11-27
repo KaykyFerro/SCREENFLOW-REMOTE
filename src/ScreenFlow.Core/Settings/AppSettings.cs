@@ -121,6 +121,16 @@ public sealed class AppSettings
     /// <summary>Volume de cada pessoa na voz, só para você (id da pessoa → 0 a 2; sem a pessoa = 1).</summary>
     public Dictionary<string, double> PeerVolumes { get; set; } = [];
 
+    // Sala privada e moderação (1.4.0). Independentes do PIN e da aprovação para assistir à transmissão.
+    /// <summary>O convite da sala privada em uso (o código "SF1-…"). Null: sala aberta, como nas versões antigas.</summary>
+    public string? PrivateRoomCode { get; set; }
+    /// <summary>Só para o dono: a sala é só para quem ele aprovou (quem tem o convite e não foi aprovado espera).</summary>
+    public bool PrivateRoomApprovedOnly { get; set; }
+    /// <summary>Só para o dono: quem ele aprovou (ids da sala).</summary>
+    public List<string> PrivateRoomApproved { get; set; } = [];
+    /// <summary>Quem você bloqueou: nada dessas pessoas chega até você (ids da sala).</summary>
+    public List<string> BlockedPeers { get; set; } = [];
+
     // Chat guardado numa pasta (1.3.0)
     /// <summary>
     /// Guarda as mensagens do chat (e as imagens) numa pasta, por exemplo a do Google Drive para computador: o Drive
@@ -181,6 +191,9 @@ public sealed class AppSettings
         if (string.IsNullOrWhiteSpace(MicrophoneId)) MicrophoneId = null;
         VoiceVolume = Math.Clamp(VoiceVolume, 0, 1.5);
         VoiceSensitivity = Math.Clamp(VoiceSensitivity, 0, 1);
+        if (!Room.RoomInvite.TryParse(PrivateRoomCode, out _)) PrivateRoomCode = null;
+        PrivateRoomApproved = ValidIds(PrivateRoomApproved, Room.RoomPacket.MaxRoster);
+        BlockedPeers = ValidIds(BlockedPeers, 200);
         RoomPeers = (RoomPeers ?? []).Select(p => p.Trim()).Where(p => p.Length is > 0 and <= 64).Distinct(StringComparer.OrdinalIgnoreCase).Take(16).ToList();
         MutedApps = MutedApp.Normalize(MutedApps);
         PartyApp = MutedApp.Normalize([PartyApp]).FirstOrDefault();
@@ -210,6 +223,9 @@ public sealed class AppSettings
         SettingsVersion = CurrentSettingsVersion;
         return true;
     }
+
+    private static List<string> ValidIds(List<string>? ids, int max)
+        => (ids ?? []).Where(id => Guid.TryParseExact(id, "N", out var guid) && guid != Guid.Empty).Distinct(StringComparer.OrdinalIgnoreCase).Take(max).ToList();
 
     private static int ValidPort(int port, int fallback) => port is >= 1024 and <= 65535 ? port : fallback;
 }

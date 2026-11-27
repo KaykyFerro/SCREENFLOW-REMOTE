@@ -25,7 +25,7 @@ namespace ScreenFlow.App.Services;
 public static class SelfTest
 {
     private const int MediaPort = 47900, ControlPort = 47901, DiscoveryPort = 47902;
-    private const int RoomPortA = 47910, RoomPortB = 47911;
+    private const int RoomPortA = 47910, RoomPortB = 47911, RoomPortC = 47912;
 
     public static async Task<(bool Ok, string Report)> RunAsync()
     {
@@ -218,13 +218,14 @@ public static class SelfTest
             if (!voiceOk) line("FALHOU: a voz não chegou dos dois lados.");
 
             var channelsOk = await ChannelsTestAsync(a, b, line);
+            var privateOk = await PrivateRoomTestAsync(a, b, line);
 
             await a.LeaveVoiceAsync();
             var leftOk = await WaitAsync(() => b.Peers.FirstOrDefault()?.Presence.InAnyVoice == false, 4);
             if (!leftOk) line("FALHOU: B não viu A sair da voz.");
 
-            var ok = chatOk && avatarOk && pictureOk && voiceOk && peerInVoice && channelsOk && leftOk;
-            line(ok ? "PASSOU: presença, chat, fotos, imagens, voz e canais funcionam entre dois PCs." : "FALHOU: a sala da rede não funcionou como deveria.");
+            var ok = chatOk && avatarOk && pictureOk && voiceOk && peerInVoice && channelsOk && privateOk && leftOk;
+            line(ok ? "PASSOU: presença, chat, fotos, imagens, voz, canais e sala privada funcionam entre dois PCs." : "FALHOU: a sala da rede não funcionou como deveria.");
             return ok;
         }
         catch (Exception exception)
@@ -271,6 +272,76 @@ public static class SelfTest
         var ok = listedOk && textOk && movedOk && voiceOk;
         if (ok) line($"Canais: B viu os 2 canais de A, a mensagem chegou no #autoteste e B ouviu A no canal Autoteste ({(b.Voice?.FramesDecoded ?? 0) - heard} quadros).");
         return ok;
+    }
+
+    /// <summary>
+    /// Sala privada (1.4.0), com A e B na voz: A cria a sala e os dois entram com o convite. Um terceiro PC (C), sem o
+    /// convite, não vê ninguém; o chat e a voz continuam entre A e B, cifrados. A troca a chave e B passa para a nova
+    /// sozinho; depois A remove B, que fica de fora.
+    /// </summary>
+    private static async Task<bool> PrivateRoomTestAsync(NetworkRoom a, NetworkRoom b, Action<string> line)
+    {
+        var invite = RoomInvite.Create(a.SelfId);
+        if (!RoomInvite.TryParse(invite.ToCode(), out var parsed))
+        {
+            line("FALHOU: o código do convite não abriu.");
+            return false;
+        }
+        a.UsePrivateRoom(invite);
+        b.UsePrivateRoom(parsed);
+        var c = new NetworkRoom(Guid.NewGuid(), RoomPortC, new RoomLocalState("Autoteste C (sem convite)")) { BroadcastTargets = () => [], OutputEnabled = false };
+        try
+        {
+            c.Start();
+            c.AddManualPeer(IPAddress.Loopback, RoomPortA);
+            a.AddManualPeer(IPAddress.Loopback, RoomPortC);
+            var stillTogether = await WaitAsync(() => a.Peers.Any(p => p.Id == b.SelfId) && b.Peers.Any(p => p.Id == a.SelfId) && b.Peers[0].Presence.ExchangeKey is not null, 8);
+            await Task.Delay(3000);
+            var outsiderBlind = c.Peers.Count == 0 && a.Peers.All(p => p.Id != c.SelfId);
+            if (!stillTogether) line("FALHOU: A e B não se viram na sala privada.");
+            if (!outsiderBlind) line($"FALHOU: quem não tem o convite viu a sala (C vê {c.Peers.Count}).");
+
+            var received = new TaskCompletionSource<RoomChatMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            b.MessageReceived += message =>
+            {
+                if (message.AuthorId == a.SelfId && message.Text == "Mensagem cifrada") received.TrySetResult(message);
+            };
+            a.SendChat("Mensagem cifrada");
+            var chatOk = await Task.WhenAny(received.Task, Task.Delay(5000)) == received.Task;
+            if (!chatOk) line("FALHOU: o chat não chegou na sala privada.");
+            var heard = b.Voice?.FramesDecoded ?? 0;
+            var voiceOk = await WaitAsync(() => (b.Voice?.FramesDecoded ?? 0) > heard + 30, 8);
+            if (!voiceOk) line("FALHOU: a voz não chegou na sala privada.");
+
+            var rotated = a.RotateKey([]);
+            var rekeyOk = rotated is not null && await WaitAsync(() => b.Keys.Epoch == rotated.Epoch, 10);
+            if (!rekeyOk) line("FALHOU: B não recebeu a chave nova do dono.");
+            var afterRekey = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            b.MessageReceived += message =>
+            {
+                if (message.AuthorId == a.SelfId && message.Text == "Depois da troca") afterRekey.TrySetResult(true);
+            };
+            a.SendChat("Depois da troca");
+            var afterOk = await Task.WhenAny(afterRekey.Task, Task.Delay(5000)) == afterRekey.Task;
+            if (!afterOk) line("FALHOU: o chat não chegou depois da troca de chave.");
+
+            var removed = a.RotateKey([b.SelfId]);
+            await Task.Delay(3000);
+            var removedOk = removed is not null && b.Keys.Epoch != removed.Epoch && a.Peers.All(p => p.Id != b.SelfId);
+            if (!removedOk) line("FALHOU: B continuou na sala depois de removido.");
+
+            var ok = stillTogether && outsiderBlind && chatOk && voiceOk && rekeyOk && afterOk && removedOk;
+            if (ok) line($"Sala privada: C (sem convite) não viu ninguém, chat e voz cifrados chegaram, B passou para a chave {rotated!.Epoch} sozinho e, removido, ficou de fora.");
+            return ok;
+        }
+        finally
+        {
+            await c.DisposeAsync();
+            a.SetBlocked(b.SelfId, false);
+            a.UsePrivateRoom(null);
+            b.UsePrivateRoom(null);
+            await WaitAsync(() => a.Peers.Any(p => p.Id == b.SelfId) && b.Peers.Any(p => p.Id == a.SelfId), 6);
+        }
     }
 
     // Tons do teste do som do PC: o do ScreenFlow e os dois que o CI deixa tocando fora dele (veja windows-build.yml).

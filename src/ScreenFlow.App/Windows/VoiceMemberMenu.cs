@@ -63,6 +63,19 @@ internal static class VoiceMemberMenu
         var mute = Item("Silenciar para mim", "", () => room.SetPeerMuted(member.Id, !member.LocallyMuted), member.LocallyMuted);
         menu.Items.Add(mute);
         menu.Items.Add(Item("Volume normal (100%)", "", () => room.SetPeerVolume(member.Id, 1)));
+        // Moderação (1.4.0): bloquear só para você; o dono da sala privada também pode remover da sala.
+        menu.Items.Add(new Separator());
+        menu.Items.Add(Item("Bloquear para mim", "\uE8F8", () =>
+        {
+            room.SetBlocked(member.Id, member.Name, true);
+            shell.Toast($"{member.Name} foi bloqueado: nada dessa pessoa chega mais até você. Desbloqueie em Configurações › Voz e sala.", ToastKind.Info);
+        }));
+        if (room.IsPrivateRoomOwner)
+            menu.Items.Add(Item("Remover da sala privada", "\uE8F8", () =>
+            {
+                if (room.RemovePrivateMember(member.Id, member.Name))
+                    shell.Toast($"{member.Name} saiu da sala privada e a chave foi trocada para os outros.", ToastKind.Success);
+            }));
         value.Text = $"{member.Volume * 100:0}%";
         slider.ValueChanged += (_, e) =>
         {

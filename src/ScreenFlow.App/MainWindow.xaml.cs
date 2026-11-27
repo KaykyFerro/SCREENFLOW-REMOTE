@@ -322,6 +322,8 @@ public partial class MainWindow : Window
             Log.Error("A sala da rede não abriu", exception);
         }
         UpdateVoicePanel();
+        AppServices.Room.PendingMember += name => Toast($"{name} tem o convite da sala privada e está pedindo para entrar.", ToastKind.Info,
+            "Ver pedido", () => OpenSettings(SettingsTab.Voice));
 
         var settings = AppServices.Settings.Current;
         if (AppServices.Settings.RecoveredCopy is { } copy)
