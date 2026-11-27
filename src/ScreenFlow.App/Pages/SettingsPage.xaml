@@ -180,7 +180,8 @@
                             <TextBlock x:Name="ColorName" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Bottom"/>
                             <TextBlock Style="{StaticResource Label}" Text="Cor" Margin="0"/>
                         </DockPanel>
-                        <WrapPanel x:Name="ColorSwatches" Margin="-5,0,0,4"/>
+                        <!-- Duas fileiras de 5, em qualquer largura (numa só, a 10ª sobrava sozinha embaixo) -->
+                        <UniformGrid x:Name="ColorSwatches" Columns="5" HorizontalAlignment="Left" Margin="-5,0,0,4"/>
                         <TextBlock Style="{StaticResource Caption}" Margin="0,0,0,16" TextWrapping="Wrap"
                                    Text="O tema e a cor valem na hora e só neste PC: cada pessoa escolhe os seus."/>
                         <CheckBox x:Name="TrayToggle" Style="{StaticResource Switch}" Margin="0,0,0,14"
