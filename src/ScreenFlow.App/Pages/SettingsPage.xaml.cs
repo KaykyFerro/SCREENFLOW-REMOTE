@@ -157,6 +157,10 @@ public partial class SettingsPage : UserControl, IShellPage
         ReopenToggle.IsChecked = s.ShowWindowWhenSessionEnds;
         ThemeCombo.SelectValue(ThemeManager.Current);
         LoadMicrophones(s.MicrophoneId);
+        LoadSpeakers(s.SpeakerId);
+        PushToTalkToggle.IsChecked = s.PushToTalk;
+        _pushToTalkKey = s.PushToTalkKey;
+        ShowPushToTalkKey();
         SensitivitySlider.Value = s.VoiceSensitivity;
         VoiceVolumeSlider.Value = s.VoiceVolume;
         VoiceSoundsToggle.IsChecked = s.VoiceSounds;
@@ -228,6 +232,9 @@ public partial class SettingsPage : UserControl, IShellPage
         s.MinimizeToTray = TrayToggle.IsChecked == true;
         s.ShowWindowWhenSessionEnds = ReopenToggle.IsChecked == true;
         s.MicrophoneId = MicrophoneCombo.Value<string?>();
+        s.SpeakerId = SpeakerCombo.Value<string?>();
+        s.PushToTalk = PushToTalkToggle.IsChecked == true;
+        s.PushToTalkKey = _pushToTalkKey;
         s.VoiceSensitivity = SensitivitySlider.Value;
         s.VoiceVolume = VoiceVolumeSlider.Value;
         s.VoiceSounds = VoiceSoundsToggle.IsChecked == true;
@@ -340,6 +347,52 @@ public partial class SettingsPage : UserControl, IShellPage
     }
 
     private void RefreshMicrophones_Click(object sender, RoutedEventArgs e) => LoadMicrophones(MicrophoneCombo.Value<string?>());
+
+    private void LoadSpeakers(string? selected)
+    {
+        IReadOnlyList<SpeakerInfo> speakers = AppServices.DemoMode
+            ? [new SpeakerInfo("demo", "Fone (HyperX Cloud II)")]
+            : Speakers.List();
+        var choices = new List<Choice<string?>> { new(null, "Padrão do Windows") };
+        choices.AddRange(speakers.Select(m => new Choice<string?>(m.Id, m.Name)));
+        if (selected is not null && speakers.All(m => m.Id != selected)) choices.Add(new Choice<string?>(selected, "Saída desconectada"));
+        SpeakerCombo.Fill(choices);
+        SpeakerCombo.SelectValue(selected);
+    }
+
+    private void RefreshSpeakers_Click(object sender, RoutedEventArgs e) => LoadSpeakers(SpeakerCombo.Value<string?>());
+
+    // Apertar para falar: o botão espera a próxima tecla (ou botão lateral do mouse).
+    private string _pushToTalkKey = "F8";
+    private bool _capturingKey;
+
+    private void ShowPushToTalkKey()
+        => PushToTalkKeyButton.Content = _capturingKey ? "Aperte a tecla…" : $"Tecla: {PushToTalkKeyWatcher.Describe(_pushToTalkKey)}";
+
+    private void PushToTalkKey_Click(object sender, RoutedEventArgs e)
+    {
+        _capturingKey = !_capturingKey;
+        ShowPushToTalkKey();
+    }
+
+    private void PushToTalkKey_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (!_capturingKey) return;
+        var key = e.Key == System.Windows.Input.Key.System ? e.SystemKey : e.Key;
+        e.Handled = true;
+        _capturingKey = false;
+        if (key != System.Windows.Input.Key.Escape && PushToTalkKeyWatcher.VirtualKey(key.ToString()) != 0) _pushToTalkKey = key.ToString();
+        ShowPushToTalkKey();
+    }
+
+    private void PushToTalkKey_PreviewMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (!_capturingKey || e.ChangedButton is not (System.Windows.Input.MouseButton.XButton1 or System.Windows.Input.MouseButton.XButton2)) return;
+        e.Handled = true;
+        _capturingKey = false;
+        _pushToTalkKey = e.ChangedButton.ToString();
+        ShowPushToTalkKey();
+    }
 
     private void Sensitivity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {

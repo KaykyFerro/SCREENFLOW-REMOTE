@@ -441,6 +441,21 @@
                                 ValueChanged="VoiceVolume_Changed"/>
                         <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,14"
                                    Text="Vale para todo mundo. Para mudar o volume de uma pessoa só, clique com o botão direito nela na Sala da rede."/>
+                        <TextBlock Style="{StaticResource Label}" Text="Saída do som da voz"/>
+                        <DockPanel Margin="{DynamicResource FieldGap}">
+                            <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar saídas de som de novo" Margin="8,0,0,0"
+                                    Click="RefreshSpeakers_Click"/>
+                            <ComboBox x:Name="SpeakerCombo" AutomationProperties.Name="Saída do som da voz"/>
+                        </DockPanel>
+                        <CheckBox x:Name="PushToTalkToggle" Style="{StaticResource Switch}" Margin="0,0,0,8"
+                                  Content="Apertar para falar (a voz só vai enquanto a tecla está apertada, em qualquer app)"/>
+                        <DockPanel Margin="0,0,0,14">
+                            <Button x:Name="PushToTalkKeyButton" DockPanel.Dock="Right" MinHeight="34" MinWidth="172" Padding="14,0" Margin="12,0,0,0"
+                                    Click="PushToTalkKey_Click" PreviewKeyDown="PushToTalkKey_PreviewKeyDown" PreviewMouseDown="PushToTalkKey_PreviewMouseDown"
+                                    AutomationProperties.Name="Tecla de apertar para falar"/>
+                            <TextBlock Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"
+                                       Text="Clique no botão e aperte a tecla (ou um botão lateral do mouse) que quer usar. Esc cancela."/>
+                        </DockPanel>
                         <CheckBox x:Name="VoiceSoundsToggle" Style="{StaticResource Switch}" Content="Sons ao entrar, sair e desligar o microfone (como no Discord)"/>
                     </StackPanel>
                 </Border>

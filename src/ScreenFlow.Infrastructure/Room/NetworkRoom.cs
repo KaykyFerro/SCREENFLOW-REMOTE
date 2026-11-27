@@ -206,6 +206,25 @@ public sealed class NetworkRoom : IAsyncDisposable
     /// <summary>Microfone escolhido nas configurações (null = padrão do Windows).</summary>
     public string? MicrophoneId { get; set; }
 
+    /// <summary>Saída de som da voz (null = padrão do Windows). Vale na próxima vez que entrar na voz.</summary>
+    public string? SpeakerId { get; set; }
+
+    /// <summary>Apertar para falar (1.4.0): ligado, a voz só vai enquanto <see cref="SetTalkKey"/> diz que a tecla está apertada.</summary>
+    public bool PushToTalk
+    {
+        get => _pushToTalk;
+        set
+        {
+            _pushToTalk = value;
+            if (_voice is { } voice) voice.PushToTalk.Enabled = value;
+        }
+    }
+
+    private volatile bool _pushToTalk;
+
+    /// <summary>A tecla de apertar para falar está (ou não) apertada agora.</summary>
+    public void SetTalkKey(bool held) => _voice?.PushToTalk.SetHeld(held, Environment.TickCount64);
+
     /// <summary>Sons de entrar, sair e mudo na voz (como no Discord).</summary>
     public bool SoundsEnabled { get; set; } = true;
 
@@ -456,7 +475,8 @@ public sealed class NetworkRoom : IAsyncDisposable
             input ??= new MicrophoneInput(MicrophoneId);
             try
             {
-                engine = new VoiceEngine(input, _volume, _sensitivity, OutputEnabled) { Muted = _muted, Deafened = _deafened };
+                engine = new VoiceEngine(input, _volume, _sensitivity, OutputEnabled, SpeakerId) { Muted = _muted, Deafened = _deafened };
+                engine.PushToTalk.Enabled = _pushToTalk;
             }
             catch
             {

@@ -174,6 +174,8 @@ public sealed class RoomService
         var room = new NetworkRoom(SelfId, settings.DiscoveryPort, new RoomLocalState(settings.DeviceName, Avatar: SelfAvatarRef()))
         {
             MicrophoneId = settings.MicrophoneId,
+            SpeakerId = settings.SpeakerId,
+            PushToTalk = settings.PushToTalk,
             Volume = (float)settings.VoiceVolume,
             Sensitivity = settings.VoiceSensitivity,
             SoundsEnabled = settings.VoiceSounds,
@@ -186,6 +188,7 @@ public sealed class RoomService
         foreach (var (key, volume) in settings.PeerVolumes)
             if (Guid.TryParseExact(key, "N", out var peer)) room.SetPeerVolume(peer, (float)volume);
         room.SetMuted(settings.VoiceMuted);
+        _talkKey = new PushToTalkKeyWatcher(held => _room?.SetTalkKey(held));
         // Sala privada e bloqueios (1.4.0).
         foreach (var key in settings.BlockedPeers)
             if (Guid.TryParseExact(key, "N", out var blocked)) room.SetBlocked(blocked, true);
@@ -195,6 +198,7 @@ public sealed class RoomService
         room.PendingChanged += () => _dispatcher.BeginInvoke(OnPendingChanged);
         room.PeersChanged += QueueRefresh;
         room.VoiceChanged += QueueRefresh;
+        room.VoiceChanged += () => _dispatcher.BeginInvoke(UpdateTalkKey);
         room.MessageReceived += message => _dispatcher.BeginInvoke(() => OnMessage(message));
         room.BlobReceived += (id, data) =>
         {
@@ -220,6 +224,8 @@ public sealed class RoomService
     {
         AppServices.Settings.Saved -= OnSettingsSaved;
         _speakingTimer.Stop();
+        _talkKey?.Dispose();
+        _talkKey = null;
         var room = _room;
         _room = null;
         if (room is not null) await room.DisposeAsync();
@@ -248,6 +254,13 @@ public sealed class RoomService
         {
             room.UpdateLocal(room.Local with { Name = settings.DeviceName, Avatar = avatar });
             Refresh();
+        }
+        room.PushToTalk = settings.PushToTalk;
+        UpdateTalkKey();
+        if (room.SpeakerId != settings.SpeakerId)
+        {
+            room.SpeakerId = settings.SpeakerId;
+            if (room.InVoice && room.MicrophoneId == settings.MicrophoneId) _ = RejoinAsync(); // troca a saída na hora
         }
         if (room.MicrophoneId != settings.MicrophoneId)
         {
@@ -477,6 +490,17 @@ public sealed class RoomService
             SetPeerVolume(id, 0);
         }
         else if (current <= 0.001) SetPeerVolume(id, _volumeBeforeMute.Remove(id, out var before) ? before : 1);
+    }
+
+    // ───────────────────────── Apertar para falar (1.4.0) ─────────────────────────
+
+    private PushToTalkKeyWatcher? _talkKey;
+
+    /// <summary>A tecla só é lida com apertar para falar ligado e você na voz.</summary>
+    internal void UpdateTalkKey()
+    {
+        var settings = AppServices.Settings.Current;
+        _talkKey?.Watch(settings.PushToTalk && _room?.InVoice == true ? settings.PushToTalkKey : null);
     }
 
     // ───────────────────────── Sala privada e moderação (1.4.0) ─────────────────────────

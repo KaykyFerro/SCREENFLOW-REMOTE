@@ -109,6 +109,12 @@ public sealed class AppSettings
     public double VoiceVolume { get; set; } = 1.0;
     public bool VoiceMuted { get; set; }
     public bool VoiceSounds { get; set; } = true;
+    /// <summary>(1.4.0) Saída de som da voz da sala (fone, caixa). Null = a padrão do Windows.</summary>
+    public string? SpeakerId { get; set; }
+    /// <summary>(1.4.0) Apertar para falar: a voz só vai enquanto <see cref="PushToTalkKey"/> está apertada, em qualquer app.</summary>
+    public bool PushToTalk { get; set; }
+    /// <summary>(1.4.0) A tecla (nome da tecla do WPF, como "F8") ou o botão lateral do mouse ("XButton1", "XButton2").</summary>
+    public string PushToTalkKey { get; set; } = "F8";
     /// <summary>Sensibilidade do microfone: 0 capta só voz alta, 1 capta tudo.</summary>
     public double VoiceSensitivity { get; set; } = 0.6;
     /// <summary>IPs adicionados à mão na sala (para redes em que o aviso automático não chega).</summary>
@@ -189,6 +195,8 @@ public sealed class AppSettings
         RecentHosts ??= [];
         if (InstanceId is null || !Guid.TryParseExact(InstanceId, "N", out _)) InstanceId = Guid.NewGuid().ToString("N");
         if (string.IsNullOrWhiteSpace(MicrophoneId)) MicrophoneId = null;
+        if (string.IsNullOrWhiteSpace(SpeakerId)) SpeakerId = null;
+        if (string.IsNullOrWhiteSpace(PushToTalkKey) || PushToTalkKey.Length > 32) PushToTalkKey = "F8";
         VoiceVolume = Math.Clamp(VoiceVolume, 0, 1.5);
         VoiceSensitivity = Math.Clamp(VoiceSensitivity, 0, 1);
         if (!Room.RoomInvite.TryParse(PrivateRoomCode, out _)) PrivateRoomCode = null;

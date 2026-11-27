@@ -36,6 +36,31 @@ public sealed record MicrophoneInfo(string Id, string Name)
     public override string ToString() => Name;
 }
 
+/// <summary>Uma saída de som (fone, caixa) para a voz da sala.</summary>
+public sealed record SpeakerInfo(string Id, string Name)
+{
+    public override string ToString() => Name;
+}
+
+public static class Speakers
+{
+    /// <summary>Saídas de som ligadas no Windows.</summary>
+    public static IReadOnlyList<SpeakerInfo> List()
+    {
+        try
+        {
+            using var enumerator = new MMDeviceEnumerator();
+            return enumerator.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active)
+                .Select(d => new SpeakerInfo(d.ID, d.FriendlyName)).OrderBy(d => d.Name).ToArray();
+        }
+        catch (Exception exception)
+        {
+            Log.Warn($"Não foi possível listar as saídas de som: {exception.Message}");
+            return [];
+        }
+    }
+}
+
 public static class Microphones
 {
     /// <summary>Microfones ligados no Windows.</summary>
@@ -530,8 +555,12 @@ internal sealed class VoiceOutput : IDisposable
     private bool _deafened;
     private bool _disposed;
 
-    public VoiceOutput(float volume)
+    private readonly string? _speakerId;
+
+    /// <summary>Saída da voz: a escolhida (<paramref name="speakerId"/>) ou, sem escolha (ou desligada), a padrão do Windows.</summary>
+    public VoiceOutput(float volume, string? speakerId = null)
     {
+        _speakerId = speakerId;
         _voiceGain = new VolumeSampleProvider(_voices);
         _mixer.AddMixerInput(_voiceGain);
         _volume = new VolumeSampleProvider(_mixer);
@@ -578,10 +607,25 @@ internal sealed class VoiceOutput : IDisposable
 
     private void Open()
     {
-        var output = new WasapiOut(AudioClientShareMode.Shared, true, 40);
+        var output = OpenDevice();
         output.Init(_volume);
         output.Play();
         _output = output;
+    }
+
+    private WasapiOut OpenDevice()
+    {
+        if (_speakerId is { } id)
+        {
+            try
+            {
+                using var enumerator = new MMDeviceEnumerator();
+                var device = enumerator.GetDevice(id);
+                if (device.State == DeviceState.Active) return new WasapiOut(device, AudioClientShareMode.Shared, true, 40);
+            }
+            catch (Exception exception) { Log.Info($"A saída escolhida para a voz não está disponível ({exception.Message}); usando a padrão."); }
+        }
+        return new WasapiOut(AudioClientShareMode.Shared, true, 40);
     }
 
     private void Close()
