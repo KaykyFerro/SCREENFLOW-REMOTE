@@ -1,6 +1,6 @@
 # ScreenFlow
 
-Compartilhe a tela, a câmera **e o áudio do sistema** do seu PC com várias pessoas ao mesmo tempo pela rede virtual do **Radmin VPN**. Quem assiste só digita o seu IP do Radmin (26.x.x.x) ou clica na transmissão que aparece na tela Assistir. A transmissão chega a **3840×2160 a 165 FPS** quando a GPU e a rede aguentam.
+Compartilhe a tela, a câmera **e o áudio do sistema** do seu PC com várias pessoas ao mesmo tempo pelo **Radmin VPN** ou pelo **Tailscale**, direto entre os PCs ou por um **servidor ScreenFlow** seu. Quem assiste só digita o seu IP (o 26.x do Radmin ou o 100.x do Tailscale) ou clica na transmissão que aparece na tela Assistir. A transmissão chega a **3840×2160 a 165 FPS** quando a GPU e a rede aguentam.
 
 Três jeitos de transmitir:
 
@@ -14,14 +14,16 @@ Quem assiste também mexe, pelo próprio player: troca a qualidade, volta, pausa
 
 O volume do PC de quem transmite não muda o som que vai: abaixar ou tirar o som do Windows só muda o que essa pessoa ouve, e cada um controla o próprio volume no player. O player aparece como **player de mídia do Windows** (no painel do volume, na tela de bloqueio e nas teclas de mídia), com a música da festa e a capa.
 
-E para quem está na mesma rede do Radmin:
+E para quem está na mesma rede (Radmin VPN, Tailscale ou um servidor ScreenFlow):
 
-- **Sala da rede**, como um servidor do Discord: canais de texto (#geral, #música, #prints-e-clipes e os que você criar) e canais de voz (Geral, Jogando, Música e os seus), com quem está em cada canal de voz. O painel **Voz conectada** fica no menu lateral, logo acima do seu perfil: entrar, sair, desligar o microfone ou o som de todo mundo com um clique.
+- **Sala da rede**, como um servidor do Discord: o canal de texto #geral e o de voz Geral, e os canais que cada um criar (no servidor, os canais ficam guardados nele e qualquer pessoa cria, renomeia e apaga), com quem está em cada canal de voz. O painel **Voz conectada** fica no menu lateral, logo acima do seu perfil: entrar, sair, desligar o microfone ou o som de todo mundo com um clique.
 - **Volume de cada pessoa só para você**: botão direito em alguém da voz, de 0 a 200%, ou silenciar essa pessoa só para você.
 - **Chat com imagens** em cada canal de texto: anexe, cole com Ctrl+V ou arraste. Se quiser, as conversas ficam **guardadas no Google Drive** (ou em qualquer pasta) e voltam quando o app abre.
 - **Seu perfil**: o seu nome (no lugar do nome do PC) e uma foto, que aparecem no chat, na voz e para quem assiste.
 - **Som do PC sem a voz da rede**: quem assiste a sua transmissão não ouve a conversa da voz nem os sons do ScreenFlow, e você escolhe outros apps para ficarem de fora (Spotify, Discord, o navegador...).
 - **Bandeja do Windows**: fechar ou minimizar leva o ScreenFlow para perto do relógio. Passando o mouse no ícone aparece se você está ao vivo e o que está indo (tela, som, câmera ou tudo junto).
+- **10 temas de cor**, um de cada cor, em cima do tema escuro ou do claro. Cada pessoa escolhe o seu em Configurações › Aparência, e vale na hora.
+- **Servidor ScreenFlow** (1.4.1): um PC (o seu, com Windows ou Linux) onde todo mundo se conecta. Quem transmite manda uma cópia só para o servidor, e ele manda para cada pessoa que assiste. O chat e a voz também passam por ele. Veja [Servidor ScreenFlow](#servidor-screenflow).
 
 Por baixo:
 
@@ -112,6 +114,18 @@ O vídeo é capturado e codificado **uma vez**, mas cada pessoa recebe a própri
 
 O app divide 80% do upload medido entre quem está assistindo e baixa a qualidade sozinho (bitrate, depois FPS, depois resolução) quando não cabe. Para medir o upload, clique em **Testar banda** ao lado de alguém conectado. O padrão é até 20 pessoas; dá para mudar em **Configurações › Rede e diagnóstico**.
 
+## Servidor ScreenFlow
+
+Com muita gente assistindo, o upload de quem transmite vira o limite. Com um servidor, quem transmite manda **uma cópia só** para ele, e o servidor manda para cada pessoa. A sala, o chat, a voz e os canais também passam por ele e ficam guardados nele.
+
+- **No app**: Configurações › Servidor › **Este PC é o servidor**. Os outros colocam o endereço desse PC (o 100.x do Tailscale ou o 26.x do Radmin) e a senha em Configurações › Servidor › **Entrar num servidor ScreenFlow**.
+- **No Linux**: baixe `ScreenFlow-Servidor-linux-x64.tar.gz` (ou `-arm64`) no release e rode `sudo ./install-server.sh --tailscale --nome "Meu servidor" --senha`. Ele vira um serviço que liga junto com o PC.
+- **No Windows, sem o app**: `ScreenFlow-Servidor-win-x64.zip`, com o `screenflow-servidor.exe --senha "..."`.
+- Na Transmissão, ligue **Transmitir também pelo servidor**. Pelo servidor, a senha dele faz o papel do PIN e da aprovação.
+- O instalador do ScreenFlow já pergunta se o PC entra num servidor ou é o servidor, e pode instalar o Tailscale ou o Radmin VPN junto.
+
+O guia completo (portas, firewall, Tailscale, limites e o que o servidor vê) está em [docs/SERVIDOR.md](docs/SERVIDOR.md).
+
 ## Portas
 
 | Porta | Protocolo | Uso |
@@ -119,6 +133,9 @@ O app divide 80% do upload medido entre quem está assistindo e baixa a qualidad
 | 47800 | UDP | Vídeo, áudio, FEC e teste de banda (host → viewer) |
 | 47801 | TCP | Handshake, controle, NACK, estatísticas |
 | 47802 | UDP | Descoberta das transmissões e sala da rede: presença, chat e voz |
+| 47810 | TCP | Servidor ScreenFlow: quem transmite e quem assiste entram por aqui |
+| 47811 | UDP | Servidor ScreenFlow: vídeo e som |
+| 47812 | UDP | Servidor ScreenFlow: sala (presença, chat, voz e canais) |
 
 As portas podem ser trocadas em **Configurações › Rede e diagnóstico** (os dois lados precisam usar as mesmas). O instalador cria as regras de entrada do Firewall do Windows para as portas padrão e para o ScreenFlow.exe.
 
@@ -127,15 +144,16 @@ As portas podem ser trocadas em **Configurações › Rede e diagnóstico** (os 
 - Troca de chaves ECDH P-256 a cada conexão e criptografia AES-GCM de todo pacote de mídia.
 - PIN opcional: a prova do PIN é derivada do segredo da conexão, então quem só escuta a rede não consegue testar PINs.
 - Modo **Aprovar cada pessoa** (vem desligado: quem está na rede entra direto) e limite de tentativas erradas (5 por minuto por IP).
-- A voz e o chat da rede **não** são criptografados pelo ScreenFlow: eles contam com o túnel do Radmin VPN, que já é criptografado entre os PCs. Quem está na mesma rede do Radmin e tem o ScreenFlow aberto ouve a voz, lê o chat e vê as imagens e as fotos de perfil, e o nome de quem fala ou escreve não é verificado. Use uma rede com senha, só com quem você conhece. O chat guardado fica em texto simples na pasta escolhida (e na sua conta do Google Drive, quando é a pasta dele).
+- A voz e o chat da rede **não** são criptografados pelo ScreenFlow (fora da sala privada): eles contam com o túnel do Radmin VPN ou do Tailscale, que já é criptografado entre os PCs. Quem está na mesma rede e tem o ScreenFlow aberto ouve a voz, lê o chat e vê as imagens e as fotos de perfil, e o nome de quem fala ou escreve não é verificado. Use uma rede com senha, só com quem você conhece. O chat guardado fica em texto simples na pasta escolhida (e na sua conta do Google Drive, quando é a pasta dele).
 - Imagens e fotos chegam pela sala em partes e só aparecem se o conteúdo bater com o hash SHA-256 anunciado. O app só abre JPEG e PNG que vêm da rede, com o tamanho conferido antes, e quem manda uma imagem só responde a quem está na sala.
-- O instalador do Radmin VPN baixado pelo app só roda se a assinatura digital for válida para o Windows e for da Famatech.
+- O instalador do Radmin VPN baixado pelo app só roda se a assinatura digital for válida para o Windows e for da Famatech. O do Tailscale, só se a assinatura for da Tailscale e o SHA-256 bater com o publicado. O ScreenFlow nunca usa chave de autenticação do Tailscale: cada pessoa entra na própria conta pelo navegador.
+- **Servidor ScreenFlow**: a senha do servidor vale para transmitir, assistir e entrar na sala dele, e substitui o PIN e a aprovação de quem transmite para quem assiste por ele. O servidor decifra a mídia e cifra de novo para cada pessoa, e guarda o chat: use um servidor seu ou de alguém de confiança. Na sala privada, o servidor só repassa o que vai lacrado.
 
 ## Diagnóstico
 
 Em **Configurações › Rede e diagnóstico** (ou `ScreenFlow.exe --diagnostico` no terminal) aparecem: IP do Radmin e adaptadores, portas e firewall, as placas de vídeo (com a versão do driver, qual é a principal e o problema que o Windows relata, se houver), encoders e decoders por hardware (e por que o da placa principal não abriu), câmeras, versão do FFmpeg e o perfil recomendado. O teste de banda até um viewer fica na tela Transmissão.
 
-`ScreenFlow.exe --autoteste` confere, no próprio PC: uma festa de música no 127.0.0.1 (o som chega ao viewer e é decodificado) e, nela, os controles de quem assiste (a música e os apps chegam ao viewer, os pedidos para pular e para tirar um app chegam ao host e um pedido inválido é recusado); duas salas da rede conversando no chat e na voz, passando a foto do perfil e uma imagem de 1 MB de uma para a outra e usando canais (um canal de texto e um de voz criados, a mensagem no canal certo e a voz seguindo a troca de canal); e, se o PC tiver saída de som, a separação do som do PC por app e a festa com um app só (o som do ScreenFlow e o do app tirado ficam fora, o resto vai). O CI roda isso a cada mudança, com uma placa de som virtual.
+`ScreenFlow.exe --autoteste` confere, no próprio PC: uma festa de música no 127.0.0.1 (o som chega ao viewer e é decodificado) e, nela, os controles de quem assiste (a música e os apps chegam ao viewer, os pedidos para pular e para tirar um app chegam ao host e um pedido inválido é recusado); duas salas da rede conversando no chat e na voz, passando a foto do perfil e uma imagem de 1 MB de uma para a outra e usando canais (um canal de texto e um de voz criados, a mensagem no canal certo e a voz seguindo a troca de canal); uma festa por um servidor ScreenFlow aberto no próprio PC, com senha, e o chat e os canais da sala passando por ele; e, se o PC tiver saída de som, a separação do som do PC por app e a festa com um app só (o som do ScreenFlow e o do app tirado ficam fora, o resto vai). O CI roda isso a cada mudança, com uma placa de som virtual.
 
 Logs ficam em `%LOCALAPPDATA%\ScreenFlow\logs` (botão **Abrir logs**). As fotos de perfil e as imagens do chat ficam em `%LOCALAPPDATA%\ScreenFlow\imagens`; as que não são usadas há 30 dias são apagadas sozinhas.
 
@@ -157,7 +175,9 @@ Para publicar uma versão, crie um release no GitHub com a tag nova `v1.3.0` na 
 | FPS abaixo do escolhido | Veja o encoder em Diagnóstico. Sem NVENC/AMF/QSV o app usa software. Notebooks: conecte na tomada e use a GPU dedicada. |
 | Sem áudio | Ligue **Compartilhar o som do PC** antes de começar (na festa de música ele já vem ligado). Confira o volume no player (M e setas). Se ainda assim não vier som, desligue **Separar o som por app** em Configurações › Transmissão. |
 | Um app tirado continua aparecendo no som | Alguns apps tocam por outro processo (no Steam, o som vem do `steamwebhelper`). Abra **Escolher apps** de novo com o app tocando e marque o que aparece tocando. |
-| Ninguém aparece na Sala da rede | Todos precisam do ScreenFlow 1.1 ou mais novo, na mesma rede do Radmin, com a porta UDP 47802 liberada. Adicione pelo IP do Radmin na lista de quem está na rede. |
+| Ninguém aparece na Sala da rede | Todos precisam do ScreenFlow 1.1 ou mais novo, na mesma rede do Radmin ou do Tailscale, com a porta UDP 47802 liberada. Adicione pelo IP na lista de quem está na rede. Com um servidor configurado, a sala é a do servidor: todos precisam estar nele. |
+| O servidor não é achado | Em Configurações › Servidor, confira o endereço (o 100.x do Tailscale ou o 26.x do Radmin) e se o Tailscale ou o Radmin VPN está ligado nos dois PCs. No PC servidor, as portas 47810/tcp, 47811/udp e 47812/udp precisam estar liberadas. Veja [docs/SERVIDOR.md](docs/SERVIDOR.md). |
+| "Senha do servidor incorreta" | Coloque a mesma senha do servidor em Configurações › Servidor e salve. |
 | Ninguém me ouve na voz | Vocês precisam estar no mesmo canal de voz. Veja se o Windows deixa apps usarem o microfone (Configurações do Windows › Privacidade e segurança › Microfone) e use **Testar microfone** em Configurações › Voz e sala. |
 | Não ouço uma pessoa só | Botão direito nela na voz: o volume dela pode estar em 0% ou com **Silenciar para mim** marcado. **Volume normal (100%)** volta ao normal. |
 | Alguém não vê o meu canal | Quem está no ScreenFlow 1.2 ou mais antigo só vê o #geral e a voz Geral. Os canais criados aparecem enquanto quem criou está na sala. |

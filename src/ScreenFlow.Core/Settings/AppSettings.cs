@@ -29,9 +29,9 @@ public sealed class AppSettings
     public int ControlPort { get; set; } = AppInfo.DefaultControlPort;
     public int DiscoveryPort { get; set; } = AppInfo.DefaultDiscoveryPort;
     public bool FirewallConfigured { get; set; }
-    // (1.4.0) "AllowNonRadminFallback" saiu: nunca teve tela nem uso, e o ScreenFlow só conecta pela rede do Radmin VPN.
-    // Configurações antigas que ainda têm a chave abrem normalmente (chaves desconhecidas são ignoradas) e ela some no
-    // próximo salvamento. Outras redes ficam para o servidor opcional planejado em docs/SERVIDOR-LINUX.md.
+    // (1.4.0) "AllowNonRadminFallback" saiu: nunca teve tela nem uso. Configurações antigas que ainda têm a chave abrem
+    // normalmente (chaves desconhecidas são ignoradas) e ela some no próximo salvamento. Na 1.4.1, o Tailscale e o
+    // servidor ScreenFlow (docs/SERVIDOR.md) entraram ao lado do Radmin VPN.
 
     // Transmissão
     /// <summary>O que transmitir: tela (monitor ou janela), câmera ou só o áudio (festa de música).</summary>

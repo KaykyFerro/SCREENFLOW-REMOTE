@@ -1,4 +1,4 @@
-# Plano de melhorias (estado na 1.4.0)
+# Plano de melhorias (estado na 1.4.1)
 
 Este arquivo registra o estado real de cada item do plano consolidado depois da 1.3.0. "Feito" quer dizer implementado,
 com testes automatizados e passando no CI do Windows. Nada aqui foi testado entre PCs reais ainda: o que depende disso
@@ -9,16 +9,35 @@ código) · **Pendente**.
 
 ## Decisões de rede
 
-- O Radmin VPN continua sendo o caminho de conexão. Nada na 1.4.0 depende de outro servidor.
+- O Radmin VPN continua sendo um caminho de conexão. Na 1.4.1 o Tailscale entrou ao lado dele, e nada depende de um
+  servidor: sem servidor configurado, tudo continua direto entre os PCs.
 - `AllowNonRadminFallback` saiu das configurações. Ele nunca teve tela nem efeito. Um arquivo antigo que ainda tiver a
   chave é lido normalmente, e ela some no próximo salvamento.
-- O servidor Linux opcional existe só como planejamento, em [SERVIDOR-LINUX.md](SERVIDOR-LINUX.md).
+- O servidor ScreenFlow (1.4.1) é um PC seu, alcançado pelo Tailscale, pelo Radmin VPN ou pela rede local. O guia está
+  em [SERVIDOR.md](SERVIDOR.md). O servidor público na internet, com contas, continua só no plano (no fim do guia).
 
 ## O que já estava pronto e foi preservado
 
 - A 1.3.0 inteira (canais, volume por pessoa, SMTC, chat no Google Drive, configurações em abas).
 - As correções do atualizador e da cópia das configurações inválidas pedidas no plano não estavam no repositório. Elas
   foram feitas de novo na 1.4.0 (itens 6 e "Configurações" abaixo).
+
+## Pedidos da 1.4.1
+
+- **Canais livres — Feito.** Só o canal de texto `geral` e o de voz `Geral` vêm prontos. Cada pessoa cria os seus na
+  sala direta, e no servidor qualquer pessoa cria, renomeia e apaga os canais, que ficam guardados nele.
+- **Temas por pessoa — Feito.** 10 cores (uma de cada), em cima do tema escuro ou do claro, guardadas só no PC de quem
+  escolheu e aplicadas na hora.
+- **Radmin VPN e Tailscale — Feito.** O app mostra e liga o Tailscale, instala o MSI oficial conferido e, sem servidor,
+  acha os PCs da rede do Tailscale sozinho (ele não repassa broadcast). O app continua só para Windows. O servidor roda
+  também no Linux.
+- **Servidor — Feito.** A tela e o chat geral vão para o servidor, e os outros assistem e conversam por ele. Guia em
+  [SERVIDOR.md](SERVIDOR.md).
+- **Instalador — Feito.** Opções de instalar o Tailscale e o Radmin VPN junto e de escolher o modo do servidor (entrar
+  num servidor ou este PC é o servidor). O servidor Linux tem o `install-server.sh --tailscale`.
+- **Revisão e otimização — Feito.** A sala guarda até 512 pessoas (o máximo do servidor), a voz e a presença usam a
+  lista da sala sem ordenar, e o autoteste do CI passa uma transmissão, o chat e os canais por um servidor de verdade.
+- Nada disto foi testado entre PCs reais ainda. A lista está em [ROADMAP.md](ROADMAP.md).
 
 ## Minutagem do vídeo transmitido — Feito
 
@@ -98,7 +117,9 @@ código) · **Pendente**.
     `MediaSeek`, `MediaBindingRules`, `PrivateRoom`, `PushToTalk`, `CaptureArea`, `CaptureCrop` e `UpdateIntegrity`.
     Uma divisão maior pede testes entre PCs reais antes, para não quebrar nada.
 14. **Gravação e replay — Pendente (sem avaliação ainda).**
-15. **Servidor Linux — Planejado**, em [SERVIDOR-LINUX.md](SERVIDOR-LINUX.md). Não foi construído.
+15. **Servidor — Feito na 1.4.1** (o servidor seu, pelo Tailscale, pelo Radmin VPN ou pela rede local), com o guia em
+    [SERVIDOR.md](SERVIDOR.md). Roda dentro do app, no Linux (serviço do systemd) e no Windows. O servidor público na
+    internet, com contas, STUN e relay, continua **Pendente**. Nada do servidor foi testado entre PCs reais ainda.
 
 ## Configurações
 

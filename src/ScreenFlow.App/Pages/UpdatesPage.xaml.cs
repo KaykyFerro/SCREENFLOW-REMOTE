@@ -218,7 +218,7 @@ public partial class UpdatesPage : UserControl, IShellPage
     private void Releases_Click(object sender, RoutedEventArgs e) => MainWindow.OpenUrl(UpdateService.ReleasesPage);
 
     /// <summary>Usado nas capturas de tela do CI: finge que existe uma versão nova.</summary>
-    internal static ReleaseInfo DemoRelease { get; } = new(new Version(1, 4, 0), "v1.4.0", "ScreenFlow 1.4.0",
+    internal static ReleaseInfo DemoRelease { get; } = new(new Version(1, 5, 0), "v1.5.0", "ScreenFlow 1.5.0",
         "## Novidades\n- Melhorias de desempenho no player\n- Ajustes no visual\n\n## Correções\n- Correções de estabilidade",
         "https://example.invalid/ScreenFlow-Setup-win-x64.exe", "ScreenFlow-Setup-win-x64.exe", 48_000_000, null);
 }

@@ -2,7 +2,7 @@
 # /etc/systemd/system/. A configuração (nome, senha, porta) fica em /etc/screenflow-servidor.env, legível só pelo root.
 [Unit]
 Description=Servidor ScreenFlow (tela, chat e voz para todo mundo)
-Documentation=https://github.com/KaykyFerro/SCREENFLOW-REMOTE/blob/main/docs/SERVIDOR-LINUX.md
+Documentation=https://github.com/KaykyFerro/SCREENFLOW-REMOTE/blob/main/docs/SERVIDOR.md
 Wants=network-online.target
 After=network-online.target tailscaled.service
 
