@@ -52,6 +52,7 @@ public partial class SettingsPage : UserControl, IShellPage
     private bool _loading;
     private SettingsTab _tab = SettingsTab.General;
     private bool _archiveDemo;
+    private bool _serverDemo;
     private bool _choosingFolder;
     private readonly ObservableCollection<AddressRow> _addresses = [];
 
@@ -433,6 +434,16 @@ public partial class SettingsPage : UserControl, IShellPage
             return;
         }
         if (ServerStatusText is null) return;
+        if (_serverDemo)
+        {
+            ServerStatusText.Text = "Este PC é o servidor \"Servidor do Kayky\": 4 pessoas nele e 1 transmissão no ar.";
+            ServerDot.SetResourceReference(Shape.FillProperty, "Accent");
+            HostedDetails.Text = "Servidor \"Servidor do Kayky\" · portas TCP 47810, UDP 47811 e 47812 · com senha\n"
+                                 + "Na sala (4): Ana, Bruno, Carla, PC da Sala\n"
+                                 + "  Ana (Tela): HEVC 1920x1080 60 FPS · entrando 18.2 Mbps, saindo 54.6 Mbps · 3 assistindo (Bruno, Carla, PC da Sala)";
+            HostedDetails.Visibility = Visibility.Visible;
+            return;
+        }
         var service = AppServices.Server;
         var room = AppServices.Room.ServerStatus;
         var role = AppServices.DemoMode ? ServerRole.None : Settings.ServerRole;
@@ -991,6 +1002,18 @@ public partial class SettingsPage : UserControl, IShellPage
     {
         _archiveDemo = true;
         UpdateArchiveCard();
+    }
+
+    /// <summary>Usado nas capturas de tela do CI: este PC é o servidor, com gente nele e uma transmissão no ar.</summary>
+    internal void ShowServerDemo()
+    {
+        _serverDemo = true;
+        RoleHost.IsChecked = true;
+        HostedNameBox.Text = "Servidor do Kayky";
+        HostedPasswordBox.Text = "senha da casa";
+        TransmitViaServerToggle.IsChecked = true;
+        ApplyRolePanels();
+        UpdateServerStatus();
     }
 
     /// <summary>O chat guardado vale na hora (sem precisar do Salvar): a sala abre ou fecha a pasta.</summary>
