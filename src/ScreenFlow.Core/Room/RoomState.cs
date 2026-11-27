@@ -48,7 +48,11 @@ public readonly record struct PeerUpdate(RoomPeer? Peer, bool IsNew, RoomPresenc
 /// </summary>
 public sealed class RoomPeerTable
 {
-    public const int MaxPeers = 64;
+    /// <summary>
+    /// Quantas pessoas a sala guarda. É também o máximo de um servidor ScreenFlow (1.4.1), para que todo mundo que entrou
+    /// no servidor apareça para todo mundo.
+    /// </summary>
+    public const int MaxPeers = 512;
     private readonly Dictionary<Guid, RoomPeer> _peers = [];
     private readonly object _gate = new();
 
@@ -124,9 +128,16 @@ public sealed class RoomPeerTable
         return gone;
     }
 
+    /// <summary>Quem está na sala, em ordem de nome (para a tela).</summary>
     public IReadOnlyList<RoomPeer> Snapshot()
     {
         lock (_gate) return _peers.Values.OrderBy(p => p.Presence.Name, StringComparer.CurrentCultureIgnoreCase).ToArray();
+    }
+
+    /// <summary>Quem está na sala, sem ordem: para enviar (a voz pede a cada 20 ms e não precisa ordenar).</summary>
+    public RoomPeer[] All()
+    {
+        lock (_gate) return [.. _peers.Values];
     }
 }
 

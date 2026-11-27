@@ -94,6 +94,27 @@
                                         <ComboBox x:Name="FpsCombo"/>
                                     </StackPanel>
                                 </Grid>
+                                <TextBlock Style="{StaticResource Label}" Text="O que aparece para quem assiste"/>
+                                <Border x:Name="AreaCard" Style="{StaticResource InsetCard}" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <DockPanel>
+                                            <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE7B3;" Foreground="{DynamicResource Violet}" VerticalAlignment="Top" Margin="0,2,12,0"/>
+                                            <TextBlock x:Name="AreaSummary" Style="{StaticResource Muted}" FontSize="13" LineHeight="19" TextWrapping="Wrap" Text="Tela inteira, com o cursor."/>
+                                        </DockPanel>
+                                        <WrapPanel Margin="0,10,0,0">
+                                            <Button x:Name="ChooseRegionButton" Style="{StaticResource ChipButton}" Content="Escolher uma parte" Margin="0,0,8,6" Click="ChooseRegion_Click"
+                                                    ToolTip="Arraste por cima da tela para mandar só aquele pedaço. Dá para mudar durante a transmissão."/>
+                                            <Button x:Name="AddMaskButton" Style="{StaticResource ChipButton}" Content="Tapar uma área" Margin="0,0,8,6" Click="AddMask_Click"
+                                                    ToolTip="A área escolhida fica preta para quem assiste (senhas, mensagens, a barra de abas)."/>
+                                            <Button x:Name="ClearAreaButton" Style="{StaticResource ChipButton}" Content="Mostrar tudo de novo" Margin="0,0,8,6" Click="ClearArea_Click"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
+                                <CheckBox x:Name="CursorToggle" Style="{StaticResource Switch}" Content="Mostrar o cursor do mouse"
+                                          Checked="Area_Changed" Unchecked="Area_Changed"/>
+                                <CheckBox x:Name="MaskNotificationsToggle" Style="{StaticResource Switch}" Content="Tapar as notificações do Windows"
+                                          ToolTip="O canto de baixo à direita, onde aparecem as notificações, fica preto para quem assiste."
+                                          Checked="Area_Changed" Unchecked="Area_Changed"/>
                                 <CheckBox x:Name="CameraWithScreenToggle" Style="{StaticResource Switch}" Content="Mandar a câmera junto"
                                           ToolTip="Quem assiste vê a sua webcam num quadrinho no canto da tela."
                                           Checked="CameraWithScreen_Changed" Unchecked="CameraWithScreen_Changed"/>
@@ -145,7 +166,7 @@
                         <StackPanel>
                         <StackPanel x:Name="AccessPanel">
                             <TextBlock Style="{StaticResource Heading}" Text="Quem pode entrar" Margin="0,0,0,16"/>
-                            <TextBlock Style="{StaticResource Caption}" Text="Seu IP do Radmin"/>
+                            <TextBlock x:Name="IpCaption" Style="{StaticResource Caption}" Text="Seu IP do Radmin"/>
                             <DockPanel Margin="0,2,0,0">
                                 <Button x:Name="CopyButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE8C8;" ToolTip="Copiar o IP" Click="Copy_Click" VerticalAlignment="Center"/>
                                 <TextBlock x:Name="IpText" FontFamily="{DynamicResource FontDisplay}" FontSize="30" FontWeight="Bold" Foreground="{DynamicResource AccentText}" Text="—"
@@ -168,11 +189,22 @@
 
                             <TextBlock Style="{StaticResource Label}" Text="Rede usada" Margin="0,18,0,7"/>
                             <ComboBox x:Name="AdapterCombo" SelectionChanged="Adapter_SelectionChanged"/>
+
+                            <!-- (1.4.1) Uma cópia só vai para o servidor ScreenFlow, e quem está nele assiste por lá. -->
+                            <Border x:Name="ServerPanel" Style="{StaticResource InsetCard}" Margin="0,16,0,0" Padding="14,12" Visibility="Collapsed">
+                                <StackPanel>
+                                    <CheckBox x:Name="ViaServerToggle" Style="{StaticResource Switch}" Content="Transmitir também pelo servidor"
+                                              Checked="ViaServer_Changed" Unchecked="ViaServer_Changed"
+                                              ToolTip="Uma cópia só da tela vai para o servidor, e ele manda para cada pessoa que assiste por lá. Economiza o seu upload."/>
+                                    <TextBlock x:Name="ServerHint" Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Border>
+
                             <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de entrar" Margin="0,18,0,16"/>
                             <TextBlock Style="{StaticResource Label}" Text="PIN (opcional)"/>
                             <TextBox x:Name="PinBox" Tag="Sem PIN" MaxLength="32" ToolTip="Deixe vazio para não pedir PIN. Mínimo de 4 caracteres."/>
-                            <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0"
-                                       Text="Qualquer pessoa na mesma rede Radmin alcança o seu IP. Use PIN ou aprovação para controlar quem entra."/>
+                            <TextBlock x:Name="AccessHint" Style="{StaticResource Caption}" Margin="0,8,0,0" TextWrapping="Wrap"
+                                       Text="Qualquer pessoa na mesma rede (Radmin VPN ou Tailscale) alcança o seu IP. Use PIN ou aprovação para controlar quem entra."/>
                         </StackPanel>
                         <!-- Fica fora do AccessPanel: dá para trocar com a transmissão no ar. -->
                         <CheckBox x:Name="ViewerControlsToggle" Style="{StaticResource Switch}" Content="Quem assiste pode mexer nos controles" Margin="0,18,0,0"
@@ -223,7 +255,8 @@
                         <StackPanel>
                             <DockPanel>
                                 <ComboBox x:Name="MediaSessionCombo" DockPanel.Dock="Right" MinWidth="150" MaxWidth="220" VerticalAlignment="Top" Margin="12,0,0,0"
-                                          Visibility="Collapsed" ToolTip="Mais de um app está tocando: escolha qual controlar"/>
+                                          Visibility="Collapsed" ToolTip="Escolha qual app controlar (só ele vai para quem assiste)"
+                                          AutomationProperties.Name="App que a transmissão controla"/>
                                 <Grid Width="60" Height="60" VerticalAlignment="Center">
                                     <Border CornerRadius="14" Background="{DynamicResource BrandGradient}">
                                         <TextBlock Style="{StaticResource Icon}" Text="&#xE8D6;" FontSize="22" Foreground="{DynamicResource OnAccent}"
@@ -244,19 +277,30 @@
                                     <ColumnDefinition Width="Auto"/>
                                 </Grid.ColumnDefinitions>
                                 <TextBlock x:Name="MediaPosition" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="38" Text="0:00"/>
-                                <Slider x:Name="MediaSeek" Grid.Column="1" Margin="10,0" Minimum="0" Maximum="1" ToolTip="Arraste para ir a outro ponto"
+                                <Slider x:Name="MediaSeek" Grid.Column="1" Margin="10,0" Minimum="0" Maximum="1" ToolTip="Arraste para ir a outro ponto (vale para todo mundo)"
+                                        AutomationProperties.Name="Ponto do vídeo" SmallChange="5" LargeChange="10" IsMoveToPointEnabled="True"
+                                        PreviewKeyUp="MediaSeek_PreviewKeyUp"
                                         PreviewMouseLeftButtonDown="MediaSeek_PreviewMouseLeftButtonDown" PreviewMouseLeftButtonUp="MediaSeek_PreviewMouseLeftButtonUp"
                                         ValueChanged="MediaSeek_ValueChanged"/>
                                 <TextBlock x:Name="MediaDuration" Grid.Column="2" Style="{StaticResource Caption}" VerticalAlignment="Center" MinWidth="38"
                                            TextAlignment="Right" Text="0:00"/>
                             </Grid>
+                            <!-- Estado da minutagem (1.4.0): ao vivo, indo para um ponto, pronto, recusado, ou por que não dá para buscar -->
+                            <TextBlock x:Name="MediaSeekNote" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,6,0,0" Visibility="Collapsed"
+                                       AutomationProperties.LiveSetting="Polite"/>
                             <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,10,0,0">
-                                <Button x:Name="MediaPrevious" Style="{StaticResource IconButton}" Content="&#xE892;" ToolTip="Voltar" Click="MediaPrevious_Click"/>
-                                <Button x:Name="MediaPlayPause" Style="{StaticResource PrimaryButton}" Width="52" Height="44" Padding="0" Margin="16,0"
-                                        HorizontalContentAlignment="Center" ToolTip="Pausar" Click="MediaPlayPause_Click">
+                                <Button x:Name="MediaPrevious" Style="{StaticResource IconButton}" Content="&#xE892;" ToolTip="Voltar"
+                                        AutomationProperties.Name="Voltar para a anterior" Click="MediaPrevious_Click"/>
+                                <Button x:Name="MediaBack" Style="{StaticResource SkipButton}" Content="−10" ToolTip="Voltar 10 segundos" Margin="8,0,0,0"
+                                        AutomationProperties.Name="Voltar 10 segundos" Click="MediaBack_Click"/>
+                                <Button x:Name="MediaPlayPause" Style="{StaticResource PrimaryButton}" Width="52" Height="44" Padding="0" Margin="12,0"
+                                        HorizontalContentAlignment="Center" ToolTip="Pausar" AutomationProperties.Name="Tocar ou pausar" Click="MediaPlayPause_Click">
                                     <TextBlock x:Name="MediaPlayGlyph" Style="{StaticResource Icon}" Text="&#xE769;" FontSize="16"/>
                                 </Button>
-                                <Button x:Name="MediaNext" Style="{StaticResource IconButton}" Content="&#xE893;" ToolTip="Pular" Click="MediaNext_Click"/>
+                                <Button x:Name="MediaForward" Style="{StaticResource SkipButton}" Content="+10" ToolTip="Avançar 10 segundos" Margin="0,0,8,0"
+                                        AutomationProperties.Name="Avançar 10 segundos" Click="MediaForward_Click"/>
+                                <Button x:Name="MediaNext" Style="{StaticResource IconButton}" Content="&#xE893;" ToolTip="Pular"
+                                        AutomationProperties.Name="Pular para a próxima" Click="MediaNext_Click"/>
                             </StackPanel>
                         </StackPanel>
                     </Border>
@@ -379,24 +423,38 @@
                                 <TextBlock x:Name="ViewerCount" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
                                 <TextBlock Style="{StaticResource Heading}" Text="Quem está assistindo"/>
                             </DockPanel>
-                            <TextBlock x:Name="NoViewers" Style="{StaticResource Muted}" Margin="0,6,0,0"
-                                       Text="Ninguém ainda. Quem estiver na sua rede Radmin vê você na tela Assistir, ou entra digitando o seu IP."/>
+                            <!-- (1.4.1) Como está a transmissão pelo servidor -->
+                            <Border x:Name="ServerLive" Style="{StaticResource InsetCard}" Margin="0,12,0,0" Padding="12,10" Visibility="Collapsed">
+                                <DockPanel>
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE753;" FontSize="16" Foreground="{DynamicResource AccentText}"
+                                               VerticalAlignment="Top" Margin="0,1,10,0"/>
+                                    <TextBlock x:Name="ServerLiveText" Style="{StaticResource Body}" FontSize="13" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                </DockPanel>
+                            </Border>
+                            <TextBlock x:Name="NoViewers" Style="{StaticResource Muted}" Margin="0,6,0,0" TextWrapping="Wrap"
+                                       Text="Ninguém ainda. Quem estiver na sua rede (Radmin VPN ou Tailscale) vê você na tela Assistir, ou entra digitando o seu IP."/>
                             <ItemsControl x:Name="ViewerList" Margin="0,14,0,0">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
                                         <Border Style="{StaticResource InsetCard}" Margin="0,0,0,8">
                                             <DockPanel>
-                                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE711;" ToolTip="Remover da transmissão" Click="Kick_Click" Tag="{Binding Id}"/>
+                                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE711;" ToolTip="Remover da transmissão" Click="Kick_Click" Tag="{Binding Id}"
+                                                        Visibility="{Binding CanKick, Converter={StaticResource BoolToVisibility}}"/>
                                                 <Button DockPanel.Dock="Right" Content="{Binding TestText}" IsEnabled="{Binding CanTest}" MinHeight="34" Padding="12,0" Margin="8,0,6,0"
-                                                        FontSize="12.5" Click="Bandwidth_Click" Tag="{Binding Id}" ToolTip="Mede a banda até esta pessoa por 3 segundos"/>
+                                                        FontSize="12.5" Click="Bandwidth_Click" Tag="{Binding Id}" ToolTip="{Binding TestTip}"/>
                                                 <Border Width="38" Height="38" CornerRadius="19" Background="{DynamicResource BrandGradient}" VerticalAlignment="Center">
-                                                    <TextBlock Text="{Binding Initial}" FontWeight="Bold" Foreground="{DynamicResource OnAccent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    <Grid>
+                                                        <TextBlock Text="{Binding Initial}" FontWeight="Bold" Foreground="{DynamicResource OnAccent}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                                   Visibility="{Binding IsPerson, Converter={StaticResource BoolToVisibility}}"/>
+                                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE753;" Foreground="{DynamicResource OnAccent}"
+                                                                   Visibility="{Binding IsServer, Converter={StaticResource BoolToVisibility}}"/>
+                                                    </Grid>
                                                 </Border>
                                                 <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
                                                     <TextBlock FontWeight="SemiBold">
                                                         <Run Text="{Binding Name, Mode=OneWay}"/><Run Text="  " /><Run Text="{Binding Address, Mode=OneWay}" Foreground="{DynamicResource TextSubtle}" FontWeight="Normal" FontSize="12.5"/>
                                                     </TextBlock>
-                                                    <TextBlock Text="{Binding Details}" Style="{StaticResource Caption}" Margin="0,2,0,0"/>
+                                                    <TextBlock Text="{Binding Details}" Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap"/>
                                                 </StackPanel>
                                             </DockPanel>
                                         </Border>

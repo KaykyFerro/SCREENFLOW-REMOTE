@@ -1,0 +1,81 @@
+name: Server build and tests (Linux)
+
+# O servidor ScreenFlow (1.4.1) no Linux: testes, o programa para x64 e arm64 e a instalação de verdade como serviço do
+# systemd (o runner do GitHub tem systemd), ligando, conferindo as portas e desinstalando.
+
+concurrency:
+  group: screenflow-server-${{ github.ref }}
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Run automated tests (Core and server)
+        run: dotnet test tests/ScreenFlow.Tests --configuration Release --logger "trx;LogFileName=screenflow-server-tests.trx"
+      - name: Lint the install script
+        run: shellcheck deploy/linux/install-server.sh
+      - name: Publish the server (linux-x64 and linux-arm64)
+        run: |
+          set -euo pipefail
+          for rid in linux-x64 linux-arm64; do
+            dotnet publish src/ScreenFlow.Server/ScreenFlow.Server.csproj --configuration Release --runtime "$rid" --output "artifacts/$rid/screenflow-servidor"
+            chmod +x "artifacts/$rid/screenflow-servidor/screenflow-servidor" "artifacts/$rid/screenflow-servidor/install-server.sh"
+            tar -czf "artifacts/ScreenFlow-Servidor-$rid.tar.gz" -C "artifacts/$rid" screenflow-servidor
+          done
+          ls -la artifacts artifacts/linux-x64/screenflow-servidor
+      - name: Smoke test (the program starts, listens and stops)
+        run: |
+          set -euo pipefail
+          server=artifacts/linux-x64/screenflow-servidor/screenflow-servidor
+          "$server" --versao
+          SCREENFLOW_SENHA=ci "$server" --nome "CI" --pasta "$RUNNER_TEMP/servidor" > "$RUNNER_TEMP/servidor.log" 2>&1 &
+          pid=$!
+          for _ in $(seq 1 30); do
+            if (exec 3<>/dev/tcp/127.0.0.1/47810) 2>/dev/null; then break; fi
+            sleep 0.5
+          done
+          (exec 3<>/dev/tcp/127.0.0.1/47810) || { cat "$RUNNER_TEMP/servidor.log"; echo "O servidor não abriu a porta 47810."; exit 1; }
+          kill -TERM "$pid"
+          wait "$pid" || { cat "$RUNNER_TEMP/servidor.log"; echo "O servidor não desligou com calma."; exit 1; }
+          cat "$RUNNER_TEMP/servidor.log"
+          grep -q "Servidor ScreenFlow desligado" "$RUNNER_TEMP/servidor.log"
+      - name: Install as a systemd service, check it and remove it
+        run: |
+          set -euo pipefail
+          cd artifacts/linux-x64/screenflow-servidor
+          sudo ./install-server.sh --nome "Servidor do CI" --senha "ci 123" --sem-firewall
+          systemctl is-active screenflow-servidor
+          sudo test "$(sudo stat -c %a /etc/screenflow-servidor.env)" = "600"
+          sudo grep -q '^SCREENFLOW_SENHA="ci 123"$' /etc/screenflow-servidor.env
+          (exec 3<>/dev/tcp/127.0.0.1/47810)
+          sudo journalctl -u screenflow-servidor --no-pager -n 30
+          sudo journalctl -u screenflow-servidor --no-pager | grep -q "Servidor do CI"
+          # Atualizar sem mudar nada guarda o nome e a senha.
+          sudo ./install-server.sh --sem-firewall
+          sudo grep -q '^SCREENFLOW_NOME="Servidor do CI"$' /etc/screenflow-servidor.env
+          systemctl is-active screenflow-servidor
+          sudo ./install-server.sh --remover --apagar-dados
+          if systemctl is-active --quiet screenflow-servidor; then echo "O serviço continuou ligado depois de remover."; exit 1; fi
+          test ! -e /opt/screenflow-servidor
+          test ! -e /etc/systemd/system/screenflow-servidor.service
+      - name: Upload the Linux server
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenFlow-Servidor-linux
+          path: artifacts/ScreenFlow-Servidor-*.tar.gz
+          if-no-files-found: error
+          retention-days: 14

@@ -25,9 +25,21 @@ public static class AppServices
     public static RadminSetup RadminSetup { get; } = new();
 
     private static RoomService? _room;
+    private static ServerService? _server;
+
+    /// <summary>(1.4.1) O servidor ScreenFlow em uso: o de outro PC ou o que roda neste. Criado na thread da interface.</summary>
+    public static ServerService Server => _server ??= new ServerService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+
+    private static TailscaleSetup? _tailscale;
+
+    /// <summary>(1.4.1) O Tailscale deste PC: estado, ligar (login no navegador) e instalar. Criado na thread da interface.</summary>
+    public static TailscaleSetup Tailscale => _tailscale ??= new TailscaleSetup(System.Windows.Threading.Dispatcher.CurrentDispatcher);
 
     /// <summary>Sala da rede: quem está com o ScreenFlow aberto na rede, a voz e o chat. Criada na thread da interface.</summary>
     public static RoomService Room => _room ??= new RoomService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+
+    /// <summary>(1.4.1) O que o instalador pediu ao abrir o ScreenFlow (instalar o Tailscale ou o Radmin VPN junto).</summary>
+    public static StartupOptions Startup { get; set; } = StartupOptions.None;
 
     /// <summary>Modo das capturas de tela do CI: telas com dados de exemplo, sem tocar em rede nem em hardware.</summary>
     public static bool DemoMode { get; set; }
@@ -68,6 +80,9 @@ public static class AppServices
     public static GpuInfo? MainGpu(HardwareProfile hardware) => hardware.MainGpu;
 
     public static NetworkAdapterInfo? FindRadmin() => DemoMode ? DemoData.Radmin : RadminNetwork.FindRadmin();
+
+    /// <summary>(1.4.1) O Tailscale deste PC (null sem ele). No modo de exemplo, não tem.</summary>
+    public static NetworkAdapterInfo? FindTailscale() => DemoMode ? null : RadminNetwork.FindTailscale();
 
     /// <summary>"Windows 11 Pro" (o registro ainda diz "Windows 10" no 11, então corrige pelo número da build).</summary>
     public static string OsName => _osName ??= DetectOsName();

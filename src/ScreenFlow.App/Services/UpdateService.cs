@@ -75,6 +75,8 @@ public sealed class UpdateService
     {
         if (Installing) return false;
         Installing = true;
+        using var cancel = new CancellationTokenSource();
+        _cancel = cancel;
         Error = null;
         Progress = 0;
         Changed?.Invoke();
@@ -86,12 +88,21 @@ public sealed class UpdateService
                 Progress = p;
                 Changed?.Invoke();
             });
-            var path = await updater.DownloadAsync(release, progress);
+            var path = await updater.DownloadAsync(release, progress, cancel.Token);
+            _cancel = null;
             Progress = 1;
             Changed?.Invoke();
             await beforeInstall();
             Updater.LaunchInstaller(path);
             return true;
+        }
+        catch (OperationCanceledException) when (cancel.IsCancellationRequested)
+        {
+            Log.Info("Atualização cancelada por quem usa o app.");
+            Error = "Atualização cancelada. Nada foi instalado.";
+            Installing = false;
+            Changed?.Invoke();
+            return false;
         }
         catch (Exception exception)
         {
@@ -101,6 +112,19 @@ public sealed class UpdateService
             Changed?.Invoke();
             return false;
         }
+        finally { _cancel = null; }
+    }
+
+    private CancellationTokenSource? _cancel;
+
+    /// <summary>Dá para cancelar enquanto o instalador está sendo baixado e conferido (depois disso ele já abriu).</summary>
+    public bool CanCancel => Installing && _cancel is not null;
+
+    /// <summary>Cancela o download: o arquivo baixado até aqui é apagado e nada é instalado.</summary>
+    public void CancelInstall()
+    {
+        try { _cancel?.Cancel(); }
+        catch (ObjectDisposedException) { }
     }
 
     /// <summary>Capturas de tela do CI: mostra uma versão nova de exemplo sem acessar a rede.</summary>

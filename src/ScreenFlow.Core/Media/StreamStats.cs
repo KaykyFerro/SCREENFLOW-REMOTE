@@ -36,6 +36,12 @@ public sealed class ClockSync
     }
 
     public long HostToViewerUs(long hostUs) => HasEstimate ? (long)(hostUs - _offsetUs) : hostUs;
+
+    /// <summary>
+    /// O instante local no relógio do host (1.4.1). O servidor responde o ping de quem assiste com a hora do host, então
+    /// a latência medida por quem assiste continua sendo a de ponta a ponta (da captura no host até a tela).
+    /// </summary>
+    public long ViewerToHostUs(long viewerUs) => HasEstimate ? (long)(viewerUs + _offsetUs) : viewerUs;
 }
 
 /// <summary>Contador de taxa em janela deslizante de 1 s.</summary>

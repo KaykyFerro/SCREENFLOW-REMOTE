@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -7,6 +8,7 @@ using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Protocol;
 using ScreenFlow.Core.Room;
+using ScreenFlow.Core.Server;
 using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
@@ -19,13 +21,17 @@ namespace ScreenFlow.App.Services;
 /// <summary>
 /// ScreenFlow.exe --autoteste: abre uma festa de música de verdade no 127.0.0.1 (com um tom de teste no lugar do som do
 /// PC), conecta um viewer nela e confere se o áudio chega e é decodificado. Depois abre duas salas da rede no mesmo PC
-/// e confere presença, chat e voz entre elas. Por fim, se o PC tiver saída de som, confere a separação do som do PC por
-/// app. Usa portas próprias (47900 a 47902, 47910 e 47911).
+/// e confere presença, chat e voz entre elas. Depois (1.4.1) faz o mesmo pelo servidor ScreenFlow: um servidor dentro do
+/// app, a festa publicada nele e um viewer assistindo por ele, e duas salas conversando pelo servidor. Por fim, se o PC
+/// tiver saída de som, confere a separação do som do PC por app. Usa portas próprias (47900 a 47905 e 47910 a 47922).
 /// </summary>
 public static class SelfTest
 {
     private const int MediaPort = 47900, ControlPort = 47901, DiscoveryPort = 47902;
-    private const int RoomPortA = 47910, RoomPortB = 47911;
+    private const int RoomPortA = 47910, RoomPortB = 47911, RoomPortC = 47912;
+    private const int ServerHostMediaPort = 47903, ServerHostControlPort = 47904, ServerHostDiscoveryPort = 47905;
+    private const int ServerRoomA = 47913, ServerRoomB = 47914;
+    private const int ServerControlPort = 47920, ServerMediaPort = 47921, ServerRoomPort = 47922;
 
     public static async Task<(bool Ok, string Report)> RunAsync()
     {
@@ -100,9 +106,72 @@ public static class SelfTest
         }
 
         var roomOk = await RoomTestAsync(Line);
+        var serverOk = await ServerTestAsync(Line);
         var soundOk = await PcSoundTestAsync(Line);
-        Line(ok && roomOk && soundOk ? "PASSOU: tudo certo." : "FALHOU: veja as linhas acima.");
-        return (ok && roomOk && soundOk, report.ToString());
+        var cropOk = CaptureCropTest(Line);
+        var all = ok && roomOk && serverOk && soundOk && cropOk;
+        Line(all ? "PASSOU: tudo certo." : "FALHOU: veja as linhas acima.");
+        return (all, report.ToString());
+    }
+
+    /// <summary>
+    /// Região e áreas tapadas (1.4.0), na GPU de verdade: uma imagem branca passa pelo corte com uma máscara e a saída é
+    /// lida de volta. O pedaço tapado tem que sair preto e o resto branco, no tamanho da região. Sem placa de vídeo, usa o Direct3D de software (WARP).
+    /// </summary>
+    private static bool CaptureCropTest(Action<string> line)
+    {
+        ScreenFlow.Infrastructure.Capture.GpuDevice gpu;
+        try { gpu = ScreenFlow.Infrastructure.Capture.GpuDevice.Create(); }
+        catch (Exception hardware)
+        {
+            // Sem placa de vídeo (o CI, por exemplo): o mesmo teste no Direct3D de software do Windows.
+            try { gpu = ScreenFlow.Infrastructure.Capture.GpuDevice.CreateSoftware(); }
+            catch (Exception software)
+            {
+                line($"Corte da captura: pulado, sem Direct3D 11 ({hardware.Message}; {software.Message}).");
+                return true;
+            }
+        }
+        using (gpu)
+        {
+            try
+            {
+                const int W = 640, H = 360;
+                // Região: a metade da direita; máscara: o quarto de cima à direita da tela (vira a metade de cima da região).
+                var area = new CaptureArea(Region: new RelativeRect(0.5, 0, 0.5, 1), Masks: [new RelativeRect(0.75, 0, 0.25, 0.5)]);
+                using var crop = new ScreenFlow.Infrastructure.Capture.CaptureCrop(gpu, area, W, H);
+                const Vortice.DXGI.Format Bgra = Vortice.DXGI.Format.B8G8R8A8_UNorm;
+                var bind = Vortice.Direct3D11.BindFlags.RenderTarget | Vortice.Direct3D11.BindFlags.ShaderResource;
+                using var source = gpu.CreateTexture(W, H, Bgra, bind);
+                using (var view = gpu.Device.CreateRenderTargetView(source))
+                    gpu.Context.ClearRenderTargetView(view, new Vortice.Mathematics.Color4(1, 1, 1, 1));
+                using var target = gpu.CreateTexture(crop.Width, crop.Height, Bgra, bind);
+                crop.Copy(source, target);
+                using var staging = gpu.CreateTexture(crop.Width, crop.Height, Bgra, Vortice.Direct3D11.BindFlags.None,
+                    Vortice.Direct3D11.ResourceUsage.Staging, Vortice.Direct3D11.CpuAccessFlags.Read);
+                gpu.Context.CopyResource(staging, target);
+                var map = gpu.Context.Map(staging, 0, Vortice.Direct3D11.MapMode.Read);
+                byte Pixel(int x, int y)
+                {
+                    unsafe { return ((byte*)map.DataPointer)[y * map.RowPitch + x * 4 + 1]; } // canal verde
+                }
+                var masked = Pixel(crop.Width * 3 / 4, crop.Height / 4);
+                var visible = Pixel(crop.Width / 4, crop.Height * 3 / 4);
+                var visibleTop = Pixel(crop.Width / 8, crop.Height / 4);
+                gpu.Context.Unmap(staging, 0);
+                var ok = crop.Width == W / 2 && crop.Height == H && masked < 10 && visible > 245 && visibleTop > 245;
+                line(ok
+                    ? $"PASSOU: corte da captura na GPU ({gpu.AdapterName}): saída {crop.Width}x{crop.Height}, a área tapada saiu preta e o resto intacto."
+                    : $"FALHOU: corte da captura: saída {crop.Width}x{crop.Height}, tapado {masked}, visível {visible}/{visibleTop}.");
+                return ok;
+            }
+            catch (Exception exception)
+            {
+                Log.Error("Autoteste do corte da captura", exception);
+                line($"FALHOU: corte da captura com erro: {exception.Message}");
+                return false;
+            }
+        }
     }
 
     /// <summary>
@@ -218,13 +287,14 @@ public static class SelfTest
             if (!voiceOk) line("FALHOU: a voz não chegou dos dois lados.");
 
             var channelsOk = await ChannelsTestAsync(a, b, line);
+            var privateOk = await PrivateRoomTestAsync(a, b, line);
 
             await a.LeaveVoiceAsync();
             var leftOk = await WaitAsync(() => b.Peers.FirstOrDefault()?.Presence.InAnyVoice == false, 4);
             if (!leftOk) line("FALHOU: B não viu A sair da voz.");
 
-            var ok = chatOk && avatarOk && pictureOk && voiceOk && peerInVoice && channelsOk && leftOk;
-            line(ok ? "PASSOU: presença, chat, fotos, imagens, voz e canais funcionam entre dois PCs." : "FALHOU: a sala da rede não funcionou como deveria.");
+            var ok = chatOk && avatarOk && pictureOk && voiceOk && peerInVoice && channelsOk && privateOk && leftOk;
+            line(ok ? "PASSOU: presença, chat, fotos, imagens, voz, canais e sala privada funcionam entre dois PCs." : "FALHOU: a sala da rede não funcionou como deveria.");
             return ok;
         }
         catch (Exception exception)
@@ -271,6 +341,76 @@ public static class SelfTest
         var ok = listedOk && textOk && movedOk && voiceOk;
         if (ok) line($"Canais: B viu os 2 canais de A, a mensagem chegou no #autoteste e B ouviu A no canal Autoteste ({(b.Voice?.FramesDecoded ?? 0) - heard} quadros).");
         return ok;
+    }
+
+    /// <summary>
+    /// Sala privada (1.4.0), com A e B na voz: A cria a sala e os dois entram com o convite. Um terceiro PC (C), sem o
+    /// convite, não vê ninguém; o chat e a voz continuam entre A e B, cifrados. A troca a chave e B passa para a nova
+    /// sozinho; depois A remove B, que fica de fora.
+    /// </summary>
+    private static async Task<bool> PrivateRoomTestAsync(NetworkRoom a, NetworkRoom b, Action<string> line)
+    {
+        var invite = RoomInvite.Create(a.SelfId);
+        if (!RoomInvite.TryParse(invite.ToCode(), out var parsed))
+        {
+            line("FALHOU: o código do convite não abriu.");
+            return false;
+        }
+        a.UsePrivateRoom(invite);
+        b.UsePrivateRoom(parsed);
+        var c = new NetworkRoom(Guid.NewGuid(), RoomPortC, new RoomLocalState("Autoteste C (sem convite)")) { BroadcastTargets = () => [], OutputEnabled = false };
+        try
+        {
+            c.Start();
+            c.AddManualPeer(IPAddress.Loopback, RoomPortA);
+            a.AddManualPeer(IPAddress.Loopback, RoomPortC);
+            var stillTogether = await WaitAsync(() => a.Peers.Any(p => p.Id == b.SelfId) && b.Peers.Any(p => p.Id == a.SelfId) && b.Peers[0].Presence.ExchangeKey is not null, 8);
+            await Task.Delay(3000);
+            var outsiderBlind = c.Peers.Count == 0 && a.Peers.All(p => p.Id != c.SelfId);
+            if (!stillTogether) line("FALHOU: A e B não se viram na sala privada.");
+            if (!outsiderBlind) line($"FALHOU: quem não tem o convite viu a sala (C vê {c.Peers.Count}).");
+
+            var received = new TaskCompletionSource<RoomChatMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            b.MessageReceived += message =>
+            {
+                if (message.AuthorId == a.SelfId && message.Text == "Mensagem cifrada") received.TrySetResult(message);
+            };
+            a.SendChat("Mensagem cifrada");
+            var chatOk = await Task.WhenAny(received.Task, Task.Delay(5000)) == received.Task;
+            if (!chatOk) line("FALHOU: o chat não chegou na sala privada.");
+            var heard = b.Voice?.FramesDecoded ?? 0;
+            var voiceOk = await WaitAsync(() => (b.Voice?.FramesDecoded ?? 0) > heard + 30, 8);
+            if (!voiceOk) line("FALHOU: a voz não chegou na sala privada.");
+
+            var rotated = a.RotateKey([]);
+            var rekeyOk = rotated is not null && await WaitAsync(() => b.Keys.Epoch == rotated.Epoch, 10);
+            if (!rekeyOk) line("FALHOU: B não recebeu a chave nova do dono.");
+            var afterRekey = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            b.MessageReceived += message =>
+            {
+                if (message.AuthorId == a.SelfId && message.Text == "Depois da troca") afterRekey.TrySetResult(true);
+            };
+            a.SendChat("Depois da troca");
+            var afterOk = await Task.WhenAny(afterRekey.Task, Task.Delay(5000)) == afterRekey.Task;
+            if (!afterOk) line("FALHOU: o chat não chegou depois da troca de chave.");
+
+            var removed = a.RotateKey([b.SelfId]);
+            await Task.Delay(3000);
+            var removedOk = removed is not null && b.Keys.Epoch != removed.Epoch && a.Peers.All(p => p.Id != b.SelfId);
+            if (!removedOk) line("FALHOU: B continuou na sala depois de removido.");
+
+            var ok = stillTogether && outsiderBlind && chatOk && voiceOk && rekeyOk && afterOk && removedOk;
+            if (ok) line($"Sala privada: C (sem convite) não viu ninguém, chat e voz cifrados chegaram, B passou para a chave {rotated!.Epoch} sozinho e, removido, ficou de fora.");
+            return ok;
+        }
+        finally
+        {
+            await c.DisposeAsync();
+            a.SetBlocked(b.SelfId, false);
+            a.UsePrivateRoom(null);
+            b.UsePrivateRoom(null);
+            await WaitAsync(() => a.Peers.Any(p => p.Id == b.SelfId) && b.Peers.Any(p => p.Id == a.SelfId), 6);
+        }
     }
 
     // Tons do teste do som do PC: o do ScreenFlow e os dois que o CI deixa tocando fora dele (veja windows-build.yml).
@@ -496,6 +636,136 @@ public static class SelfTest
         {
             _capture.DataAvailable -= OnData;
             try { _capture.Dispose(); } catch { }
+        }
+    }
+
+    /// <summary>
+    /// Servidor ScreenFlow (1.4.1), tudo no 127.0.0.1 e com senha: um servidor como o de "Este PC é o servidor", a festa de
+    /// música publicada nele pela transmissão de verdade (com o tom de teste) e um viewer assistindo pelo servidor, com a
+    /// senha dele. Depois, duas salas pelo servidor: presença, chat e um canal criado, renomeado e apagado.
+    /// </summary>
+    private static async Task<bool> ServerTestAsync(Action<string> line)
+    {
+        line("Servidor ScreenFlow: servidor, festa e viewer no 127.0.0.1, com senha.");
+        const string password = "senha do autoteste";
+        var folder = Path.Combine(Path.GetTempPath(), $"screenflow-autoteste-servidor-{Guid.NewGuid():N}");
+        var server = new ScreenFlowServer(new ServerOptions
+        {
+            Name = "Autoteste",
+            BindAddress = IPAddress.Loopback,
+            ControlPort = ServerControlPort,
+            MediaPort = ServerMediaPort,
+            RoomPort = ServerRoomPort,
+            Password = password,
+            DataDirectory = folder,
+        });
+        HostSession? host = null;
+        ViewerSession? viewer = null;
+        try
+        {
+            server.Start();
+            var stream = Guid.NewGuid();
+            host = new HostSession(new HostOptions(
+                "Autoteste servidor", IPAddress.Loopback, IPAddress.Loopback, ServerHostMediaPort, ServerHostControlPort, ServerHostDiscoveryPort,
+                null, false, 4,
+                new CaptureTarget(CaptureKind.Monitor, string.Empty, "Festa de música", 0, 0, 0), null, Resolution.P720, 30, 0,
+                null, null, [],
+                true, 160, false, 10, 0,
+                StreamMode.AudioOnly, 256, profile => new ToneAudioSource(profile),
+                Server: new ServerPublish(IPAddress.Loopback.ToString(), ServerControlPort, password, stream)));
+            host.ServerChanged += () => line($"host: {host.ServerStatus}");
+            await Task.Run(host.Start);
+            if (!await WaitAsync(() => host.ServerState == ServerLinkState.Live, 10))
+            {
+                line($"FALHOU: a festa não chegou no servidor em 10 segundos ({host.ServerState}: {host.ServerStatus}).");
+                return false;
+            }
+
+            viewer = new ViewerSession(new ViewerOptions("127.0.0.1", ServerControlPort, "Autoteste pelo servidor", password, 0.8f, [], 1280, 720, 60,
+                AudioOutput: false, StreamId: stream.ToString("N"), ViaServer: true));
+            ViewerStatistics? last = null;
+            viewer.StateChanged += (state, message) => line($"viewer pelo servidor: {state} · {message}");
+            viewer.StatisticsUpdated += stats => last = stats;
+            viewer.Start();
+            var heard = await WaitAsync(() => viewer.State == ConnectionState.Connected && viewer.AudioMeter is { Updates: > 20, Level: > 0.01f } && last is { AudioKbps: > 0 }, 15);
+            var audience = await WaitAsync(() => host.WatchingCount == 1, 5);
+            var relayed = server.Streams.Streams.FirstOrDefault(s => s.Id == stream);
+            line($"Pelo servidor: modo {viewer.Config?.Mode}, {last?.AudioKbps ?? 0:0} kbps, medidor {viewer.AudioMeter?.Updates ?? 0} blocos; " +
+                 $"quem transmite vê {host.WatchingCount} pessoa(s); o servidor tem {relayed?.Viewers ?? 0} assistindo.");
+            var streamOk = heard && audience && relayed is { Online: true, Viewers: 1 } && viewer.Config?.Mode == StreamMode.AudioOnly;
+            line(streamOk ? "PASSOU: a festa foi para o servidor e chegou em quem assiste por ele, com a senha do servidor."
+                : "FALHOU: o som não chegou pelo servidor.");
+
+            var roomOk = await ServerRoomTestAsync(password, line);
+            line(server.Describe());
+            return streamOk && roomOk;
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Autoteste do servidor falhou", exception);
+            line($"FALHOU com erro no servidor: {exception.GetType().Name}: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            if (viewer is not null) await viewer.DisposeAsync();
+            if (host is not null) await host.DisposeAsync();
+            await server.DisposeAsync();
+            try { Directory.Delete(folder, recursive: true); } catch { }
+            line("Servidor desligado.");
+        }
+    }
+
+    /// <summary>Duas salas pelo servidor do autoteste: presença, chat e um canal criado, renomeado e apagado por A.</summary>
+    private static async Task<bool> ServerRoomTestAsync(string password, Action<string> line)
+    {
+        var endpoint = new IPEndPoint(IPAddress.Loopback, ServerRoomPort);
+        var a = new NetworkRoom(Guid.NewGuid(), ServerRoomA, new RoomLocalState("Autoteste A")) { BroadcastTargets = () => [], OutputEnabled = false };
+        var b = new NetworkRoom(Guid.NewGuid(), ServerRoomB, new RoomLocalState("Autoteste B")) { BroadcastTargets = () => [], OutputEnabled = false };
+        try
+        {
+            a.Start();
+            b.Start();
+            if (!a.IsRunning || !b.IsRunning)
+            {
+                line($"FALHOU: a sala não abriu ({a.Error ?? b.Error}).");
+                return false;
+            }
+            a.UseServer(endpoint, password);
+            b.UseServer(endpoint, password);
+            if (!await WaitAsync(() => a.ServerStatus?.State == RoomServerState.Connected && b.ServerStatus?.State == RoomServerState.Connected
+                                       && a.Peers.Count == 1 && b.Peers.Count == 1, 10))
+            {
+                line($"FALHOU: as salas não se encontraram pelo servidor em 10 segundos ({a.ServerStatus?.Text} / {b.ServerStatus?.Text}).");
+                return false;
+            }
+            line($"Sala pelo servidor: A vê \"{a.Peers[0].Presence.Name}\" e B vê \"{b.Peers[0].Presence.Name}\".");
+
+            var received = new TaskCompletionSource<RoomChatMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+            b.MessageReceived += message =>
+            {
+                if (message.AuthorId == a.SelfId && !message.History) received.TrySetResult(message);
+            };
+            const string text = "Olá pelo servidor! ação, pão, 🎮";
+            a.SendChat(text);
+            var chatOk = await Task.WhenAny(received.Task, Task.Delay(5000)) == received.Task && received.Task.Result.Text == text;
+            line(chatOk ? "Chat pelo servidor: B recebeu a mensagem de A." : "FALHOU: a mensagem não chegou pelo servidor.");
+
+            bool Has(NetworkRoom room, string name) => room.ServerChannels.Any(c => c.Kind == RoomChannelKind.Text && c.Name == name);
+            a.ChangeServerChannel(RoomChannelOperation.Create, RoomChannelKind.Text, "autoteste");
+            var created = await WaitAsync(() => Has(b, "autoteste"), 5);
+            a.ChangeServerChannel(RoomChannelOperation.Rename, RoomChannelKind.Text, "autoteste", "autoteste-novo");
+            var renamed = await WaitAsync(() => Has(b, "autoteste-novo") && !Has(b, "autoteste"), 5);
+            a.ChangeServerChannel(RoomChannelOperation.Delete, RoomChannelKind.Text, "autoteste-novo");
+            var deleted = await WaitAsync(() => !Has(b, "autoteste-novo"), 5);
+            var channelsOk = created && renamed && deleted;
+            line(channelsOk ? "Canais do servidor: B viu A criar, renomear e apagar um canal." : $"FALHOU: canais do servidor (criou {created}, renomeou {renamed}, apagou {deleted}).");
+            return chatOk && channelsOk;
+        }
+        finally
+        {
+            await a.DisposeAsync();
+            await b.DisposeAsync();
         }
     }
 

@@ -11,7 +11,14 @@ using ScreenFlow.Infrastructure.Network;
 
 namespace ScreenFlow.Infrastructure.Room;
 
-/// <summary>O que este PC mostra para a sala: nome, foto e se está ao vivo (e o quê).</summary>
+/// <summary>A sala privada em uso: quem é o dono e se ela é só para quem ele aprovou.</summary>
+public sealed record PrivateRoomPolicy(Guid Owner, bool ApprovedOnly);
+
+/// <summary>
+/// O que este PC mostra para a sala: nome, foto e se está ao vivo (e o quê). <see cref="LiveViaServer"/> (1.4.1): a
+/// transmissão já está no servidor ScreenFlow, e quem está nele assiste por lá (com a senha do servidor, sem o PIN);
+/// <see cref="LiveAddress"/> e <see cref="ControlPort"/> continuam os deste PC, para quem entra direto.
+/// </summary>
 public sealed record RoomLocalState(
     string Name,
     bool Live = false,
@@ -23,7 +30,8 @@ public sealed record RoomLocalState(
     IPAddress? LiveAddress = null,
     bool Watching = false,
     int ControlPort = AppInfo.DefaultControlPort,
-    RoomBlobRef? Avatar = null);
+    RoomBlobRef? Avatar = null,
+    bool LiveViaServer = false);
 
 /// <summary>
 /// Sala da rede: todo mundo com o ScreenFlow aberto na mesma rede do Radmin se vê, conversa no chat e pode entrar na
@@ -37,7 +45,7 @@ public sealed record RoomLocalState(
 /// canal de voz; só quem está no mesmo canal de voz se ouve. As versões antigas ficam no "geral" e na voz "Geral":
 /// mensagens dos outros canais nem vão para elas.
 /// </remarks>
-public sealed class NetworkRoom : IAsyncDisposable
+public sealed partial class NetworkRoom : IAsyncDisposable
 {
     private static readonly TimeSpan PresenceInterval = TimeSpan.FromSeconds(2);
     private readonly int _port;
@@ -68,6 +76,13 @@ public sealed class NetworkRoom : IAsyncDisposable
     private volatile string _voiceChannel = RoomChannels.DefaultVoiceName;
     private volatile ValueList<RoomChannel> _createdChannels = ValueList<RoomChannel>.Empty;
     private readonly ConcurrentDictionary<Guid, float> _peerVolumes = new();
+    // Sala privada e moderação (1.4.0).
+    private readonly RoomKeyExchange _exchange = new();
+    private readonly ConcurrentDictionary<Guid, byte> _blocked = new();
+    private readonly ConcurrentDictionary<Guid, string> _pending = new();
+    private readonly ConcurrentDictionary<Guid, (byte[] Packet, DateTimeOffset Until)> _rekeys = new();
+    private volatile PrivateRoomPolicy? _private;
+    private volatile IReadOnlyList<Guid>? _roster;
     private volatile bool _muted;
     private volatile bool _deafened;
     private volatile bool _announceSoon;
@@ -89,6 +104,104 @@ public sealed class NetworkRoom : IAsyncDisposable
     public Guid SelfId { get; }
     public int Port => _port;
 
+    // ───────────────────────── Sala privada e moderação (1.4.0) ─────────────────────────
+
+    /// <summary>As chaves da sala privada. Sem sala privada, tudo vai aberto como nas versões antigas.</summary>
+    public RoomKeyring Keys { get; } = new();
+
+    /// <summary>A sala privada em uso (dono e se é só para quem o dono aprovou), ou null.</summary>
+    public PrivateRoomPolicy? Private => _private;
+
+    /// <summary>
+    /// Entra numa sala privada (ou sai, com null). A partir daqui tudo da sala (presença, chat, voz e arquivos) vai
+    /// lacrado com a chave dela, e o que chega aberto ou de outra sala é ignorado. Quem está fora não vê nem ouve nada.
+    /// </summary>
+    public void UsePrivateRoom(RoomInvite? invite, bool approvedOnly = false, IReadOnlyList<Guid>? roster = null)
+    {
+        Keys.Use(invite?.Secret, invite?.Epoch ?? 0, DateTimeOffset.UtcNow);
+        _private = invite is null ? null : new PrivateRoomPolicy(invite.Owner, approvedOnly);
+        _roster = invite is not null && invite.Owner == SelfId ? roster ?? [] : null;
+        _pending.Clear();
+        _rekeys.Clear();
+        _announceSoon = true;
+        PeersChanged?.Invoke();
+        PendingChanged?.Invoke();
+    }
+
+    /// <summary>O dono muda quem foi aprovado e se a sala é só para eles (vai para todos na próxima presença).</summary>
+    public void SetRoster(bool approvedOnly, IReadOnlyList<Guid> roster)
+    {
+        if (_private is not { } policy || policy.Owner != SelfId) return;
+        _private = policy with { ApprovedOnly = approvedOnly };
+        _roster = roster;
+        foreach (var id in roster) _pending.TryRemove(id, out _);
+        _announceSoon = true;
+        PendingChanged?.Invoke();
+        PeersChanged?.Invoke();
+    }
+
+    /// <summary>Quem tem o convite mas ainda não foi aprovado pelo dono (só o dono vê).</summary>
+    public IReadOnlyDictionary<Guid, string> Pending => new Dictionary<Guid, string>(_pending);
+
+    /// <summary>Alguém pediu para entrar (ou foi aprovado). Chamado fora da thread da interface.</summary>
+    public event Action? PendingChanged;
+
+    /// <summary>A chave da sala mudou (o dono trocou). Chamado fora da thread da interface, com o convite novo.</summary>
+    public event Action<RoomInvite>? KeyChanged;
+
+    /// <summary>Bloqueia (ou desbloqueia) alguém só para você: nada dele chega aqui, nem chat, nem voz, nem arquivos.</summary>
+    public void SetBlocked(Guid id, bool blocked)
+    {
+        if (id == SelfId) return;
+        if (blocked)
+        {
+            _blocked[id] = 0;
+            if (_peers.Remove(id, out var gone) && gone is not null) OnPeerGone(gone, "bloqueado");
+        }
+        else _blocked.TryRemove(id, out _);
+        PeersChanged?.Invoke();
+    }
+
+    public bool IsBlocked(Guid id) => _blocked.ContainsKey(id);
+
+    /// <summary>
+    /// O dono troca a chave da sala: um segredo novo vai para cada pessoa que está na sala agora, cifrado só para ela.
+    /// Quem está em <paramref name="exclude"/> (removido) não recebe e fica de fora. Quem estiver offline precisa de um
+    /// convite novo. Devolve o convite novo, ou null se este PC não é o dono.
+    /// </summary>
+    public RoomInvite? RotateKey(IReadOnlyCollection<Guid> exclude)
+    {
+        if (_private is not { } policy || policy.Owner != SelfId) return null;
+        var now = DateTimeOffset.UtcNow;
+        var next = new RoomInvite(System.Security.Cryptography.RandomNumberGenerator.GetBytes(RoomKeys.SecretBytes), SelfId, Keys.Epoch + 1);
+        var packets = new List<(Guid Id, byte[] Packet)>();
+        foreach (var peer in _peers.All())
+        {
+            if (exclude.Contains(peer.Id) || peer.Presence.ExchangeKey is not { } key) continue;
+            if (policy.ApprovedOnly && _roster is { } roster && !roster.Contains(peer.Id)) continue;
+            try
+            {
+                var wrapped = _exchange.Wrap(key, next.Secret, next.Epoch, peer.Id);
+                packets.Add((peer.Id, RoomPacket.Rekey(SelfId, peer.Id, next.Epoch, _exchange.PublicKey, wrapped)));
+            }
+            catch (Exception exception) when (exception is FormatException or System.Security.Cryptography.CryptographicException)
+            {
+                Log.Debug($"Sala privada: chave de troca inválida de {peer.Presence.Name}: {exception.Message}");
+            }
+        }
+        // Manda com a chave antiga (todos ainda estão nela) e repete até cada um aparecer na chave nova.
+        foreach (var (id, packet) in packets)
+        {
+            if (_peers.Find(id) is { } peer) SendTo(packet, peer);
+            _rekeys[id] = (Keys.Seal(packet, SelfId) ?? packet, now + TimeSpan.FromSeconds(20));
+        }
+        foreach (var id in exclude) SetBlocked(id, true);
+        Keys.Use(next.Secret, next.Epoch, now, keepPrevious: true);
+        _announceSoon = true;
+        Log.Info($"Sala privada: chave trocada (geração {next.Epoch}) para {packets.Count} pessoas.");
+        return next;
+    }
+
     /// <summary>Endereços de broadcast para a presença. Padrão: os adaptadores do Radmin (e a rede local, se pedido).</summary>
     public Func<IReadOnlyList<IPAddress>> BroadcastTargets { get; init; } = () => RadminBroadcasts(includeLan: false);
 
@@ -97,6 +210,25 @@ public sealed class NetworkRoom : IAsyncDisposable
 
     /// <summary>Microfone escolhido nas configurações (null = padrão do Windows).</summary>
     public string? MicrophoneId { get; set; }
+
+    /// <summary>Saída de som da voz (null = padrão do Windows). Vale na próxima vez que entrar na voz.</summary>
+    public string? SpeakerId { get; set; }
+
+    /// <summary>Apertar para falar (1.4.0): ligado, a voz só vai enquanto <see cref="SetTalkKey"/> diz que a tecla está apertada.</summary>
+    public bool PushToTalk
+    {
+        get => _pushToTalk;
+        set
+        {
+            _pushToTalk = value;
+            if (_voice is { } voice) voice.PushToTalk.Enabled = value;
+        }
+    }
+
+    private volatile bool _pushToTalk;
+
+    /// <summary>A tecla de apertar para falar está (ou não) apertada agora.</summary>
+    public void SetTalkKey(bool held) => _voice?.PushToTalk.SetHeld(held, Environment.TickCount64);
 
     /// <summary>Sons de entrar, sair e mudo na voz (como no Discord).</summary>
     public bool SoundsEnabled { get; set; } = true;
@@ -229,7 +361,8 @@ public sealed class NetworkRoom : IAsyncDisposable
         try
         {
             var leave = RoomPacket.Leave(SelfId);
-            foreach (var target in PresenceTargets()) Send(leave, target);
+            if (_server is { } server) SendRelay(leave, null, server);
+            else foreach (var target in PresenceTargets()) Send(leave, target);
         }
         catch { }
         _cancellation.Cancel();
@@ -262,10 +395,16 @@ public sealed class NetworkRoom : IAsyncDisposable
     {
         var endpoint = new IPEndPoint(address, port ?? _port);
         _manual[endpoint] = 0;
-        Send(PresencePacket(wantsReply: true), endpoint);
+        if (_server is null) Send(PresencePacket(wantsReply: true), endpoint);
     }
 
     public void RemoveManualPeer(IPAddress address) => _manual.TryRemove(new IPEndPoint(address, _port), out _);
+
+    /// <summary>
+    /// (1.4.1) Os endereços de quem está na sala direta (vazio pelo servidor): a transmissão também é anunciada direto
+    /// para eles, porque o broadcast não chega em todo lugar (no Tailscale, por exemplo).
+    /// </summary>
+    public IReadOnlyList<IPAddress> PeerAddresses => _server is not null ? [] : _peers.All().Select(p => p.EndPoint.Address).Distinct().ToArray();
 
     // ───────────────────────── Chat ─────────────────────────
 
@@ -289,8 +428,8 @@ public sealed class NetworkRoom : IAsyncDisposable
             Image: image, Channel: channelName);
         _history.Add(message);
         var packet = RoomPacket.Chat(SelfId, message);
-        var peers = _peers.Snapshot().Where(p => message.InDefaultChannel || p.Presence.SupportsChannels).ToList();
-        foreach (var peer in peers) Send(packet, peer.EndPoint);
+        var peers = _peers.All().Where(p => message.InDefaultChannel || p.Presence.SupportsChannels).ToList();
+        SendToMany(packet, peers);
         _outbox.Add(message, packet, peers.Select(p => p.Id), DateTimeOffset.UtcNow);
         MessageReceived?.Invoke(message);
         return message;
@@ -348,7 +487,8 @@ public sealed class NetworkRoom : IAsyncDisposable
             input ??= new MicrophoneInput(MicrophoneId);
             try
             {
-                engine = new VoiceEngine(input, _volume, _sensitivity, OutputEnabled) { Muted = _muted, Deafened = _deafened };
+                engine = new VoiceEngine(input, _volume, _sensitivity, OutputEnabled, SpeakerId) { Muted = _muted, Deafened = _deafened };
+                engine.PushToTalk.Enabled = _pushToTalk;
             }
             catch
             {
@@ -378,7 +518,7 @@ public sealed class NetworkRoom : IAsyncDisposable
         if (_voice is { } voice)
         {
             // Quem ficou no canal antigo para de tocar aqui; quem está no novo começa no próximo quadro.
-            foreach (var peer in _peers.Snapshot()) voice.RemovePeer(peer.Id);
+            foreach (var peer in _peers.All()) voice.RemovePeer(peer.Id);
             PlayCue(VoiceCue.Join);
             Log.Info($"Voz da rede: mudou para o canal {name}.");
         }
@@ -456,11 +596,9 @@ public sealed class NetworkRoom : IAsyncDisposable
         var channel = _voiceChannel;
         Span<byte> packet = stackalloc byte[RoomPacket.HeaderSize + 7 + current.Length + previous.Length];
         var length = RoomPacket.WriteVoice(packet, SelfId, sequence, level, current, previous);
-        foreach (var peer in _peers.Snapshot())
-        {
-            if (!peer.Presence.InVoiceChannel(channel) || peer.Presence.Deafened) continue;
-            Send(packet[..length], peer.EndPoint);
-        }
+        var listeners = _peers.All().Where(peer => peer.Presence.InVoiceChannel(channel) && !peer.Presence.Deafened).ToList();
+        // Pelo servidor, um pacote só (com a lista de quem ouve) e o servidor manda para cada um.
+        if (listeners.Count > 0) SendToMany(packet[..length], listeners);
     }
 
     // ───────────────────────── Envio ─────────────────────────
@@ -479,11 +617,13 @@ public sealed class NetworkRoom : IAsyncDisposable
         if (local.Live && local.LiveAudio) flags |= PresenceFlags.LiveAudio;
         if (local.Live && local.LiveCamera) flags |= PresenceFlags.LiveCamera;
         if (local.Live && local.PinRequired) flags |= PresenceFlags.PinRequired;
+        if (local.Live && local.LiveViaServer) flags |= PresenceFlags.ViaServer;
         if (local.Watching) flags |= PresenceFlags.Watching;
         if (wantsReply) flags |= PresenceFlags.WantsReply;
         return new RoomPresence(local.Name, AppInfo.DisplayVersion, flags, local.LiveMode, local.Viewers, local.ControlPort,
             local.Live ? local.LiveAddress : null, Interlocked.Increment(ref _presenceSequence), local.Avatar,
-            _inVoice && !defaultVoice ? channel : null, _createdChannels);
+            _inVoice && !defaultVoice ? channel : null, _createdChannels,
+            Keys.Active ? _exchange.PublicKey : null);
     }
 
     private byte[] PresencePacket(bool wantsReply) => RoomPacket.Presence(SelfId, LocalPresence(wantsReply));
@@ -501,7 +641,7 @@ public sealed class NetworkRoom : IAsyncDisposable
         foreach (var address in _broadcasts)
             if (sent.Add(new IPEndPoint(address, _port))) yield return new IPEndPoint(address, _port);
         // Direto também para quem já é conhecido ou foi adicionado pelo IP: funciona mesmo se o broadcast não chegar.
-        foreach (var peer in _peers.Snapshot())
+        foreach (var peer in _peers.All())
             if (sent.Add(peer.EndPoint)) yield return peer.EndPoint;
         foreach (var manual in _manual.Keys)
             if (sent.Add(manual)) yield return manual;
@@ -512,14 +652,40 @@ public sealed class NetworkRoom : IAsyncDisposable
         var wantsReply = _wantsReplyTicks > 0;
         if (wantsReply) _wantsReplyTicks--;
         var packet = PresencePacket(wantsReply);
-        foreach (var target in PresenceTargets()) Send(packet, target);
+        // O dono manda junto quem aprovou (e se a sala é só para eles); quem ainda não recebeu a chave nova recebe de novo.
+        var roster = _private is { } policy && policy.Owner == SelfId && _roster is { } list ? RoomPacket.Roster(SelfId, policy.ApprovedOnly, list) : null;
+        if (_server is { } server)
+        {
+            // Pelo servidor: um pacote para todo mundo (o servidor repassa), só depois de entrar.
+            if (server.Authorized)
+            {
+                SendRelay(packet, null, server);
+                if (roster is not null) SendRelay(roster, null, server);
+            }
+        }
+        else
+        {
+            foreach (var target in PresenceTargets())
+            {
+                Send(packet, target);
+                if (roster is not null) Send(roster, target);
+            }
+        }
+        var now = DateTimeOffset.UtcNow;
+        foreach (var (id, (rekey, until)) in _rekeys)
+        {
+            if (now > until) _rekeys.TryRemove(id, out _);
+            else if (_peers.Find(id) is { } peer) SendTo(rekey, peer);
+        }
     }
 
     private void Send(ReadOnlySpan<byte> packet, IPEndPoint target)
     {
         var socket = _socket;
         if (socket is null) return;
-        try { socket.SendTo(packet, SocketFlags.None, target); }
+        // Na sala privada, tudo vai lacrado com a chave dela (os pacotes de troca de chave já vêm lacrados com a antiga).
+        var sealedPacket = packet.Length > RoomPacket.HeaderSize && packet[3] != (byte)RoomPacketType.Sealed ? Keys.Seal(packet, SelfId) : null;
+        try { socket.SendTo(sealedPacket is null ? packet : sealedPacket, SocketFlags.None, target); }
         catch (SocketException) { }
         catch (ObjectDisposedException) { }
     }
@@ -544,10 +710,11 @@ public sealed class NetworkRoom : IAsyncDisposable
                         SendPresence();
                     }
                     foreach (var (peerId, packet) in _outbox.Due(now))
-                        if (_peers.Find(peerId) is { } peer) Send(packet, peer.EndPoint);
+                        if (_peers.Find(peerId) is { } peer) SendTo(packet, peer);
                     var (asks, failed) = _downloads.Due(now);
                     foreach (var ask in asks)
-                        if (_peers.Find(ask.Source) is { } source) Send(RoomPacket.BlobRequest(SelfId, ask.Id, ask.Missing), source.EndPoint);
+                        if (_peers.Find(ask.Source) is { } source) SendTo(RoomPacket.BlobRequest(SelfId, ask.Id, ask.Missing), source);
+                    if (_server is { } link) ServerTick(link, now);
                     foreach (var id in failed)
                     {
                         Log.Info($"Sala da rede: ninguém mandou o arquivo {id}.");
@@ -594,18 +761,75 @@ public sealed class NetworkRoom : IAsyncDisposable
 
     private void Handle(ReadOnlySpan<byte> data, IPEndPoint from)
     {
+        var server = _server;
+        // Pela sala do servidor, só vale o que vem do servidor (o resto é a sala direta da rede, que fica de lado).
+        if (server is not null && !server.EndPoint.Equals(from)) return;
         if (data[0] == (byte)'{')
         {
             // Anúncio de transmissão (JSON), de qualquer versão.
             if (!DiscoveryAnnouncement.TryParse(data, out var announcement) || announcement is null) return;
-            var isNew = !_hosts.ContainsKey(announcement.Address);
-            _hosts[announcement.Address] = new DiscoveredHost(announcement, from.Address, DateTimeOffset.UtcNow);
+            if (server is not null)
+            {
+                // As transmissões do servidor vêm sem endereço: o endereço é o do próprio servidor.
+                if (announcement.Stream is not { Length: > 0 } || announcement.Address != "0.0.0.0") return;
+                announcement = announcement with { Address = server.EndPoint.Address.ToString() };
+            }
+            else if (announcement.Address == "0.0.0.0") return;
+            var isNew = !_hosts.ContainsKey(announcement.Key);
+            _hosts[announcement.Key] = new DiscoveredHost(announcement, from.Address, DateTimeOffset.UtcNow);
             if (isNew) HostsChanged?.Invoke();
             return;
         }
         if (!RoomPacket.TryReadHeader(data, out var type, out var sender) || sender == SelfId) return;
-        var body = RoomPacket.Body(data);
         var now = DateTimeOffset.UtcNow;
+        if (server is not null && (type == RoomPacketType.ServerInfo || sender == server.Id))
+        {
+            // Do próprio servidor (nunca lacrado: o servidor não tem a chave da sala privada).
+            OnServerPacket(server, type, sender, data, now);
+            return;
+        }
+        if (_blocked.ContainsKey(sender)) return;
+        var sealedNow = false;
+        byte[]? opened = null;
+        if (type == RoomPacketType.Sealed)
+        {
+            // De uma sala privada: só abre com a chave desta sala (outra sala, ou chave velha demais, é ignorada).
+            opened = Keys.Active ? Keys.Open(data, sender, now, out sealedNow) : null;
+            if (opened is null || !RoomPacket.TryReadHeader(opened, out type, out _)) return;
+            data = opened;
+            // Esta pessoa já está na chave nova: não precisa mais receber a troca.
+            if (sealedNow) _rekeys.TryRemove(sender, out _);
+        }
+        else if (Keys.Active || type is RoomPacketType.Rekey or RoomPacketType.Roster)
+        {
+            // Na sala privada, nada aberto entra; troca de chave e lista do dono nunca valem abertas.
+            return;
+        }
+        var body = RoomPacket.Body(data);
+        if (_private is { } policy)
+        {
+            if (type == RoomPacketType.Rekey)
+            {
+                OnRekey(sender, policy, body, now);
+                return;
+            }
+            if (type == RoomPacketType.Roster)
+            {
+                if (sender == policy.Owner && RoomPacket.TryReadRoster(body, out var approvedOnly, out var members))
+                {
+                    _private = policy with { ApprovedOnly = approvedOnly };
+                    _roster = members;
+                }
+                return;
+            }
+            if (!RoomAccess.Allows(sender, policy.Owner, policy.ApprovedOnly, _roster, Array.Empty<Guid>()))
+            {
+                // O dono vê quem tem o convite e está esperando a aprovação; os outros só ignoram.
+                if (policy.Owner == SelfId && type == RoomPacketType.Presence && RoomPacket.TryReadPresence(body, out var asking)
+                    && _pending.Count < 32 && _pending.TryAdd(sender, asking.Name)) PendingChanged?.Invoke();
+                return;
+            }
+        }
         switch (type)
         {
             case RoomPacketType.Presence:
@@ -635,17 +859,34 @@ public sealed class NetworkRoom : IAsyncDisposable
         }
     }
 
+    /// <summary>O dono mandou a chave nova, cifrada só para este PC: passa a usar (a antiga ainda vale por uns minutos).</summary>
+    private void OnRekey(Guid sender, PrivateRoomPolicy policy, ReadOnlySpan<byte> body, DateTimeOffset now)
+    {
+        if (sender != policy.Owner || !RoomPacket.TryReadRekey(body, out var recipient, out var epoch, out var ownerKey, out var wrapped)) return;
+        if (recipient != SelfId || epoch <= Keys.Epoch) return;
+        // A chave de troca precisa ser a que o dono anuncia na presença dele.
+        if (_peers.Find(sender) is { Presence.ExchangeKey: { } announced } && announced != ownerKey) return;
+        if (_exchange.Unwrap(ownerKey, wrapped, epoch, SelfId) is not { } secret) return;
+        Keys.Use(secret, epoch, now, keepPrevious: true);
+        _announceSoon = true;
+        Log.Info($"Sala privada: chave nova do dono (geração {epoch}).");
+        KeyChanged?.Invoke(new RoomInvite(secret, policy.Owner, epoch));
+    }
+
     private void OnPresence(Guid sender, RoomPresence presence, IPEndPoint from, DateTimeOffset now)
     {
+        // O servidor não é uma pessoa da sala (a presença dele só vale vinda do servidor em uso, em OnServerPacket).
+        if (presence.IsServer) return;
         var update = _peers.Update(sender, presence, from, now);
         if (update.Peer is not { } peer) return;
         var previous = update.Previous;
         if (update.IsNew)
         {
             Log.Info($"Sala da rede: {presence.Name} ({from.Address}) apareceu.");
-            Send(PresencePacket(wantsReply: false), from);
-            // Acabou de abrir: pede as mensagens recentes para os primeiros que aparecerem.
-            if (now - _started < TimeSpan.FromSeconds(45) && Interlocked.Increment(ref _historyRequests) <= 3)
+            SendTo(PresencePacket(wantsReply: false), sender, from);
+            // Acabou de abrir: pede as mensagens recentes para os primeiros que aparecerem (pelo servidor, o histórico
+            // vem do próprio servidor, que guarda o chat).
+            if (_server is null && now - _started < TimeSpan.FromSeconds(45) && Interlocked.Increment(ref _historyRequests) <= 3)
             {
                 _historyAsked[sender] = now;
                 Send(RoomPacket.HistoryRequest(SelfId), from);
@@ -654,7 +895,7 @@ public sealed class NetworkRoom : IAsyncDisposable
         }
         else if (presence.Flags.HasFlag(PresenceFlags.WantsReply) && _replyLimit.TryTake(sender, now))
         {
-            Send(PresencePacket(wantsReply: false), from);
+            SendTo(PresencePacket(wantsReply: false), sender, from);
         }
 
         if (presence.InAnyVoice != (previous?.InAnyVoice ?? false))
@@ -702,7 +943,7 @@ public sealed class NetworkRoom : IAsyncDisposable
         }
         else
         {
-            Send(RoomPacket.ChatAck(SelfId, message.AuthorId, message.MessageId), from);
+            SendTo(RoomPacket.ChatAck(SelfId, message.AuthorId, message.MessageId), sender, from);
             if (_history.Contains(message.AuthorId, message.MessageId)) return;
             if (!_chatLimit.TryTake(sender, now)) return;
             // A mensagem ao vivo é de quem mandou: o nome e o autor vêm da presença, não do pacote.
@@ -726,6 +967,8 @@ public sealed class NetworkRoom : IAsyncDisposable
     /// <summary>Quem acabou de abrir pede as mensagens recentes (de todos os canais; só do "geral" para as versões antigas).</summary>
     private void OnHistoryRequest(Guid sender, IPEndPoint from, DateTimeOffset now)
     {
+        // Pelo servidor, quem guarda e manda o histórico é o servidor.
+        if (_server is not null) return;
         if (_peers.Find(sender) is not { } peer || !_historyLimit.TryTake(sender, now)) return;
         var channels = peer.Presence.SupportsChannels;
         var messages = _history.All().Where(m => channels || m.InDefaultChannel).TakeLast(channels ? 80 : 40);
@@ -790,7 +1033,7 @@ public sealed class NetworkRoom : IAsyncDisposable
                 for (var i = 0; i < indexes.Length && !token.IsCancellationRequested; i++)
                 {
                     var length = RoomPacket.WriteBlobChunk(buffer, SelfId, hash, data, indexes[i]);
-                    Send(buffer.AsSpan(0, length), from);
+                    SendTo(buffer.AsSpan(0, length), sender, from);
                     if (i % 24 == 23) await Task.Delay(2, token).ConfigureAwait(false);
                 }
             }

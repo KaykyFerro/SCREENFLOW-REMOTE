@@ -7,7 +7,8 @@
 | `ScreenFlow.Core` | `net10.0` (testável em qualquer SO) | Protocolo (cabeçalho UDP, FEC, remontagem, NACK, mensagens de controle, regras dos controles de quem assiste), protocolo e estado da sala da rede (presença, chat, histórico, arquivos e downloads), arquivos da sala guardados no PC, criptografia, perfis de qualidade, controle adaptativo, configuração automática, regras do som do PC por app, nomes dos apps de mídia, link do instalador do Radmin, configurações, leitura de releases, log |
 | `ScreenFlow.Infrastructure` | `net10.0-windows10.0.26100.0` | Captura de tela (WGC/DXGI) e de câmera (Windows.Media.Capture), conversão de cor na GPU, encoder/decoder FFmpeg, desenho do vídeo na GPU (D3D11), áudio WASAPI/Opus (com o loopback por processo), controles de mídia do Windows, sala da rede (chat, voz e arquivos), sessões host/viewer, Radmin (e o instalador dele), firewall, descoberta, hardware, atualização |
 | `ScreenFlow.App` | WPF, gera `ScreenFlow.exe` | Tema escuro/claro, menu lateral com o painel da voz e o seu perfil, telas (Visão geral, Transmissão, Assistir, Chat da rede, Monitoramento, Configurações, Atualizações), fotos e imagens (abrir, virar, diminuir), sininho de avisos, ícone na bandeja, player, telemetria, `--diagnostico`, `--autoteste`, `--capturas` |
-| `ScreenFlow.Tests` | xUnit | Testes do Core |
+| `ScreenFlow.Server` | `net10.0`, gera `screenflow-servidor` (Linux x64/arm64 e Windows) | O programa do servidor ScreenFlow (1.4.1): opções da linha de comando e das variáveis `SCREENFLOW_*`, resumo no console e desligar com calma no Ctrl+C ou no `systemctl stop`. O servidor em si fica no Core (`Core/Server`), e o app usa o mesmo código no "Este PC é o servidor" |
+| `ScreenFlow.Tests` | xUnit | Testes do Core (com o servidor de ponta a ponta no 127.0.0.1) |
 
 ## Pipeline de vídeo (host)
 
@@ -120,6 +121,7 @@ A sala virou um servidor no estilo do Discord, sem servidor:
 - **Voz por canal**: cada quadro de voz só vai para quem está no mesmo canal, e quem recebe ignora quadros de quem está em outro canal. Trocar de canal não fecha o microfone nem o motor de voz: tira as pessoas do canal antigo da mistura e anuncia o novo canal na hora.
 - **Volume por pessoa**: o motor de voz aplica um ganho por pessoa (0 a 2, com limitador) antes da mistura. Os volumes ficam nas configurações (`PeerVolumes`, pelo id da pessoa) e valem nas próximas sessões.
 - **Não lidas por canal**: cada canal de texto guarda as próprias 300 mensagens e as não lidas. O último canal de texto aberto e o último canal de voz ficam salvos.
+- **1.4.1**: só o #geral e a voz Geral vêm prontos (os outros padrão saíram), e cada um cria os seus, até 12 por PC. No servidor, os canais são dele: ficam guardados em `canais.json`, qualquer pessoa cria, renomeia e apaga (até 40), e um canal de texto renomeado leva a conversa (o servidor lembra os nomes antigos em `canais-renomeados.json`, para quem ainda manda no nome velho).
 
 ## Chat guardado (1.3.0)
 
@@ -139,6 +141,25 @@ Todo mundo com o ScreenFlow 1.1 aberto na mesma rede do Radmin se vê, conversa 
 - **Arquivos** (1.1.1): as fotos de perfil (JPEG 192×192, até 96 KB) e as imagens do chat (JPEG de até 1920 px, em torno de 600 KB, no máximo 2 MB) passam pela mesma porta. O id de um arquivo são os 16 primeiros bytes do SHA-256 do conteúdo. Quem quer pede (`BlobRequest`) tudo ou só as partes que faltam (até 600 por pedido); quem tem manda partes (`BlobChunk`) de 1200 bytes, em lotes, só para quem está na sala e no endereço de onde ela fala, com limite de pedidos por pessoa e de envios ao mesmo tempo (um pedido pequeno não vira uma enxurrada para outro endereço). O `RoomBlobDownloads` (no Core, com testes) pede de novo o que falta depois de 400 ms sem partes novas, com espera crescente; depois de 5 tentativas sem nada passa para a próxima pessoa que tem o arquivo (o autor da mensagem, quem repassou o histórico, os outros da sala) e desiste em 60 s. No fim, o hash precisa conferir. Os arquivos ficam em `%LOCALAPPDATA%\ScreenFlow\imagens` (`RoomBlobStore`: gravação atômica, conferência do hash ao ler, 24 MB na memória, limpeza do que não é usado há 30 dias ou passa de 300 MB, a sua foto fica sempre).
 - **Imagens no chat**: a mensagem leva a imagem (id, tamanho, largura e altura) num campo novo; o texto vira a legenda. Sem legenda, o texto é "📷 Imagem (atualize o ScreenFlow para ver)", o que as versões 1.1.0 mostram. Quem manda abre o arquivo (qualquer formato que o Windows abre), vira conforme o EXIF, diminui e grava em JPEG (o que tira a localização e os outros dados da foto). Quem recebe só abre JPEG ou PNG, confere o tamanho antes (até 8192 de lado e 24 milhões de pixels) e abre já diminuído para mostrar.
 - **Segurança**: os pacotes da sala **não** são criptografados nem autenticados pelo ScreenFlow. Eles contam com o túnel do Radmin VPN, e qualquer um na mesma rede do Radmin com o ScreenFlow aberto ouve a voz, lê o chat e vê as imagens. A transmissão de tela continua com ECDH + AES-GCM.
+
+- **Tailscale sem servidor** (1.4.1): o Tailscale não repassa broadcast. A cada 30 s o app lê `tailscale status --json` e manda a presença direto para os PCs com Windows ligados na rede do Tailscale (no máximo 64); com a transmissão no Tailscale, o anúncio dela também vai direto para quem está na sala por lá.
+- **Tamanho** (1.4.1): a sala guarda até 512 pessoas, o mesmo máximo do servidor. A voz, a presença e o chat usam a lista sem ordenar; só a tela ordena por nome.
+
+## Servidor ScreenFlow (1.4.1)
+
+O `ScreenFlowServer` (no Core) junta duas partes, nas portas TCP N e UDP N+1 (`StreamRelay`) e UDP N+2 (`RoomRelay`), com N = 47810. O guia de uso está em [SERVIDOR.md](SERVIDOR.md).
+
+- **Quem transmite** (`HostSession.Server`): com **Transmitir também pelo servidor**, o host abre uma conexão a mais, só para o servidor. Manda `publish` (id da transmissão, nome, modo, chave pública ECDH), recebe o `challenge`, prova a senha do servidor como prova o PIN numa conexão direta, e recebe `published` e um `hello` do servidor. Daí em diante o servidor é, para o host, uma pessoa assistindo: recebe a mesma codificação, com um socket UDP próprio (o Windows escolhe a rede que chega no servidor). O servidor manda `audience` quando muda quem assiste por ele: quantas pessoas, os nomes, os decoders que todos têm e a menor tela e o menor FPS, e o host renegocia o codec e a qualidade com isso. Se a conexão cair, o host tenta de novo com espera crescente; senha errada e versão diferente param de tentar.
+- **Quem assiste pelo servidor**: o viewer faz a conexão de sempre, com o id da transmissão no `hello`. Para ele, o servidor é o host: o handshake, as mensagens e os pacotes são os mesmos, com a senha do servidor no lugar do PIN. A aprovação de cada pessoa não vale pelo servidor.
+- **Repasse da mídia**: o servidor não decodifica. Abre cada pacote com a chave de quem transmite, guarda o vídeo recente (`RelayTrackCache`, com a paridade do FEC) e cifra de novo para cada pessoa, com a chave dela. Um NACK de quem assiste é atendido pelo servidor na hora; só o que ele não tem vai para quem transmite. Um pacote repetido não é repassado duas vezes. Se quem transmite cair, quem assiste espera até 2 minutos pela volta.
+- **Sala pelo servidor** (`NetworkRoom.Server` no app, `RoomRelay` no servidor): com um servidor configurado, a sala manda tudo para ele num envelope (`Relay`) com a lista de quem deve receber (até 32 ids por envelope; a voz de um canal cheio vai em vários envelopes). O servidor confere a senha (desafio e prova, como na transmissão), repassa e responde com a lista de quem está nele, os canais e as transmissões que estão nele, que aparecem na tela Assistir. Ele lê a presença e o chat que vão abertos (para a lista e para guardar o chat em `ScreenFlow Chat`, igual ao chat guardado do app); quem chega recebe as últimas 80 mensagens. O que vai lacrado na sala privada passa sem ser lido nem guardado.
+- **Limites**: 16 transmissões, 64 pessoas assistindo cada uma e 128 pessoas na sala (até 64, 256 e 512). Senha errada tem limite por IP: 5 por minuto na transmissão (como o PIN) e 10 por minuto na sala, que também guarda pouco lugar para quem ainda não provou a senha (32 ao todo e 4 por IP), para ids inventados não tomarem o lugar de quem tem a senha. Na sala, a prova da senha vai até 3 vezes por desafio (o UDP pode perder uma) e de novo quando o servidor esquece o PC (depois de um tempo sem sinal ou de uma troca de endereço).
+- **No app**: o `ServerService` resolve o endereço (IP ou nome do Tailscale, de novo a cada 20 s se não achar) e, em "Este PC é o servidor", roda o servidor dentro do app, com o chat e os canais em `%LOCALAPPDATA%\ScreenFlow\servidor`. A sala, a Transmissão e o Assistir usam o mesmo alvo.
+- **Instalador e linha de comando**: `--modo-servidor`, `--entrar-servidor <endereço>`, `--instalar-tailscale` e `--instalar-radmin` (`StartupOptions`, no Core, com testes). O instalador grava o pedido em `%LOCALAPPDATA%\ScreenFlow\instalador.txt`, que o app lê uma vez ao abrir e apaga.
+
+## Tailscale (1.4.1)
+
+O `TailscaleCli` acha o `tailscale.exe`, lê o estado com `tailscale status --json` e liga com `tailscale up` (com `--unattended` no PC servidor). Quando falta entrar na conta, o próprio Tailscale imprime o link do login, e o app só abre no navegador um link do Tailscale (`TailscaleLogin`). O ScreenFlow nunca usa chave de autenticação. O `TailscaleInstaller` acha o MSI mais novo na página oficial de pacotes (`TailscaleDownload`, no Core, com testes: só HTTPS e só os endereços da Tailscale; se a página mudar, usa a última versão conhecida), baixa, confere o SHA-256 publicado ao lado e a assinatura Authenticode da Tailscale e roda o `msiexec` sem janelas, como administrador.
 
 ## Instalar o Radmin VPN (1.1.1)
 
@@ -164,6 +185,8 @@ Mensagens JSON com 4 bytes de tamanho.
 ## Firewall
 
 O instalador cria as regras (UDP 47800, TCP 47801, UDP 47802 e o próprio `ScreenFlow.exe`) uma vez só, com os mesmos nomes que o app usa, e as remove na desinstalação. O app confere as regras ao abrir e só pede permissão de novo (pelo sininho) se as portas mudarem.
+
+A regra do `ScreenFlow.exe` também cobre o servidor dentro do app (47810/tcp, 47811/udp e 47812/udp). O programa do servidor no Windows precisa de uma regra própria, e no Linux o `install-server.sh` libera as portas no `ufw` ou no `firewalld`.
 
 ## Bandeja e encerramento
 

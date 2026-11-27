@@ -17,6 +17,26 @@ Comece sempre por **Configurações › Rede e diagnóstico** (ou `ScreenFlow.ex
 
 Teste a rede com `ping 26.x.x.x`. No Radmin, uma conexão indireta (relay) tem banda bem menor que uma direta.
 
+## Servidor ScreenFlow e Tailscale (1.4.1)
+
+O guia do servidor está em [SERVIDOR.md](SERVIDOR.md). O estado do servidor aparece em **Configurações › Servidor**.
+
+| Sintoma | Causa provável | Solução |
+|---|---|---|
+| "Não achei o servidor …" | Endereço errado, ou o Tailscale (ou o Radmin VPN) desligado neste PC ou no servidor | Confira o endereço (o 100.x ou o nome do servidor no Tailscale, o 26.x do Radmin). Os dois PCs precisam estar na mesma conta ou rede do Tailscale (ou na mesma rede do Radmin) |
+| "Conectando ao servidor …" não sai disso, ou "parou de responder" | Programa do servidor fechado, ou firewall do PC servidor bloqueando | No servidor: o programa está aberto (no Linux, `systemctl status screenflow-servidor`)? Libere 47810/tcp, 47811/udp e 47812/udp (no Windows, a regra do `screenflow-servidor.exe` ou do ScreenFlow.exe) |
+| "Senha do servidor … incorreta" | A senha de Configurações › Servidor não é a do servidor | Coloque a mesma senha do servidor e salve |
+| "As portas 47810 a 47812 deste PC já estão em uso" | O programa do servidor já está aberto neste PC | Normal: o app entra no servidor que já está aberto. Para o app ser o servidor, feche o programa |
+| "Essa transmissão não está mais no servidor" | Quem transmite parou, ou a conexão dele com o servidor caiu há mais de 2 minutos | Peça para quem transmite conferir **Transmitir também pelo servidor** na Transmissão |
+| A transmissão não aparece em quem está no servidor | **Transmitir também pelo servidor** desligado, ou o servidor não foi achado por quem transmite | Ligue a chave na Transmissão. O cartão "Quem está assistindo" mostra o servidor quando a transmissão chegou nele |
+| Com o servidor, a Sala mostra outras pessoas | Com um servidor configurado, a sala é a do servidor | Para voltar à sala direta da rede, escolha **Sem servidor** em Configurações › Servidor |
+| "O Tailscale está instalado, mas falta entrar na conta" | O Tailscale nunca entrou numa conta neste PC | Clique em **Ligar o Tailscale**: o navegador abre o login do Tailscale. Entre na mesma conta ou rede dos outros PCs |
+| "O Tailscale deste PC tem configurações próprias" | O Tailscale foi ligado antes com opções diferentes | O ScreenFlow não mexe nisso: ligue pelo ícone do Tailscale, perto do relógio |
+| A instalação do Tailscale parou | Pedido de permissão recusado, internet bloqueando ou a assinatura não conferiu | Clique de novo e aceite o pedido do Windows. Se não der, instale pelo site do Tailscale |
+| Sem servidor, ninguém aparece na Sala pelo Tailscale | O Tailscale não repassa broadcast | O ScreenFlow procura os PCs com Windows ligados no Tailscale a cada 30 s. Se alguém não aparecer, adicione pelo IP 100.x na lista de quem está na rede |
+
+Teste o caminho até o servidor com `ping 100.x.x.x` (Tailscale) ou `ping 26.x.x.x` (Radmin). No Tailscale, `tailscale ping <nome>` mostra se a conexão é direta ou passa pelo relay (DERP), que tem menos banda.
+
 ## Qualidade e FPS
 
 - Abra as estatísticas no player (F3). Perda acima de 2% significa que a rede não aguenta: o app já reduz bitrate, FPS e resolução sozinho; a linha "Qualidade" mostra o motivo.
@@ -93,7 +113,7 @@ No Diagnóstico, cada encoder que não abriu aparece com a mensagem do FFmpeg, p
 | "Não deu para abrir essa imagem" | Formato que o Windows não abre (HEIC e WebP precisam das extensões da Microsoft Store) | Abra a imagem em outro programa e copie (Ctrl+C), ou salve como JPEG ou PNG |
 | Quem usa a 1.1.0 vê "📷 Imagem (atualize o ScreenFlow para ver)" | A 1.1.0 não mostra imagens | Atualize para a 1.1.1 ou mais nova |
 
-A voz, o chat, as imagens e as fotos de perfil não são criptografados pelo ScreenFlow: eles contam com o túnel do Radmin VPN. Use uma rede do Radmin com senha, só com quem você conhece. O chat guardado fica em texto simples na pasta escolhida (e na sua conta do Google Drive, quando é a pasta dele). As fotos e imagens ficam em `%LOCALAPPDATA%\ScreenFlow\imagens` e as que não são usadas há 30 dias são apagadas sozinhas.
+Fora da sala privada, a voz, o chat, as imagens e as fotos de perfil não são criptografados pelo ScreenFlow: eles contam com o túnel do Radmin VPN ou do Tailscale (e, pelo servidor, com a confiança no PC servidor, que guarda o chat). Use uma rede com senha, só com quem você conhece. O chat guardado fica em texto simples na pasta escolhida (e na sua conta do Google Drive, quando é a pasta dele). As fotos e imagens ficam em `%LOCALAPPDATA%\ScreenFlow\imagens` e as que não são usadas há 30 dias são apagadas sozinhas.
 
 Para ouvir como a sua voz sai, use **Ouvir meu microfone** em Configurações › Voz e sala (com fone, para não dar eco).
 

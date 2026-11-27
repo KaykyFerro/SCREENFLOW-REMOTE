@@ -5,7 +5,7 @@
         <StackPanel Margin="{DynamicResource PagePadding}" MaxWidth="{DynamicResource ContentMaxWidth}">
             <TextBlock Style="{StaticResource PageTitle}" Text="Assistir" Margin="0,22,0,6"/>
             <TextBlock Style="{StaticResource Subtitle}" Margin="0,0,0,26"
-                       Text="Entre na transmissão de alguém da sua rede Radmin. Tela, câmera ou festa de música: o player se ajusta sozinho."/>
+                       Text="Entre na transmissão de alguém da sua rede (Radmin VPN ou Tailscale) ou do servidor ScreenFlow. Tela, câmera ou festa de música: o player se ajusta sozinho."/>
 
             <Grid>
                 <Grid.ColumnDefinitions>
@@ -20,9 +20,9 @@
                         <Border Style="{StaticResource IconTileViolet}">
                             <TextBlock Style="{StaticResource Icon}" Text="&#xE71B;"/>
                         </Border>
-                        <TextBlock Style="{StaticResource Title}" Text="Conectar pelo IP" Margin="0,20,0,8"/>
-                        <TextBlock Style="{StaticResource Muted}" Text="Peça o IP do Radmin para quem está transmitindo (começa com 26) e cole aqui."/>
-                        <TextBlock Style="{StaticResource Label}" Text="IP do anfitrião" Margin="0,22,0,8"/>
+                        <TextBlock Style="{StaticResource Title}" Text="Conectar pelo endereço" Margin="0,20,0,8"/>
+                        <TextBlock Style="{StaticResource Muted}" Text="Peça o IP para quem está transmitindo (começa com 26 no Radmin VPN e com 100 no Tailscale) ou use o nome do PC no Tailscale."/>
+                        <TextBlock Style="{StaticResource Label}" Text="IP ou nome de quem transmite" Margin="0,22,0,8"/>
                         <DockPanel>
                             <Button x:Name="ConnectButton" DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" MinHeight="48" Padding="24,0" Margin="12,0,0,0" Click="Connect_Click">
                                 <StackPanel Orientation="Horizontal">
@@ -30,7 +30,7 @@
                                     <TextBlock Style="{StaticResource Icon}" Text="&#xE72A;" FontSize="13" Margin="10,1,0,0"/>
                                 </StackPanel>
                             </Button>
-                            <TextBox x:Name="HostBox" Tag="26.x.x.x" FontFamily="{DynamicResource FontMono}" FontSize="16" MinHeight="48" KeyDown="HostBox_KeyDown"/>
+                            <TextBox x:Name="HostBox" Tag="26.x.x.x ou 100.x.x.x" FontFamily="{DynamicResource FontMono}" FontSize="16" MinHeight="48" KeyDown="HostBox_KeyDown"/>
                         </DockPanel>
 
                         <Border x:Name="StatePanel" Style="{StaticResource InsetCard}" Margin="0,14,0,0" Padding="14,12" Visibility="Collapsed">
@@ -169,7 +169,7 @@
                                     </Grid>
                                 </DockPanel>
                                 <TextBlock Text="{Binding Name}" Style="{StaticResource Heading}" Margin="0,16,0,2" TextTrimming="CharacterEllipsis"/>
-                                <TextBlock Text="{Binding Address}" Style="{StaticResource Mono}" FontSize="13" Foreground="{DynamicResource TextSubtle}"/>
+                                <TextBlock Text="{Binding PlaceText}" Style="{StaticResource Mono}" FontSize="13" Foreground="{DynamicResource TextSubtle}" TextTrimming="CharacterEllipsis"/>
                                 <WrapPanel Margin="0,12,0,0">
                                     <Border Style="{StaticResource Pill}" Margin="0,0,6,0" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource Border}"
                                             TextElement.Foreground="{DynamicResource TextMuted}">
@@ -179,7 +179,7 @@
                                             TextElement.Foreground="{DynamicResource Amber}" Visibility="{Binding PinRequired, Converter={StaticResource BoolToVisibility}}">
                                         <StackPanel Orientation="Horizontal">
                                             <TextBlock Style="{StaticResource Icon}" Text="&#xE72E;" FontSize="11" Margin="0,0,6,0"/>
-                                            <TextBlock Text="PIN"/>
+                                            <TextBlock Text="{Binding PinLabel}"/>
                                         </StackPanel>
                                     </Border>
                                 </WrapPanel>
@@ -200,7 +200,7 @@
                     <StackPanel Margin="20,0,0,0" VerticalAlignment="Center">
                         <TextBlock Style="{StaticResource Heading}" Text="Ninguém transmitindo agora"/>
                         <TextBlock x:Name="NoSessionsText" Style="{StaticResource Muted}" Margin="0,4,0,0"
-                                   Text="Quando alguém da sua rede Radmin começar uma transmissão, ela aparece aqui sozinha. Se não aparecer, conecte pelo IP acima."/>
+                                   Text="Quando alguém da sua rede (ou do servidor) começar uma transmissão, ela aparece aqui sozinha. Se não aparecer, conecte pelo endereço acima."/>
                     </StackPanel>
                 </DockPanel>
             </Border>

@@ -75,6 +75,9 @@ public partial class PlayerWindow : Window
     private AudioAppsMessage _apps = new([]);
     private string? _coverShown;
     private bool _seeking;
+    // Minutagem (1.4.0): uma busca por vez, resolvida pela resposta do host (ou pela posição, com hosts antigos).
+    private readonly SeekTracker _seek = new();
+    private string? _seekSessionKey;
 
     public PlayerWindow(ViewerSession session, string host, StreamMode? expectedMode = null)
     {
@@ -105,8 +108,13 @@ public partial class PlayerWindow : Window
             UpdateLayers();
         });
         session.RemoteChanged += () => Dispatcher.BeginInvoke(OnRemoteChanged);
+        session.MediaResult += result => Dispatcher.BeginInvoke(() =>
+        {
+            if (_seek.Resolve(result, Environment.TickCount64)) UpdateMediaPosition();
+        });
         _mediaClock.Tick += (_, _) =>
         {
+            _seek.Tick(Environment.TickCount64);
             UpdateMediaPosition();
             UpdateSystemMedia();
         };
@@ -272,7 +280,7 @@ public partial class PlayerWindow : Window
         _systemMedia.ButtonPressed += button => Dispatcher.BeginInvoke(() => OnSystemMediaButton(button));
         _systemMedia.SeekRequested += position => Dispatcher.BeginInvoke(() =>
         {
-            if (RemoteMediaControls && _media.CanSeek) _ = SendMediaAsync(MediaCommandMessage.Seek, position.TotalSeconds);
+            if (RemoteMediaControls) _ = SeekToAsync(position.TotalSeconds);
         });
         UpdateSystemMedia();
     }
@@ -328,7 +336,7 @@ public partial class PlayerWindow : Window
                 CanNext: remote && media.CanNext,
                 Position: TimeSpan.FromSeconds(Math.Round(Session.MediaPosition)),
                 Duration: TimeSpan.FromSeconds(Math.Round(media.DurationSeconds)),
-                CanSeek: remote && media.CanSeek);
+                CanSeek: remote && !MediaSeek.Range(media).IsEmpty);
         }
         else
         {
@@ -631,6 +639,9 @@ public partial class PlayerWindow : Window
                 break;
             case Key.M: ToggleMute(); break;
             case Key.C when _cameraExpected: ToggleCamera(); break;
+            // ← e → (ou J e L) voltam e avançam 10 s no vídeo de quem transmite, quando dá; a barra com foco cuida das setas sozinha.
+            case Key.Left or Key.J when !SeekRangeNow.IsEmpty && !(Keyboard.FocusedElement is Slider): _ = SkipAsync(-MediaSeek.SkipSeconds); break;
+            case Key.Right or Key.L when !SeekRangeNow.IsEmpty && !(Keyboard.FocusedElement is Slider): _ = SkipAsync(MediaSeek.SkipSeconds); break;
             case Key.Up: VolumeSlider.Value = Math.Min(1, VolumeSlider.Value + 0.05); break;
             case Key.Down: VolumeSlider.Value = Math.Max(0, VolumeSlider.Value - 0.05); break;
             default: return;
@@ -679,6 +690,14 @@ public partial class PlayerWindow : Window
         _remote = Session.RemoteState;
         _media = Session.Media;
         _apps = Session.AudioApps;
+        // Outro app ou outra sessão no host: a busca em andamento era para o vídeo antigo.
+        if (_media.SessionKey != _seekSessionKey)
+        {
+            _seekSessionKey = _media.SessionKey;
+            _seek.Fail(MediaSeek.OutcomeStale, Environment.TickCount64);
+        }
+        // Hosts sem resposta (1.3.0 ou mais antigo): a posição que chega confirma a busca.
+        if (!Session.HostConfirmsSeek) _seek.Observe(Session.MediaPosition, Environment.TickCount64);
         ShowRemote();
     }
 
@@ -725,6 +744,8 @@ public partial class PlayerWindow : Window
         }
         _barMediaShown = controls || (hold && state.CanControlMedia && _barMediaShown);
         BarMedia.Visibility = _barMediaShown ? Visibility.Visible : Visibility.Collapsed;
+        // A linha do tempo fica na barra só com vídeo (na festa de música ela está no cartão "Tocando agora").
+        BarTimeline.Visibility = _barMediaShown && video ? Visibility.Visible : Visibility.Collapsed;
         BarPrevious.IsEnabled = PartyPrevious.IsEnabled = controls && media.CanPrevious;
         BarNext.IsEnabled = PartyNext.IsEnabled = controls && media.CanNext;
         BarPlayPause.IsEnabled = PartyPlayPause.IsEnabled = controls && media.CanPlayPause;
@@ -773,19 +794,64 @@ public partial class PlayerWindow : Window
         }
     }
 
-    /// <summary>A posição anda sozinha entre uma atualização e outra do host (parada se estiver pausado).</summary>
+    /// <summary>O trecho em que dá para buscar agora (vazio se o host não deixa ou o app não informa).</summary>
+    private SeekRange SeekRangeNow => _remoteOn && _remote.CanControlMedia ? MediaSeek.Range(_media) : SeekRange.Empty;
+
+    /// <summary>
+    /// A posição anda sozinha entre uma atualização e outra do host (parada se estiver pausado). Mostra o trecho em que dá
+    /// para buscar (ao vivo, só o que o app deixa), o estado da busca e, quando não dá, o porquê.
+    /// </summary>
     private void UpdateMediaPosition()
     {
         var media = _media;
         var duration = media.DurationSeconds;
-        PartySeekRow.Visibility = duration > 0 ? Visibility.Visible : Visibility.Collapsed;
-        PartySeek.IsEnabled = media.CanSeek && _remote.CanControlMedia && _remoteOn;
-        PartyDuration.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(duration));
+        var range = SeekRangeNow;
+        var seekable = !range.IsEmpty;
+        var pending = _seek.Phase == SeekPhase.Pending;
+        var shown = duration > 0 || seekable;
+        PartySeekRow.Visibility = shown ? Visibility.Visible : Visibility.Collapsed;
+        PartySeek.IsEnabled = BarSeek.IsEnabled = seekable;
+        PartyBack.IsEnabled = PartyForward.IsEnabled = BarBack.IsEnabled = BarForward.IsEnabled = seekable && !pending;
+        var durationText = media.Live ? "ao vivo" : MediaApps.FormatTime(TimeSpan.FromSeconds(duration));
+        PartyDuration.Text = BarDuration.Text = durationText;
+
+        // Sem como buscar, a barra dá lugar ao motivo (nunca uma barra que finge funcionar).
+        var why = !_remoteOn || !media.Available ? null
+            : !_remote.CanControlMedia ? "Só quem transmite mexe no vídeo agora."
+            : MediaSeek.Explain(media);
+        BarSeek.Visibility = why is null ? Visibility.Visible : Visibility.Hidden;
+        BarSeekNote.Text = why ?? string.Empty;
+        BarSeekNote.Visibility = why is null ? Visibility.Collapsed : Visibility.Visible;
+        BarSeekNote.ToolTip = why;
+
+        var (status, note) = _seek.Phase switch
+        {
+            SeekPhase.Pending => ("Indo…", $"Indo para {MediaApps.FormatTime(TimeSpan.FromSeconds(_seek.Target))}…"),
+            SeekPhase.Done => ("Pronto", MediaSeek.Describe(_seek.Outcome ?? MediaSeek.OutcomeDone)),
+            SeekPhase.Failed => ("Não foi", MediaSeek.Describe(_seek.Outcome ?? MediaSeek.OutcomeUnavailable)),
+            _ => (string.Empty, (string?)null),
+        };
+        if (note is null && why is null && seekable && media.Live) note = $"Ao vivo: dá para voltar até {MediaApps.FormatTime(TimeSpan.FromSeconds(range.Length))}.";
+        else if (note is null && why is null && MediaSeek.IsPartial(media))
+            note = $"Dá para buscar entre {MediaApps.FormatTime(TimeSpan.FromSeconds(range.Start))} e {MediaApps.FormatTime(TimeSpan.FromSeconds(range.End))}.";
+        BarSeekStatus.Text = status;
+        BarSeekStatus.ToolTip = note;
+        BarSeekStatus.SetResourceReference(TextBlock.ForegroundProperty, _seek.Phase == SeekPhase.Failed ? "Warning" : "AccentText");
+        var partyNote = note ?? why;
+        PartySeekNote.Text = partyNote ?? string.Empty;
+        PartySeekNote.Visibility = partyNote is null ? Visibility.Collapsed : Visibility.Visible;
+
         if (_seeking) return;
-        var position = _demo ? media.PositionSeconds : Session.MediaPosition;
-        PartySeek.Maximum = Math.Max(1, duration);
-        PartySeek.Value = Math.Clamp(position, 0, PartySeek.Maximum);
-        PartyPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(position));
+        var position = pending ? _seek.Target : _demo ? media.PositionSeconds : Session.MediaPosition;
+        double min = 0, max = Math.Max(1, duration);
+        if (seekable) (min, max) = (range.Start, range.End);
+        foreach (var slider in new[] { PartySeek, BarSeek })
+        {
+            slider.Minimum = min;
+            slider.Maximum = max;
+            slider.Value = Math.Clamp(position, min, max);
+        }
+        PartyPosition.Text = BarPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(position));
     }
 
     private void ShowCover(string? cover)
@@ -840,21 +906,76 @@ public partial class PlayerWindow : Window
         if (!await Session.SendMediaCommandAsync(command, position)) ShowRemote();
     }
 
-    private void PartySeek_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    /// <summary>
+    /// Pede ao host para ir a um ponto do vídeo de origem (todo mundo vê o vídeo no ponto novo). O mesmo ponto de uma busca
+    /// ainda em andamento não vai de novo.
+    /// </summary>
+    private async Task SeekToAsync(double seconds)
     {
-        if (PartySeek.IsEnabled) _seeking = true;
+        if (_demo) return;
+        var range = SeekRangeNow;
+        if (range.IsEmpty) return;
+        var target = range.Clamp(seconds);
+        if (_seek.Begin(target, Environment.TickCount64) is not { } request) return;
+        UpdateMediaPosition();
+        if (!await Session.SendMediaCommandAsync(MediaCommandMessage.Seek, target, request))
+        {
+            _seek.Fail(MediaSeek.OutcomeUnavailable, Environment.TickCount64);
+            ShowRemote();
+        }
     }
 
-    private async void PartySeek_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    /// <summary>Avança ou volta alguns segundos. Com um host 1.4.0 ou mais novo, conta a partir da posição de lá.</summary>
+    private async Task SkipAsync(double delta)
     {
-        if (!_seeking) return;
+        if (_demo) return;
+        var range = SeekRangeNow;
+        if (range.IsEmpty || _seek.Phase == SeekPhase.Pending) return;
+        if (!Session.HostConfirmsSeek)
+        {
+            await SeekToAsync(Session.MediaPosition + delta);
+            return;
+        }
+        var estimate = range.Clamp(Session.MediaPosition + delta);
+        if (_seek.Begin(estimate, Environment.TickCount64) is not { } request) return;
+        UpdateMediaPosition();
+        if (!await Session.SendMediaCommandAsync(MediaCommandMessage.SkipBy, 0, request, delta))
+        {
+            _seek.Fail(MediaSeek.OutcomeUnavailable, Environment.TickCount64);
+            ShowRemote();
+        }
+    }
+
+    private async void SeekBack_Click(object sender, RoutedEventArgs e) => await SkipAsync(-MediaSeek.SkipSeconds);
+    private async void SeekForward_Click(object sender, RoutedEventArgs e) => await SkipAsync(MediaSeek.SkipSeconds);
+
+    private void Seek_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is Slider { IsEnabled: true }) _seeking = true;
+    }
+
+    /// <summary>Arrastando, só a prévia muda aqui; o ponto vai para o host uma vez, ao soltar.</summary>
+    private async void Seek_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (!_seeking || sender is not Slider slider) return;
         _seeking = false;
-        await SendMediaAsync(MediaCommandMessage.Seek, PartySeek.Value);
+        await SeekToAsync(slider.Value);
     }
 
-    private void PartySeek_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    /// <summary>Pelo teclado (setas, Page Up e Page Down na barra), a busca vai quando a tecla é solta.</summary>
+    private async void Seek_PreviewKeyUp(object sender, KeyEventArgs e)
     {
-        if (_seeking) PartyPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(e.NewValue));
+        if (sender is not Slider { IsEnabled: true } slider || e.Key is not (Key.Left or Key.Right or Key.PageUp or Key.PageDown or Key.Home or Key.End)) return;
+        e.Handled = true;
+        await SeekToAsync(slider.Value);
+    }
+
+    private void Seek_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (sender is not Slider slider || !(_seeking || slider.IsKeyboardFocusWithin)) return;
+        var text = MediaApps.FormatTime(TimeSpan.FromSeconds(e.NewValue));
+        if (ReferenceEquals(slider, BarSeek)) BarPosition.Text = text;
+        else PartyPosition.Text = text;
     }
 
     private void Quality_Click(object sender, RoutedEventArgs e)
@@ -1053,7 +1174,7 @@ public partial class PlayerWindow : Window
     {
         _remoteOn = true;
         _remote = new RemoteStateMessage(true, true, true, ["720p", "1080p", "1440p", "4K"], [30, 60, 120, 144, 165], [], "1440p", 165, true);
-        _media = new MediaStateMessage("Spotify", "Noite de Neon", "Os Pixels", true, 83, 214, true, true, true, true, DemoData.AlbumCover());
+        _media = new MediaStateMessage("Spotify", "Noite de Neon", "Os Pixels", true, 83, 214, true, true, true, true, DemoData.AlbumCover(), "demo");
         _apps = new AudioAppsMessage(
         [
             new RemoteAudioApp("spotify.exe", "Spotify", false, true),

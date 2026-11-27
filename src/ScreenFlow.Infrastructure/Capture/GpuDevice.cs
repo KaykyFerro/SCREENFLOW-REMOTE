@@ -64,6 +64,21 @@ public sealed class GpuDevice : IDisposable
         return gpu;
     }
 
+    /// <summary>O device de software do Windows (WARP), para o autoteste em PCs sem placa de vídeo, como o CI.</summary>
+    public static GpuDevice CreateSoftware()
+    {
+        using var factory = DXGI.CreateDXGIFactory1<IDXGIFactory4>();
+        var adapter = factory.EnumWarpAdapter<IDXGIAdapter1>();
+        var result = D3D11.D3D11CreateDevice(adapter, DriverType.Unknown, DeviceCreationFlags.BgraSupport,
+            [FeatureLevel.Level_11_1, FeatureLevel.Level_11_0], out ID3D11Device? device, out ID3D11DeviceContext? context);
+        if (result.Failure || device is null || context is null)
+        {
+            adapter.Dispose();
+            throw new InvalidOperationException($"Falha ao criar o device WARP ({result.Code:X8}).");
+        }
+        return new GpuDevice(adapter, device, context);
+    }
+
     public ID3D11Texture2D CreateTexture(int width, int height, Format format, BindFlags bind, ResourceUsage usage = ResourceUsage.Default, CpuAccessFlags cpu = CpuAccessFlags.None)
         => Device.CreateTexture2D(new Texture2DDescription
         {

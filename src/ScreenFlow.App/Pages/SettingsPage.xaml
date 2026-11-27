@@ -39,6 +39,40 @@
             </Setter>
         </Style>
 
+        <!-- (1.4.1) Uma bolinha de cor do tema: a escolhida ganha um anel e um ✓ -->
+        <Style x:Key="ColorSwatch" TargetType="RadioButton">
+            <Setter Property="Width" Value="40"/>
+            <Setter Property="Height" Value="40"/>
+            <Setter Property="Margin" Value="0,0,6,6"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Grid Background="Transparent">
+                            <Ellipse x:Name="Ring" Stroke="{DynamicResource Text}" StrokeThickness="2" Opacity="0"/>
+                            <Ellipse Margin="5" Fill="{TemplateBinding Background}"/>
+                            <TextBlock x:Name="Check" Style="{StaticResource Icon}" Text="&#xE73E;" FontSize="13" FontWeight="Bold"
+                                       Foreground="{TemplateBinding Foreground}" Visibility="Collapsed"/>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Ring" Property="Opacity" Value="0.35"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Ring" Property="Opacity" Value="1"/>
+                                <Setter TargetName="Check" Property="Visibility" Value="Visible"/>
+                            </Trigger>
+                            <Trigger Property="IsKeyboardFocused" Value="True">
+                                <Setter TargetName="Ring" Property="Stroke" Value="{DynamicResource Accent}"/>
+                                <Setter TargetName="Ring" Property="Opacity" Value="1"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Uma linha de atalho do player: a tecla e o que ela faz -->
         <Style x:Key="KeyCap" TargetType="Border">
             <Setter Property="Background" Value="{DynamicResource SurfaceRaised}"/>
@@ -80,6 +114,7 @@
                     <RadioButton x:Name="TabStream" GroupName="settingsTab" Style="{StaticResource TabButton}" Tag="&#xE714;" Content="Transmissão" Checked="Tab_Checked"/>
                     <RadioButton x:Name="TabPlayer" GroupName="settingsTab" Style="{StaticResource TabButton}" Tag="&#xE768;" Content="Assistir" Checked="Tab_Checked"/>
                     <RadioButton x:Name="TabVoice" GroupName="settingsTab" Style="{StaticResource TabButton}" Tag="&#xE720;" Content="Voz e sala" Checked="Tab_Checked"/>
+                    <RadioButton x:Name="TabServer" GroupName="settingsTab" Style="{StaticResource TabButton}" Tag="&#xE753;" Content="Servidor" Checked="Tab_Checked"/>
                     <RadioButton x:Name="TabNetwork" GroupName="settingsTab" Style="{StaticResource TabButton}" Tag="&#xE968;" Content="Rede e diagnóstico"
                                  Checked="Tab_Checked"/>
                 </WrapPanel>
@@ -136,11 +171,19 @@
                             </Border>
                             <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
                                 <TextBlock Style="{StaticResource Heading}" Text="Aparência e janela"/>
-                                <TextBlock Style="{StaticResource Caption}" Text="O tema e o que acontece ao fechar a janela."/>
+                                <TextBlock Style="{StaticResource Caption}" Text="O tema, a cor e o que acontece ao fechar a janela."/>
                             </StackPanel>
                         </DockPanel>
                         <TextBlock Style="{StaticResource Label}" Text="Tema"/>
-                        <ComboBox x:Name="ThemeCombo" Margin="{DynamicResource FieldGap}"/>
+                        <ComboBox x:Name="ThemeCombo" Margin="{DynamicResource FieldGap}" AutomationProperties.Name="Tema escuro ou claro"/>
+                        <DockPanel Margin="0,0,0,7">
+                            <TextBlock x:Name="ColorName" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Bottom"/>
+                            <TextBlock Style="{StaticResource Label}" Text="Cor" Margin="0"/>
+                        </DockPanel>
+                        <!-- Duas fileiras de 5, em qualquer largura (numa só, a 10ª sobrava sozinha embaixo) -->
+                        <UniformGrid x:Name="ColorSwatches" Columns="5" HorizontalAlignment="Left" Margin="-5,0,0,4"/>
+                        <TextBlock Style="{StaticResource Caption}" Margin="0,0,0,16" TextWrapping="Wrap"
+                                   Text="O tema e a cor valem na hora e só neste PC: cada pessoa escolhe os seus."/>
                         <CheckBox x:Name="TrayToggle" Style="{StaticResource Switch}" Margin="0,0,0,14"
                                   Content="Fechar e minimizar levam o ScreenFlow para a bandeja, perto do relógio (a transmissão, a voz e o chat continuam)"/>
                         <CheckBox x:Name="ReopenToggle" Style="{StaticResource Switch}"
@@ -441,12 +484,28 @@
                                 ValueChanged="VoiceVolume_Changed"/>
                         <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,0,0,14"
                                    Text="Vale para todo mundo. Para mudar o volume de uma pessoa só, clique com o botão direito nela na Sala da rede."/>
+                        <TextBlock Style="{StaticResource Label}" Text="Saída do som da voz"/>
+                        <DockPanel Margin="{DynamicResource FieldGap}">
+                            <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar saídas de som de novo" Margin="8,0,0,0"
+                                    Click="RefreshSpeakers_Click"/>
+                            <ComboBox x:Name="SpeakerCombo" AutomationProperties.Name="Saída do som da voz"/>
+                        </DockPanel>
+                        <CheckBox x:Name="PushToTalkToggle" Style="{StaticResource Switch}" Margin="0,0,0,8"
+                                  Content="Apertar para falar (a voz só vai enquanto a tecla está apertada, em qualquer app)"/>
+                        <DockPanel Margin="0,0,0,14">
+                            <Button x:Name="PushToTalkKeyButton" DockPanel.Dock="Right" MinHeight="34" MinWidth="172" Padding="14,0" Margin="12,0,0,0"
+                                    Click="PushToTalkKey_Click" PreviewKeyDown="PushToTalkKey_PreviewKeyDown" PreviewMouseDown="PushToTalkKey_PreviewMouseDown"
+                                    AutomationProperties.Name="Tecla de apertar para falar"/>
+                            <TextBlock Style="{StaticResource Caption}" VerticalAlignment="Center" TextWrapping="Wrap"
+                                       Text="Clique no botão e aperte a tecla (ou um botão lateral do mouse) que quer usar. Esc cancela."/>
+                        </DockPanel>
                         <CheckBox x:Name="VoiceSoundsToggle" Style="{StaticResource Switch}" Content="Sons ao entrar, sair e desligar o microfone (como no Discord)"/>
                     </StackPanel>
                 </Border>
 
                 <!-- Chat guardado -->
-                <Border x:Name="ArchiveCard" Grid.Column="2" Style="{StaticResource Card}">
+                <StackPanel Grid.Column="2">
+                <Border x:Name="ArchiveCard" Style="{StaticResource Card}">
                     <StackPanel>
                         <DockPanel Margin="0,0,0,20">
                             <Border Style="{StaticResource IconTileBlue}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
@@ -484,6 +543,209 @@
                                    Text="Fica uma pasta ScreenFlow Chat com um arquivo de texto por canal e por dia, mais as imagens. Precisa do Google Drive para computador instalado e conectado; sem ele, escolha qualquer pasta. Quando o ScreenFlow abre, as últimas conversas voltam da pasta. Liga e desliga na hora."/>
                     </StackPanel>
                 </Border>
+
+                <!-- Sala privada e moderação (1.4.0): independente do PIN e da aprovação para assistir à transmissão -->
+                <Border x:Name="PrivateRoomCard" Style="{StaticResource Card}" Margin="0,22,0,0">
+                    <StackPanel>
+                        <DockPanel Margin="0,0,0,16">
+                            <Border Style="{StaticResource IconTilePink}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
+                                <TextBlock Style="{StaticResource Icon}" Text="&#xE72E;"/>
+                            </Border>
+                            <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                <TextBlock Style="{StaticResource Heading}" Text="Sala privada"/>
+                                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                           Text="Só quem tem o convite vê e ouve a sala. Presença, chat, voz e imagens vão cifrados de ponta a ponta."/>
+                            </StackPanel>
+                        </DockPanel>
+                        <Border Style="{StaticResource InsetCard}" Padding="14,12" Margin="0,0,0,14">
+                            <DockPanel>
+                                <Ellipse x:Name="PrivateDot" Width="9" Height="9" Fill="{DynamicResource TextSubtle}" VerticalAlignment="Top" Margin="2,6,12,0"/>
+                                <StackPanel>
+                                    <TextBlock x:Name="PrivateStatus" Style="{StaticResource Body}" FontSize="13.5" TextWrapping="Wrap" Text="Sala aberta: todo mundo da rede do Radmin vê a sala."/>
+                                    <TextBlock x:Name="PrivateFingerprint" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,4,0,0" Visibility="Collapsed"/>
+                                </StackPanel>
+                            </DockPanel>
+                        </Border>
+
+                        <StackPanel x:Name="PrivateOffPanel">
+                            <CheckBox x:Name="PrivateApprovedOnlyNew" Style="{StaticResource Switch}" Margin="0,0,0,10"
+                                      Content="Só participa quem eu aprovar (mesmo com o convite)"/>
+                            <Button HorizontalAlignment="Left" Style="{StaticResource PrimaryButton}" MinHeight="34" Padding="16,0" Margin="0,0,0,16"
+                                    Content="Criar sala privada" Click="PrivateCreate_Click"/>
+                            <TextBlock Style="{StaticResource Label}" Text="Recebeu um convite?"/>
+                            <DockPanel>
+                                <Button DockPanel.Dock="Right" Content="Entrar" MinHeight="34" Padding="16,0" Margin="8,0,0,0" Click="PrivateJoin_Click"/>
+                                <TextBox x:Name="PrivateInviteBox" AutomationProperties.Name="Código do convite" ToolTip="Cole aqui o código SF1-… que você recebeu"/>
+                            </DockPanel>
+                        </StackPanel>
+
+                        <StackPanel x:Name="PrivateOnPanel" Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource Label}" Text="Convite"/>
+                            <DockPanel Margin="0,0,0,12">
+                                <Button DockPanel.Dock="Right" Content="Copiar" MinHeight="34" Padding="14,0" Margin="8,0,0,0" Click="PrivateCopy_Click"/>
+                                <TextBox x:Name="PrivateCodeBox" IsReadOnly="True" FontFamily="{DynamicResource FontMono}" FontSize="12" AutomationProperties.Name="Código do convite da sala"/>
+                            </DockPanel>
+                            <StackPanel x:Name="PrivateOwnerPanel">
+                                <CheckBox x:Name="PrivateApprovedOnlyToggle" Style="{StaticResource Switch}" Margin="0,0,0,10" Click="PrivateApprovedOnly_Click"
+                                          Content="Só participa quem eu aprovar (mesmo com o convite)"/>
+                                <TextBlock x:Name="PrivatePendingTitle" Style="{StaticResource Label}" Text="Pedindo para entrar"/>
+                                <StackPanel x:Name="PrivatePendingList" Margin="0,0,0,10"/>
+                                <TextBlock Style="{StaticResource Label}" Text="Na sala agora"/>
+                                <StackPanel x:Name="PrivateMembersList" Margin="0,0,0,10"/>
+                            </StackPanel>
+                            <WrapPanel Margin="0,0,0,6">
+                                <Button x:Name="PrivateRotateButton" Content="Trocar a chave" MinHeight="34" Padding="14,0" Margin="0,0,8,8" Click="PrivateRotate_Click"
+                                        ToolTip="Todo mundo que está na sala agora recebe a chave nova; o convite antigo deixa de valer."/>
+                                <Button Style="{StaticResource GhostButton}" Content="Sair da sala privada" MinHeight="34" Padding="12,0" Margin="0,0,8,8" Click="PrivateLeave_Click"/>
+                            </WrapPanel>
+                        </StackPanel>
+
+                        <TextBlock x:Name="BlockedTitle" Style="{StaticResource Label}" Text="Pessoas bloqueadas" Margin="0,8,0,6" Visibility="Collapsed"/>
+                        <StackPanel x:Name="BlockedList"/>
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,8,0,0"
+                                   Text="A sala privada não muda quem assiste às transmissões (isso continua pelo PIN e pela aprovação em Transmissão). Quem tem o convite consegue ler a sala até ser removido: Remover troca a chave para todo mundo que está na sala, e quem estiver offline nessa hora precisa de um convite novo. Quem está na 1.3 ou mais antiga não entra em sala privada."/>
+                    </StackPanel>
+                </Border>
+                </StackPanel>
+            </Grid>
+
+            <!-- ═════════════ Servidor (1.4.1) ═════════════ -->
+            <Grid x:Name="ServerColumns" Visibility="Collapsed">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="22"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+
+                <!-- Servidor ScreenFlow -->
+                <Border Style="{StaticResource Card}">
+                    <StackPanel>
+                        <DockPanel Margin="0,0,0,18">
+                            <Border Style="{StaticResource IconTileCyan}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
+                                <TextBlock Style="{StaticResource Icon}" Text="&#xE753;"/>
+                            </Border>
+                            <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                <TextBlock Style="{StaticResource Heading}" Text="Servidor ScreenFlow"/>
+                                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                           Text="Em vez de cada PC falar com cada um, todo mundo entra num PC servidor: o chat, a voz e as transmissões passam por ele."/>
+                            </StackPanel>
+                        </DockPanel>
+                        <RadioButton x:Name="RoleNone" GroupName="serverRole" Style="{StaticResource ModeCard}" Margin="0,0,0,10" Checked="Role_Checked">
+                            <StackPanel Margin="0,0,30,0">
+                                <TextBlock FontWeight="SemiBold" FontSize="14.5" Text="Sem servidor"/>
+                                <TextBlock Style="{StaticResource Muted}" FontSize="13" TextWrapping="Wrap" Margin="0,3,0,0"
+                                           Text="Como sempre: a sala e as transmissões vão direto de um PC para o outro, pelo Radmin VPN ou pelo Tailscale."/>
+                            </StackPanel>
+                        </RadioButton>
+                        <RadioButton x:Name="RoleJoin" GroupName="serverRole" Style="{StaticResource ModeCard}" Margin="0,0,0,10" Checked="Role_Checked">
+                            <StackPanel Margin="0,0,30,0">
+                                <TextBlock FontWeight="SemiBold" FontSize="14.5" Text="Entrar num servidor"/>
+                                <TextBlock Style="{StaticResource Muted}" FontSize="13" TextWrapping="Wrap" Margin="0,3,0,0"
+                                           Text="O chat, a voz e as transmissões passam pelo PC servidor. Quem transmite manda uma cópia só, e quem assiste recebe do servidor."/>
+                            </StackPanel>
+                        </RadioButton>
+                        <RadioButton x:Name="RoleHost" GroupName="serverRole" Style="{StaticResource ModeCard}" Checked="Role_Checked">
+                            <StackPanel Margin="0,0,30,0">
+                                <TextBlock FontWeight="SemiBold" FontSize="14.5" Text="Este PC é o servidor"/>
+                                <TextBlock Style="{StaticResource Muted}" FontSize="13" TextWrapping="Wrap" Margin="0,3,0,0"
+                                           Text="O servidor roda dentro do ScreenFlow, neste PC (ele precisa ficar ligado). Os outros entram com o endereço deste PC no Tailscale ou no Radmin VPN."/>
+                            </StackPanel>
+                        </RadioButton>
+
+                        <StackPanel x:Name="JoinPanel" Margin="0,18,0,0" Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource Label}" Text="Endereço do servidor"/>
+                            <TextBox x:Name="ServerAddressBox" MaxLength="255" FontFamily="{DynamicResource FontMono}"
+                                     Tag="100.64.1.2, 26.1.2.3 ou o nome do PC no Tailscale"/>
+                            <TextBlock Style="{StaticResource Caption}" Margin="0,6,0,14" TextWrapping="Wrap"
+                                       Text="O IP do PC servidor no Tailscale (100.x) ou no Radmin VPN (26.x), ou o nome dele no Tailscale. Se o servidor usa outra porta, coloque depois de dois pontos (100.64.1.2:47810)."/>
+                            <TextBlock Style="{StaticResource Label}" Text="Senha do servidor"/>
+                            <PasswordBox x:Name="ServerPasswordBox" MaxLength="128" AutomationProperties.Name="Senha do servidor"/>
+                            <TextBlock Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap" Text="Deixe vazio se o servidor não tem senha."/>
+                        </StackPanel>
+
+                        <StackPanel x:Name="HostPanel" Margin="0,18,0,0" Visibility="Collapsed">
+                            <TextBlock Style="{StaticResource Label}" Text="Nome do servidor"/>
+                            <TextBox x:Name="HostedNameBox" MaxLength="40" Margin="{DynamicResource FieldGap}"/>
+                            <TextBlock Style="{StaticResource Label}" Text="Senha do servidor (opcional)"/>
+                            <TextBox x:Name="HostedPasswordBox" MaxLength="128" Tag="Sem senha"/>
+                            <TextBlock Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap"
+                                       Text="Com senha, só entra quem souber. Pelo servidor, a senha dele vale no lugar do PIN e da aprovação de quem transmite."/>
+                        </StackPanel>
+
+                        <CheckBox x:Name="TransmitViaServerToggle" Style="{StaticResource Switch}" Margin="0,18,0,0" Visibility="Collapsed"
+                                  Content="Quando eu transmitir, mandar também pelo servidor (uma cópia só, e quem está nele assiste por lá)"/>
+                        <TextBlock Style="{StaticResource Caption}" Margin="0,14,0,0" TextWrapping="Wrap" Text="Vale quando você salvar."/>
+                    </StackPanel>
+                </Border>
+
+                <StackPanel Grid.Column="2">
+                    <!-- Como está -->
+                    <Border Style="{StaticResource Card}" Margin="{DynamicResource StackGap}">
+                        <StackPanel>
+                            <DockPanel Margin="0,0,0,16">
+                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE72C;" ToolTip="Procurar o servidor de novo"
+                                        Click="ServerRetry_Click" VerticalAlignment="Center"/>
+                                <Border Style="{StaticResource IconTileBlue}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE9D9;"/>
+                                </Border>
+                                <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Style="{StaticResource Heading}" Text="Como está"/>
+                                    <TextBlock Style="{StaticResource Caption}" Text="O servidor em uso e as redes deste PC."/>
+                                </StackPanel>
+                            </DockPanel>
+                            <Border Style="{StaticResource InsetCard}" Padding="14,12">
+                                <DockPanel>
+                                    <Ellipse x:Name="ServerDot" Width="9" Height="9" Fill="{DynamicResource TextSubtle}" VerticalAlignment="Top" Margin="2,6,12,0"/>
+                                    <TextBlock x:Name="ServerStatusText" Style="{StaticResource Body}" FontSize="13.5" TextWrapping="Wrap" Text="Sem servidor."/>
+                                </DockPanel>
+                            </Border>
+                            <TextBlock x:Name="HostedDetails" Style="{StaticResource Mono}" FontSize="12" TextWrapping="Wrap" Margin="2,12,0,0" Visibility="Collapsed"/>
+                            <TextBlock Style="{StaticResource Label}" Text="Redes deste PC" Margin="0,18,0,7"/>
+                            <ItemsControl x:Name="AddressList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Style="{StaticResource InsetCard}" Margin="0,0,0,6" Padding="12,6">
+                                            <DockPanel>
+                                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE8C8;" ToolTip="Copiar o endereço"
+                                                        Click="CopyAddress_Click" Tag="{Binding Address}"/>
+                                                <TextBlock VerticalAlignment="Center" TextTrimming="CharacterEllipsis">
+                                                    <Run Text="{Binding Network, Mode=OneWay}" FontWeight="SemiBold"/><Run Text="  "/><Run Text="{Binding Address, Mode=OneWay}"
+                                                         FontFamily="{DynamicResource FontMono}" Foreground="{DynamicResource TextMuted}"/>
+                                                </TextBlock>
+                                            </DockPanel>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock x:Name="AddressHint" Style="{StaticResource Caption}" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Tailscale -->
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <DockPanel Margin="0,0,0,14">
+                                <Border Style="{StaticResource IconTileViolet}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE968;"/>
+                                </Border>
+                                <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
+                                    <TextBlock Style="{StaticResource Heading}" Text="Tailscale"/>
+                                    <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap"
+                                               Text="Junta os PCs numa rede só, até pela internet, sem abrir portas no roteador. Cada pessoa entra na própria conta."/>
+                                </StackPanel>
+                            </DockPanel>
+                            <TextBlock x:Name="TailscaleText" Style="{StaticResource Body}" FontSize="13.5" TextWrapping="Wrap"/>
+                            <ProgressBar x:Name="TailscaleProgress" Height="6" Maximum="1" Margin="0,10,0,0" Visibility="Collapsed"/>
+                            <WrapPanel Margin="0,12,0,0">
+                                <Button x:Name="TailscaleButton" Content="Instalar o Tailscale" MinHeight="34" Padding="14,0" Margin="0,0,8,8" Click="Tailscale_Click"/>
+                                <Button x:Name="TailscaleOpenButton" Style="{StaticResource GhostButton}" Content="Abrir o Tailscale" MinHeight="34" Padding="12,0" Margin="0,0,8,8"
+                                        Click="TailscaleOpen_Click"/>
+                                <Button Style="{StaticResource GhostButton}" Content="Guia do servidor" MinHeight="34" Padding="12,0" Margin="0,0,0,8" Click="ServerGuide_Click"
+                                        ToolTip="Como montar um PC servidor (Linux ou Windows) com o programa do servidor"/>
+                            </WrapPanel>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
             </Grid>
 
             <!-- ═════════════ Rede e diagnóstico ═════════════ -->
@@ -503,7 +765,7 @@
                             </Border>
                             <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
                                 <TextBlock Style="{StaticResource Heading}" Text="Rede e firewall"/>
-                                <TextBlock Style="{StaticResource Caption}" Text="Portas usadas pelo ScreenFlow na rede Radmin."/>
+                                <TextBlock Style="{StaticResource Caption}" Text="Portas usadas pelo ScreenFlow na rede (Radmin VPN ou Tailscale)."/>
                             </StackPanel>
                         </DockPanel>
                         <Grid Margin="{DynamicResource FieldGap}">

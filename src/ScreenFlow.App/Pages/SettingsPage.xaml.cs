@@ -1,12 +1,17 @@
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Windows;
+using System.Windows.Automation;
 using System.Windows.Controls;
+using System.Windows.Media;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using ScreenFlow.App.Services;
+using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
+using ScreenFlow.Core.Network;
 using ScreenFlow.Core.Room;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Network;
@@ -21,12 +26,14 @@ public enum SettingsTab
     Stream,
     Player,
     Voice,
+    Server,
     Network,
 }
 
 /// <summary>
-/// Configurações em abas: Geral (perfil, tema e janela), Transmissão (qualidade, som e quem pode entrar), Assistir
-/// (player e atalhos), Voz e sala (microfone e chat guardado) e Rede e diagnóstico.
+/// Configurações em abas: Geral (perfil, tema, cor e janela), Transmissão (qualidade, som e quem pode entrar), Assistir
+/// (player e atalhos), Voz e sala (microfone e chat guardado), Servidor (1.4.1: o servidor ScreenFlow e o Tailscale) e
+/// Rede e diagnóstico.
 /// </summary>
 public partial class SettingsPage : UserControl, IShellPage
 {
@@ -45,7 +52,9 @@ public partial class SettingsPage : UserControl, IShellPage
     private bool _loading;
     private SettingsTab _tab = SettingsTab.General;
     private bool _archiveDemo;
+    private bool _serverDemo;
     private bool _choosingFolder;
+    private readonly ObservableCollection<AddressRow> _addresses = [];
 
     public SettingsPage(MainWindow shell)
     {
@@ -60,8 +69,18 @@ public partial class SettingsPage : UserControl, IShellPage
         MusicCombo.Fill(AudioProfile.MusicBitrates.Select(k => new Choice<int>(k, OverviewPage.MusicLabel(k))));
         CameraQualityCombo.Fill(OverviewPage.CameraQualities);
         ThemeCombo.Fill([new Choice<AppTheme>(AppTheme.Dark, "Escuro"), new Choice<AppTheme>(AppTheme.Light, "Claro")]);
+        ThemeCombo.SelectionChanged += (_, _) => ThemeMode_Changed();
+        BuildColorSwatches();
+        AddressList.ItemsSource = _addresses;
+        AppServices.Server.Changed += UpdateServerStatus;
+        AppServices.Server.HostedChanged += UpdateServerStatus;
+        AppServices.Room.ServerChanged += UpdateServerStatus;
+        AppServices.Tailscale.Changed += UpdateTailscaleCard;
+        ThemeManager.Changed += UpdateColorSwatches;
         _micTimer.Tick += (_, _) => UpdateMicMeter();
         AppServices.Room.ArchiveChanged += UpdateArchiveCard;
+        AppServices.Room.PrivateRoomChanged += UpdatePrivateRoomCard;
+        AppServices.Room.Changed += () => { if (_tab == SettingsTab.Voice && AppServices.Room.IsPrivateRoomOwner) UpdatePrivateRoomCard(); };
         Unloaded += (_, _) =>
         {
             StopMicTest();
@@ -91,6 +110,7 @@ public partial class SettingsPage : UserControl, IShellPage
         SettingsTab.Stream => TabStream,
         SettingsTab.Player => TabPlayer,
         SettingsTab.Voice => TabVoice,
+        SettingsTab.Server => TabServer,
         SettingsTab.Network => TabNetwork,
         _ => TabGeneral,
     };
@@ -111,7 +131,9 @@ public partial class SettingsPage : UserControl, IShellPage
         StreamPanel.Visibility = _tab == SettingsTab.Stream ? Visibility.Visible : Visibility.Collapsed;
         PlayerColumns.Visibility = _tab == SettingsTab.Player ? Visibility.Visible : Visibility.Collapsed;
         VoiceColumns.Visibility = _tab == SettingsTab.Voice ? Visibility.Visible : Visibility.Collapsed;
+        ServerColumns.Visibility = _tab == SettingsTab.Server ? Visibility.Visible : Visibility.Collapsed;
         NetworkColumns.Visibility = _tab == SettingsTab.Network ? Visibility.Visible : Visibility.Collapsed;
+        if (_tab == SettingsTab.Server) RefreshServerTab();
     }
 
     /// <summary>Com a janela estreita, os cartões de cada aba ficam um embaixo do outro.</summary>
@@ -122,6 +144,7 @@ public partial class SettingsPage : UserControl, IShellPage
         ResponsiveGrid.Apply(StreamColumns, stacked);
         ResponsiveGrid.Apply(PlayerColumns, stacked);
         ResponsiveGrid.Apply(VoiceColumns, stacked);
+        ResponsiveGrid.Apply(ServerColumns, stacked);
         ResponsiveGrid.Apply(NetworkColumns, stacked);
     }
 
@@ -154,12 +177,19 @@ public partial class SettingsPage : UserControl, IShellPage
         TrayToggle.IsChecked = s.MinimizeToTray;
         ReopenToggle.IsChecked = s.ShowWindowWhenSessionEnds;
         ThemeCombo.SelectValue(ThemeManager.Current);
+        UpdateColorSwatches();
+        LoadServer(s);
         LoadMicrophones(s.MicrophoneId);
+        LoadSpeakers(s.SpeakerId);
+        PushToTalkToggle.IsChecked = s.PushToTalk;
+        _pushToTalkKey = s.PushToTalkKey;
+        ShowPushToTalkKey();
         SensitivitySlider.Value = s.VoiceSensitivity;
         VoiceVolumeSlider.Value = s.VoiceVolume;
         VoiceSoundsToggle.IsChecked = s.VoiceSounds;
         UpdateVoiceLabels();
         UpdateArchiveCard();
+        UpdatePrivateRoomCard();
         if (AppServices.DemoMode) ShowDemoMeter();
         SavedText.Text = string.Empty;
         AutoResult.Text = s.LastAutoConfig is { } when
@@ -195,6 +225,20 @@ public partial class SettingsPage : UserControl, IShellPage
             return;
         }
 
+        // (1.4.1) O servidor: o endereço precisa fazer sentido antes de salvar.
+        var role = SelectedRole;
+        var serverAddress = ServerAddressBox.Text.Trim();
+        if (role == ServerRole.Join && !LocalNetworks.TrySplitHostPort(serverAddress, AppInfo.DefaultServerControlPort, out _, out _))
+        {
+            SavedText.Text = string.Empty;
+            ShowTab(SettingsTab.Server);
+            _shell.Toast(serverAddress.Length == 0
+                ? "Coloque o endereço do servidor (o IP dele no Tailscale ou no Radmin VPN, ou o nome do PC no Tailscale)."
+                : $"O endereço \"{serverAddress}\" não parece um endereço de servidor. Use o IP (100.x do Tailscale ou 26.x do Radmin) ou o nome do PC no Tailscale.", ToastKind.Warning);
+            ServerAddressBox.Focus();
+            return;
+        }
+
         if (QualityCombo.Value<Resolution>() is { } resolution) s.Resolution = resolution.Label;
         if (FpsCombo.SelectedItem is Choice<int> fps) s.Fps = fps.Value;
         s.BitrateKbps = TryNumber(BitrateBox.Text, out var mbps) ? (int)(mbps * 1000) : 0;
@@ -225,11 +269,20 @@ public partial class SettingsPage : UserControl, IShellPage
         s.MinimizeToTray = TrayToggle.IsChecked == true;
         s.ShowWindowWhenSessionEnds = ReopenToggle.IsChecked == true;
         s.MicrophoneId = MicrophoneCombo.Value<string?>();
+        s.SpeakerId = SpeakerCombo.Value<string?>();
+        s.PushToTalk = PushToTalkToggle.IsChecked == true;
+        s.PushToTalkKey = _pushToTalkKey;
         s.VoiceSensitivity = SensitivitySlider.Value;
         s.VoiceVolume = VoiceVolumeSlider.Value;
         s.VoiceSounds = VoiceSoundsToggle.IsChecked == true;
         var theme = ThemeCombo.Value<AppTheme>();
         s.Theme = theme;
+        s.ServerRole = role;
+        s.ServerAddress = serverAddress.Length == 0 ? null : serverAddress;
+        s.ServerPassword = ServerPasswordBox.Password.Length == 0 ? null : ServerPasswordBox.Password;
+        s.HostedServerName = HostedNameBox.Text.Trim() is { Length: > 0 } hostedName ? hostedName : null;
+        s.HostedServerPassword = HostedPasswordBox.Text.Length == 0 ? null : HostedPasswordBox.Text;
+        s.TransmitViaServer = TransmitViaServerToggle.IsChecked == true;
 
         var hardware = await AppServices.Hardware;
         var encoder = hardware.Encoders.FirstOrDefault(x => x.FfmpegName == EncoderCombo.Value<string?>());
@@ -254,6 +307,236 @@ public partial class SettingsPage : UserControl, IShellPage
 
     private static bool TryNumber(string text, out double value)
         => double.TryParse(text.Trim().Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out value) && value > 0;
+
+    // ───────────────────────── Cor do tema (1.4.1) ─────────────────────────
+
+    /// <summary>Uma bolinha por cor; a escolha vale na hora e fica salva (é só deste PC).</summary>
+    private void BuildColorSwatches()
+    {
+        var style = (Style)FindResource("ColorSwatch");
+        foreach (var theme in ColorThemes.All)
+        {
+            var accent = ToColor(theme.Accent);
+            // O ✓ em tinta escura ou branca, o que aparecer mais na cor.
+            var check = ColorThemes.Contrast(theme.Accent, 0xFF0B1224) >= ColorThemes.Contrast(theme.Accent, 0xFFFFFFFF) ? Color.FromRgb(0x0B, 0x12, 0x24) : Colors.White;
+            var swatch = new RadioButton
+            {
+                Style = style,
+                GroupName = "colorTheme",
+                Background = Frozen(accent),
+                Foreground = Frozen(check),
+                Tag = theme.Id,
+                ToolTip = theme == ColorThemes.Default ? $"{theme.Name} (a de sempre)" : theme.Name,
+            };
+            AutomationProperties.SetName(swatch, $"Cor {theme.Name}");
+            swatch.Checked += ColorSwatch_Checked;
+            ColorSwatches.Children.Add(swatch);
+        }
+    }
+
+    private void UpdateColorSwatches()
+    {
+        var current = ThemeManager.CurrentColor;
+        foreach (RadioButton swatch in ColorSwatches.Children)
+            if (swatch.Tag as string == current.Id && swatch.IsChecked != true) swatch.IsChecked = true;
+        ColorName.Text = current == ColorThemes.Default ? $"{current.Name} (a de sempre)" : current.Name;
+    }
+
+    private void ColorSwatch_Checked(object sender, RoutedEventArgs e)
+    {
+        if (sender is not RadioButton { Tag: string id } || id == ThemeManager.CurrentColor.Id) return;
+        ThemeManager.Apply(ThemeManager.Current, id);
+        Settings.ColorTheme = id == ColorThemes.Default.Id ? null : id;
+        AppServices.Settings.Save();
+    }
+
+    /// <summary>Escuro ou claro também vale na hora (antes só valia ao salvar).</summary>
+    private void ThemeMode_Changed()
+    {
+        if (_loading || !IsLoaded || ThemeCombo.SelectedItem is not Choice<AppTheme> { Value: var mode } || mode == ThemeManager.Current) return;
+        ThemeManager.Apply(mode);
+        Settings.Theme = mode;
+        AppServices.Settings.Save();
+    }
+
+    private static Color ToColor(uint argb) => Color.FromArgb((byte)(argb >> 24), (byte)(argb >> 16), (byte)(argb >> 8), (byte)argb);
+
+    private static SolidColorBrush Frozen(Color color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
+    }
+
+    // ───────────────────────── Servidor (1.4.1) ─────────────────────────
+
+    private ServerRole SelectedRole => RoleHost.IsChecked == true ? ServerRole.Host : RoleJoin.IsChecked == true ? ServerRole.Join : ServerRole.None;
+
+    private void LoadServer(AppSettings s)
+    {
+        (s.ServerRole switch { ServerRole.Join => RoleJoin, ServerRole.Host => RoleHost, _ => RoleNone }).IsChecked = true;
+        ServerAddressBox.Text = s.ServerAddress ?? string.Empty;
+        ServerPasswordBox.Password = s.ServerPassword ?? string.Empty;
+        HostedNameBox.Tag = s.DeviceName;
+        HostedNameBox.Text = s.HostedServerName ?? string.Empty;
+        HostedPasswordBox.Text = s.HostedServerPassword ?? string.Empty;
+        TransmitViaServerToggle.IsChecked = s.TransmitViaServer;
+        ApplyRolePanels();
+        UpdateServerStatus();
+    }
+
+    private void Role_Checked(object sender, RoutedEventArgs e)
+    {
+        if (!IsInitialized || JoinPanel is null) return;
+        ApplyRolePanels();
+        UpdateServerStatus();
+    }
+
+    private void ApplyRolePanels()
+    {
+        var role = SelectedRole;
+        JoinPanel.Visibility = role == ServerRole.Join ? Visibility.Visible : Visibility.Collapsed;
+        HostPanel.Visibility = role == ServerRole.Host ? Visibility.Visible : Visibility.Collapsed;
+        TransmitViaServerToggle.Visibility = role == ServerRole.None ? Visibility.Collapsed : Visibility.Visible;
+        UpdateAddressHint();
+    }
+
+    /// <summary>Quando a aba abre: os endereços deste PC e o estado do Tailscale, lidos de novo.</summary>
+    private void RefreshServerTab()
+    {
+        _addresses.Clear();
+        IReadOnlyList<LocalNetworkAddress> addresses = AppServices.DemoMode
+            ? [new("Tailscale", System.Net.IPAddress.Parse("100.101.102.103"), NetworkKind.Tailscale, true), new("Radmin VPN", System.Net.IPAddress.Parse("26.12.34.56"), NetworkKind.Radmin, true)]
+            : ServerService.ReachableAddresses();
+        foreach (var address in addresses) _addresses.Add(new AddressRow(address.Label, address.Address.ToString()));
+        UpdateAddressHint();
+        UpdateServerStatus();
+        UpdateTailscaleCard();
+        _ = AppServices.Tailscale.RefreshAsync();
+    }
+
+    private void UpdateAddressHint()
+    {
+        if (AddressHint is null) return;
+        AddressHint.Text = _addresses.Count == 0
+            ? "Nenhuma rede ativa (nem Tailscale nem Radmin VPN). Ligue uma delas para os outros PCs alcançarem este."
+            : SelectedRole == ServerRole.Host
+                ? $"Com este PC como servidor, os outros escolhem “Entrar num servidor” e colocam um destes endereços (o do Tailscale ou o do Radmin VPN). Libere as portas {AppInfo.DefaultServerControlPort} (TCP) e {AppInfo.DefaultServerMediaPort}–{AppInfo.DefaultServerRoomPort} (UDP) se o firewall pedir."
+                : "Os endereços em que os outros PCs alcançam este.";
+    }
+
+    /// <summary>A linha "Conectado ao servidor X (5 pessoas)" e, no servidor deste PC, quem está nele e o que está no ar.</summary>
+    private void UpdateServerStatus()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(UpdateServerStatus);
+            return;
+        }
+        if (ServerStatusText is null) return;
+        if (_serverDemo)
+        {
+            ServerStatusText.Text = "Este PC é o servidor \"Servidor do Kayky\": 4 pessoas nele e 1 transmissão no ar.";
+            ServerDot.SetResourceReference(Shape.FillProperty, "Accent");
+            HostedDetails.Text = "Servidor \"Servidor do Kayky\" · portas TCP 47810, UDP 47811 e 47812 · com senha\n"
+                                 + "Na sala (4): Ana, Bruno, Carla, PC da Sala\n"
+                                 + "  Ana (Tela): HEVC 1920x1080 60 FPS · entrando 18.2 Mbps, saindo 54.6 Mbps · 3 assistindo (Bruno, Carla, PC da Sala)";
+            HostedDetails.Visibility = Visibility.Visible;
+            return;
+        }
+        var service = AppServices.Server;
+        var room = AppServices.Room.ServerStatus;
+        var role = AppServices.DemoMode ? ServerRole.None : Settings.ServerRole;
+        string text;
+        string color;
+        switch (role)
+        {
+            case ServerRole.None:
+                (text, color) = ("Sem servidor: a sala e as transmissões vão direto de um PC para o outro.", "TextSubtle");
+                break;
+            case var _ when service.Target is null:
+                (text, color) = (service.Problem ?? "Procurando o servidor…", service.Problem is null ? "Amber" : "Danger");
+                break;
+            default:
+                text = room?.Text ?? $"Conectando ao servidor {service.Target.Label}…";
+                color = room?.State switch
+                {
+                    RoomServerState.Connected => "Accent",
+                    RoomServerState.NeedsPassword or RoomServerState.WrongPassword => "Danger",
+                    _ => "Amber",
+                };
+                if (service.Problem is { } problem) text += "\n" + problem;
+                break;
+        }
+        if (SelectedRole != role) text += "\nA escolha nova vale quando você salvar.";
+        ServerStatusText.Text = text;
+        ServerDot.SetResourceReference(Shape.FillProperty, color);
+        if (service.Hosted is { } hosted)
+        {
+            HostedDetails.Text = hosted.Describe();
+            HostedDetails.Visibility = Visibility.Visible;
+        }
+        else HostedDetails.Visibility = Visibility.Collapsed;
+    }
+
+    private void ServerRetry_Click(object sender, RoutedEventArgs e)
+    {
+        AppServices.Server.Retry();
+        RefreshServerTab();
+    }
+
+    private void CopyAddress_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not string address) return;
+        try
+        {
+            Clipboard.SetText(address);
+            _shell.Toast($"Endereço {address} copiado. É só mandar para quem vai entrar no servidor.", ToastKind.Success);
+        }
+        catch (Exception exception) { Log.Warn($"Área de transferência ocupada: {exception.Message}"); }
+    }
+
+    private void ServerGuide_Click(object sender, RoutedEventArgs e) => MainWindow.OpenUrl(AppInfo.ServerGuideUrl);
+
+    // ───────────────────────── Tailscale (1.4.1) ─────────────────────────
+
+    private void UpdateTailscaleCard()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(UpdateTailscaleCard);
+            return;
+        }
+        if (TailscaleText is null) return;
+        var setup = AppServices.Tailscale;
+        var installed = TailscaleSetup.IsInstalled();
+        var running = AppServices.DemoMode || setup.Current?.Running == true;
+        TailscaleText.Text = setup.Busy || (setup.Status is not null && !running) ? setup.Status : setup.Describe();
+        TailscaleProgress.Visibility = setup.Progress is null ? Visibility.Collapsed : Visibility.Visible;
+        TailscaleProgress.Value = setup.Progress ?? 0;
+        TailscaleButton.Content = !installed ? "Instalar o Tailscale" : setup.Current?.NeedsLogin == true ? "Entrar no Tailscale" : "Ligar o Tailscale";
+        TailscaleButton.Visibility = running && !setup.Busy ? Visibility.Collapsed : Visibility.Visible;
+        TailscaleButton.IsEnabled = !setup.Busy && !AppServices.DemoMode;
+        TailscaleOpenButton.Visibility = installed ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private async void Tailscale_Click(object sender, RoutedEventArgs e)
+    {
+        // No PC servidor, o Tailscale fica ligado mesmo sem ninguém logado no Windows.
+        var unattended = SelectedRole == ServerRole.Host;
+        var ok = TailscaleSetup.IsInstalled()
+            ? await AppServices.Tailscale.ConnectAsync(_shell, unattended)
+            : await AppServices.Tailscale.InstallAsync(_shell, unattended);
+        if (ok) RefreshServerTab();
+    }
+
+    private void TailscaleOpen_Click(object sender, RoutedEventArgs e)
+    {
+        if (!TailscaleSetup.OpenApp()) _shell.Toast("Abra o Tailscale pelo menu Iniciar.", ToastKind.Info);
+    }
+
+    /// <summary>Um endereço deste PC na lista "Redes deste PC".</summary>
+    public sealed record AddressRow(string Network, string Address);
 
     // ───────────────────────── Seu perfil ─────────────────────────
 
@@ -337,6 +620,52 @@ public partial class SettingsPage : UserControl, IShellPage
     }
 
     private void RefreshMicrophones_Click(object sender, RoutedEventArgs e) => LoadMicrophones(MicrophoneCombo.Value<string?>());
+
+    private void LoadSpeakers(string? selected)
+    {
+        IReadOnlyList<SpeakerInfo> speakers = AppServices.DemoMode
+            ? [new SpeakerInfo("demo", "Fone (HyperX Cloud II)")]
+            : Speakers.List();
+        var choices = new List<Choice<string?>> { new(null, "Padrão do Windows") };
+        choices.AddRange(speakers.Select(m => new Choice<string?>(m.Id, m.Name)));
+        if (selected is not null && speakers.All(m => m.Id != selected)) choices.Add(new Choice<string?>(selected, "Saída desconectada"));
+        SpeakerCombo.Fill(choices);
+        SpeakerCombo.SelectValue(selected);
+    }
+
+    private void RefreshSpeakers_Click(object sender, RoutedEventArgs e) => LoadSpeakers(SpeakerCombo.Value<string?>());
+
+    // Apertar para falar: o botão espera a próxima tecla (ou botão lateral do mouse).
+    private string _pushToTalkKey = "F8";
+    private bool _capturingKey;
+
+    private void ShowPushToTalkKey()
+        => PushToTalkKeyButton.Content = _capturingKey ? "Aperte a tecla…" : $"Tecla: {PushToTalkKeyWatcher.Describe(_pushToTalkKey)}";
+
+    private void PushToTalkKey_Click(object sender, RoutedEventArgs e)
+    {
+        _capturingKey = !_capturingKey;
+        ShowPushToTalkKey();
+    }
+
+    private void PushToTalkKey_PreviewKeyDown(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (!_capturingKey) return;
+        var key = e.Key == System.Windows.Input.Key.System ? e.SystemKey : e.Key;
+        e.Handled = true;
+        _capturingKey = false;
+        if (key != System.Windows.Input.Key.Escape && PushToTalkKeyWatcher.VirtualKey(key.ToString()) != 0) _pushToTalkKey = key.ToString();
+        ShowPushToTalkKey();
+    }
+
+    private void PushToTalkKey_PreviewMouseDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
+    {
+        if (!_capturingKey || e.ChangedButton is not (System.Windows.Input.MouseButton.XButton1 or System.Windows.Input.MouseButton.XButton2)) return;
+        e.Handled = true;
+        _capturingKey = false;
+        _pushToTalkKey = e.ChangedButton.ToString();
+        ShowPushToTalkKey();
+    }
 
     private void Sensitivity_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
@@ -517,6 +846,119 @@ public partial class SettingsPage : UserControl, IShellPage
     // ───────────────────────── Chat guardado (Google Drive) ─────────────────────────
 
     /// <summary>Mostra se o chat está sendo guardado, onde, ou por que não está.</summary>
+    // ───────────────────────── Sala privada e moderação (1.4.0) ─────────────────────────
+
+    private void UpdatePrivateRoomCard()
+    {
+        var room = AppServices.Room;
+        var on = room.InPrivateRoom;
+        var owner = room.IsPrivateRoomOwner;
+        PrivateOffPanel.Visibility = on ? Visibility.Collapsed : Visibility.Visible;
+        PrivateOnPanel.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        PrivateOwnerPanel.Visibility = owner ? Visibility.Visible : Visibility.Collapsed;
+        PrivateRotateButton.Visibility = owner ? Visibility.Visible : Visibility.Collapsed;
+        PrivateDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, on ? "Accent" : "TextSubtle");
+        PrivateStatus.Text = !on ? "Sala aberta: todo mundo da rede do Radmin com o ScreenFlow vê a sala."
+            : owner ? "Sala privada ativa. Você é o dono: mande o convite para quem pode entrar."
+            : "Sala privada ativa. Só quem tem o convite vê e ouve a sala.";
+        PrivateFingerprint.Text = on && room.PrivateRoomFingerprint is { } fingerprint
+            ? $"Código de conferência da chave: {fingerprint}. Todo mundo na mesma sala vê o mesmo código."
+            : string.Empty;
+        PrivateFingerprint.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        PrivateCodeBox.Text = room.PrivateRoomCode ?? string.Empty;
+        PrivateApprovedOnlyToggle.IsChecked = AppServices.Settings.Current.PrivateRoomApprovedOnly;
+
+        if (owner)
+        {
+            var pending = room.PrivateRoomPending;
+            PrivatePendingTitle.Visibility = pending.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            FillPeople(PrivatePendingList, pending.Select(p => (p.Key, p.Value)), "Aprovar", (id, _) => room.ApprovePrivateMember(id));
+            var approvedOnly = AppServices.Settings.Current.PrivateRoomApprovedOnly;
+            var approved = AppServices.Settings.Current.PrivateRoomApproved;
+            var members = room.People.Where(p => p.Id != room.SelfId && !pending.ContainsKey(p.Id))
+                .Select(p => (p.Id, approvedOnly && !approved.Contains(p.Id.ToString("N")) ? $"{p.Name} (sem aprovação)" : p.Name));
+            FillPeople(PrivateMembersList, members, "Remover", (id, name) =>
+            {
+                if (room.RemovePrivateMember(id, name)) _shell.Toast($"{name} saiu da sala privada e a chave foi trocada para os outros.", ToastKind.Success);
+            }, "Ninguém além de você por enquanto.");
+        }
+
+        var blocked = room.Blocked;
+        BlockedTitle.Visibility = blocked.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        FillPeople(BlockedList, blocked, "Desbloquear", (id, name) => room.SetBlocked(id, name, false));
+    }
+
+    /// <summary>Uma linha por pessoa, com o nome e um botão.</summary>
+    private static void FillPeople(StackPanel list, IEnumerable<(Guid Id, string Name)> people, string action, Action<Guid, string> onClick, string? empty = null)
+    {
+        list.Children.Clear();
+        foreach (var (id, name) in people)
+        {
+            var button = new Button { Content = action, MinHeight = 30, Padding = new Thickness(12, 0, 12, 0), Margin = new Thickness(8, 0, 0, 0) };
+            button.SetResourceReference(StyleProperty, "GhostButton");
+            System.Windows.Automation.AutomationProperties.SetName(button, $"{action} {name}");
+            button.Click += (_, _) => onClick(id, name);
+            var row = new DockPanel { Margin = new Thickness(0, 2, 0, 2) };
+            DockPanel.SetDock(button, Dock.Right);
+            row.Children.Add(button);
+            row.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis });
+            list.Children.Add(row);
+        }
+        if (list.Children.Count == 0 && empty is not null)
+        {
+            var text = new TextBlock { Text = empty, TextWrapping = TextWrapping.Wrap };
+            text.SetResourceReference(StyleProperty, "Caption");
+            list.Children.Add(text);
+        }
+    }
+
+    private void PrivateCreate_Click(object sender, RoutedEventArgs e)
+    {
+        var code = AppServices.Room.CreatePrivateRoom(PrivateApprovedOnlyNew.IsChecked == true);
+        CopyInvite(code);
+        UpdatePrivateRoomCard();
+    }
+
+    private void PrivateJoin_Click(object sender, RoutedEventArgs e)
+    {
+        if (!AppServices.Room.JoinPrivateRoom(PrivateInviteBox.Text))
+        {
+            _shell.Toast("Esse convite não é válido. Confira se copiou o código inteiro, começando por SF1-.", ToastKind.Warning);
+            return;
+        }
+        PrivateInviteBox.Text = string.Empty;
+        _shell.Toast("Você entrou na sala privada.", ToastKind.Success);
+        UpdatePrivateRoomCard();
+    }
+
+    private void PrivateCopy_Click(object sender, RoutedEventArgs e) => CopyInvite(AppServices.Room.PrivateRoomCode);
+
+    private void CopyInvite(string? code)
+    {
+        if (code is null) return;
+        try
+        {
+            Clipboard.SetText(code);
+            _shell.Toast("Convite copiado. Mande só para quem pode entrar na sala.", ToastKind.Success);
+        }
+        catch (System.Runtime.InteropServices.COMException) { _shell.Toast("Não deu para copiar agora. Selecione o código e copie com Ctrl+C.", ToastKind.Warning); }
+    }
+
+    private void PrivateApprovedOnly_Click(object sender, RoutedEventArgs e)
+        => AppServices.Room.SetPrivateRoomApprovedOnly(PrivateApprovedOnlyToggle.IsChecked == true);
+
+    private void PrivateRotate_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Room.RotatePrivateRoomKey())
+            _shell.Toast("Chave trocada. Quem está na sala agora recebeu a nova; para os outros, mande o convite novo.", ToastKind.Success);
+    }
+
+    private void PrivateLeave_Click(object sender, RoutedEventArgs e)
+    {
+        AppServices.Room.LeavePrivateRoom();
+        _shell.Toast("Você voltou para a sala aberta da rede.", ToastKind.Info);
+    }
+
     private void UpdateArchiveCard()
     {
         if (!IsInitialized) return;
@@ -560,6 +1002,18 @@ public partial class SettingsPage : UserControl, IShellPage
     {
         _archiveDemo = true;
         UpdateArchiveCard();
+    }
+
+    /// <summary>Usado nas capturas de tela do CI: este PC é o servidor, com gente nele e uma transmissão no ar.</summary>
+    internal void ShowServerDemo()
+    {
+        _serverDemo = true;
+        RoleHost.IsChecked = true;
+        HostedNameBox.Text = "Servidor do Kayky";
+        HostedPasswordBox.Text = "senha da casa";
+        TransmitViaServerToggle.IsChecked = true;
+        ApplyRolePanels();
+        UpdateServerStatus();
     }
 
     /// <summary>O chat guardado vale na hora (sem precisar do Salvar): a sala abre ou fecha a pasta.</summary>

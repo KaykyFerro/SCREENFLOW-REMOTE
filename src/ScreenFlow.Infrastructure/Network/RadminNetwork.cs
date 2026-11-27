@@ -8,6 +8,16 @@ namespace ScreenFlow.Infrastructure.Network;
 public sealed record NetworkAdapterInfo(string Name, string Description, IPAddress Address, IPAddress Mask, long SpeedMbps, bool IsRadmin, bool IsUp)
 {
     public IPAddress Broadcast => RadminAddress.BroadcastFor(Address, Mask);
+
+    /// <summary>(1.4.1) De que rede é: Tailscale, Radmin VPN, rede local ou outra.</summary>
+    public NetworkKind Kind => LocalNetworks.Classify(Name, Description, Address);
+
+    /// <summary>(1.4.1) É o Tailscale (IP 100.64.0.0/10).</summary>
+    public bool IsTailscale => TailscaleAddress.IsTailscale(Address);
+
+    /// <summary>Como aparece nas listas: "Radmin VPN · 26.x", "Tailscale · 100.x" ou "Wi-Fi · 192.168.x".</summary>
+    public string Label => IsTailscale ? $"Tailscale · {Address}" : IsRadmin ? $"Radmin VPN · {Address}" : $"{Name} · {Address}";
+
     public override string ToString() => $"{Description} ({Address})";
 }
 
@@ -41,6 +51,10 @@ public static class RadminNetwork
             .Where(a => a.IsRadmin && a.IsUp && RadminAddress.IsRadmin(a.Address))
             .OrderByDescending(a => RadminAddress.IsRadminAdapterName(a.Description))
             .FirstOrDefault();
+
+    /// <summary>(1.4.1) O adaptador do Tailscale ativo com IP 100.x, ou null sem o Tailscale (ou desconectado).</summary>
+    public static NetworkAdapterInfo? FindTailscale()
+        => GetIPv4Adapters().FirstOrDefault(a => a.IsUp && a.IsTailscale);
 
     public static bool IsRadminInstalled()
         => NetworkInterface.GetAllNetworkInterfaces().Any(n => RadminAddress.IsRadminAdapterName(n.Description) || RadminAddress.IsRadminAdapterName(n.Name));

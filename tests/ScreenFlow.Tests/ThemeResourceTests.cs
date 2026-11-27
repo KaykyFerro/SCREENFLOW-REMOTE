@@ -107,6 +107,26 @@ public class ThemeResourceTests
 
     private static int Line(string text, int index) => text.AsSpan(0, index).Count('\n') + 1;
 
+    /// <summary>(1.4.1) As cores do tema pintam por cima de chaves que existem nos dois temas, com o mesmo formato.</summary>
+    [Fact]
+    public void ColorThemesPaintKeysThatBothThemesHave()
+    {
+        foreach (var file in new[] { "Themes/Dark.xaml", "Themes/Light.xaml" })
+        {
+            var elements = XDocument.Load(Path.Combine(AppFolder, file)).Descendants()
+                .Where(e => e.Attribute(Xaml + "Key") is not null)
+                .ToDictionary(e => (string)e.Attribute(Xaml + "Key")!);
+            foreach (var key in ScreenFlow.Core.Settings.ColorThemes.SolidKeys)
+                Assert.True(elements.TryGetValue(key, out var solid) && solid.Name.LocalName == "SolidColorBrush", $"{file}: {key} precisa ser um SolidColorBrush");
+            foreach (var (key, stops) in ScreenFlow.Core.Settings.ColorThemes.GradientStops)
+            {
+                Assert.True(elements.TryGetValue(key, out var gradient) && gradient.Name.LocalName.EndsWith("GradientBrush", StringComparison.Ordinal),
+                    $"{file}: {key} precisa ser um gradiente");
+                Assert.Equal(stops, gradient!.Descendants().Count(d => d.Name.LocalName == "GradientStop"));
+            }
+        }
+    }
+
     [Fact]
     public void EachResourceNameHasOneType()
     {

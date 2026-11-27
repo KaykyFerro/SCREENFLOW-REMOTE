@@ -28,14 +28,15 @@ public static class RemoteControl
     /// <summary>O comando é um dos conhecidos e o app que está tocando deixa (pular só se dá para pular, e assim por diante).</summary>
     public static bool Accepts(RemoteStateMessage state, MediaStateMessage media, MediaCommandMessage command)
     {
-        if (!state.CanControlMedia || !media.Available) return false;
+        if (!state.CanControlMedia || !media.Available || !MediaSeek.SameSession(media, command)) return false;
         return command.Command switch
         {
             MediaCommandMessage.PlayPause => media.CanPlayPause,
             MediaCommandMessage.Previous => media.CanPrevious,
             MediaCommandMessage.Next => media.CanNext,
-            MediaCommandMessage.Seek => media.CanSeek && double.IsFinite(command.PositionSeconds) && command.PositionSeconds >= 0
-                                        && command.PositionSeconds <= Math.Max(0, media.DurationSeconds) + 1,
+            MediaCommandMessage.Seek => command.PositionSeconds >= 0 && MediaSeek.Range(media).Contains(command.PositionSeconds),
+            MediaCommandMessage.SkipBy => !MediaSeek.Range(media).IsEmpty && double.IsFinite(command.DeltaSeconds) && command.DeltaSeconds != 0
+                                          && Math.Abs(command.DeltaSeconds) <= MediaSeek.MaxSkipSeconds,
             _ => false,
         };
     }
@@ -61,7 +62,9 @@ public static class RemoteControl
     public static bool SameTrack(MediaStateMessage a, MediaStateMessage b)
         => a.AppName == b.AppName && a.Title == b.Title && a.Artist == b.Artist && a.Playing == b.Playing
            && a.CanPrevious == b.CanPrevious && a.CanNext == b.CanNext && a.CanPlayPause == b.CanPlayPause && a.CanSeek == b.CanSeek
-           && Math.Abs(a.DurationSeconds - b.DurationSeconds) < 1 && a.Cover == b.Cover;
+           && Math.Abs(a.DurationSeconds - b.DurationSeconds) < 1 && a.Cover == b.Cover
+           && a.SessionKey == b.SessionKey && a.Live == b.Live && a.NoSeek == b.NoSeek
+           && Math.Abs(a.SeekStartSeconds - b.SeekStartSeconds) < 2 && Math.Abs(a.SeekEndSeconds - b.SeekEndSeconds) < 2;
 
     /// <summary>
     /// Precisa mandar de novo: mudou a música ou o estado, ou a posição andou diferente do relógio (alguém mudou o ponto
@@ -88,6 +91,10 @@ public static class RemoteControl
             PositionSeconds = double.IsFinite(media.PositionSeconds) ? Math.Max(0, media.PositionSeconds) : 0,
             DurationSeconds = double.IsFinite(media.DurationSeconds) ? Math.Max(0, media.DurationSeconds) : 0,
             Cover = cover,
+            SessionKey = media.SessionKey is { Length: > 0 and <= 64 } key ? key : null,
+            SeekStartSeconds = double.IsFinite(media.SeekStartSeconds) ? Math.Max(0, media.SeekStartSeconds) : 0,
+            SeekEndSeconds = double.IsFinite(media.SeekEndSeconds) ? Math.Max(0, media.SeekEndSeconds) : 0,
+            NoSeek = media.NoSeek is { Length: > 0 and <= 32 } reason ? reason : null,
         };
     }
 

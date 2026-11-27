@@ -52,7 +52,7 @@ public partial class App : Application
             return;
         }
 
-        ThemeManager.Apply(AppServices.Settings.Current.Theme);
+        ThemeManager.Apply(AppServices.Settings.Current.Theme, AppServices.Settings.Current.ColorTheme);
 
         if (captures is not null)
         {
@@ -73,6 +73,15 @@ public partial class App : Application
             Shutdown(0);
             return;
         }
+
+        // (1.4.1) O que o instalador pediu: este PC é o servidor, entrar num servidor, instalar o Tailscale ou o Radmin.
+        var startup = Core.Settings.StartupOptions.Parse(e.Args).Merge(ReadInstallerRequests());
+        if (startup.Apply(AppServices.Settings.Current))
+        {
+            AppServices.Settings.Save();
+            Log.Info($"Instalador: servidor {AppServices.Settings.Current.ServerRole}" + (startup.ServerAddress is { } address ? $" ({address})" : string.Empty) + ".");
+        }
+        AppServices.Startup = startup;
 
         var window = new MainWindow();
         MainWindow = window;
@@ -123,6 +132,26 @@ public partial class App : Application
         }) { IsBackground = true, Name = "ScreenFlow outra cópia" };
         listener.Start();
         return true;
+    }
+
+    /// <summary>O arquivo que o instalador deixou (lido uma vez e apagado). Sem ele, nada.</summary>
+    private static Core.Settings.StartupOptions ReadInstallerRequests()
+    {
+        var path = Path.Combine(AppInfo.DataDirectory, Core.Settings.StartupOptions.FileName);
+        try
+        {
+            if (!File.Exists(path)) return Core.Settings.StartupOptions.None;
+            var text = new FileInfo(path).Length <= Core.Settings.StartupOptions.MaxFileLength ? File.ReadAllText(path) : string.Empty;
+            File.Delete(path);
+            var options = Core.Settings.StartupOptions.ParseFile(text);
+            Log.Info($"Pedidos do instalador: {text.Trim()}");
+            return options;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Log.Warn($"Pedidos do instalador não lidos: {exception.Message}");
+            return Core.Settings.StartupOptions.None;
+        }
     }
 
     private static string? ArgumentValue(string[] args, string name)

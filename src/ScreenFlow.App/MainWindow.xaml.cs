@@ -37,6 +37,7 @@ public partial class MainWindow : Window
     private UpdatesPage? _updates;
     private ChatPage? _chat;
     private NetworkAdapterInfo? _radmin;
+    private NetworkAdapterInfo? _tailscale;
     private bool _radminInstalled = true;
     private bool _navigating;
     private bool _compact;
@@ -128,6 +129,12 @@ public partial class MainWindow : Window
 
     /// <summary>O Radmin VPN está instalado (mesmo que sem rede ativa).</summary>
     public bool RadminInstalled => _radminInstalled;
+
+    /// <summary>(1.4.1) Adaptador do Tailscale com IP 100.x (null sem o Tailscale). Atualizado quando a rede muda.</summary>
+    public NetworkAdapterInfo? Tailscale => _tailscale;
+
+    /// <summary>(1.4.1) Tem por onde os outros chegarem aqui: o Radmin VPN, o Tailscale ou um servidor ScreenFlow.</summary>
+    public bool HasNetwork => _radmin is not null || _tailscale is not null || AppServices.Server.Target is not null;
 
     /// <summary>A rede mudou (Radmin conectou ou caiu).</summary>
     public event Action? NetworkStatusChanged;
@@ -314,6 +321,10 @@ public partial class MainWindow : Window
         SetupTray();
         try
         {
+            // O servidor (1.4.1) primeiro: a sala já abre indo por ele quando ele está configurado.
+            AppServices.Server.Start();
+            AppServices.Server.Changed += OnServerChanged;
+            AppServices.Room.ServerChanged += ShowNetworkLine;
             AppServices.Room.Start();
             PushRoomState();
         }
@@ -322,8 +333,12 @@ public partial class MainWindow : Window
             Log.Error("A sala da rede não abriu", exception);
         }
         UpdateVoicePanel();
+        AppServices.Room.PendingMember += name => Toast($"{name} tem o convite da sala privada e está pedindo para entrar.", ToastKind.Info,
+            "Ver pedido", () => OpenSettings(SettingsTab.Voice));
 
         var settings = AppServices.Settings.Current;
+        if (AppServices.Settings.RecoveredCopy is { } copy)
+            Toast($"As configurações não abriram e voltaram ao padrão. O arquivo antigo foi guardado em {copy}.", ToastKind.Warning);
         _ = CheckFirewallAsync();
         if (!settings.AutoConfigured)
         {
@@ -347,6 +362,30 @@ public partial class MainWindow : Window
 
         if (settings.CheckUpdatesOnStart) _ = AppServices.Updates.CheckAsync(manual: false);
         _updateTimer.Start();
+        await RunInstallerRequestsAsync();
+    }
+
+    /// <summary>
+    /// (1.4.1) O que foi marcado no instalador: o modo do servidor já está nas configurações; aqui instala o Tailscale e o
+    /// Radmin VPN (cada um pede a permissão do Windows) e mostra o andamento em Configurações › Servidor.
+    /// </summary>
+    private async Task RunInstallerRequestsAsync()
+    {
+        var startup = AppServices.Startup;
+        AppServices.Startup = Core.Settings.StartupOptions.None;
+        if (!startup.Any) return;
+        var settings = AppServices.Settings.Current;
+        if (startup.Role is not null || startup.InstallTailscale) OpenSettings(SettingsTab.Server);
+        if (startup.InstallTailscale)
+        {
+            // No PC servidor, o Tailscale fica ligado mesmo sem ninguém logado no Windows.
+            var unattended = settings.ServerRole == Core.Settings.ServerRole.Host;
+            var status = await AppServices.Tailscale.RefreshAsync();
+            if (!TailscaleSetup.IsInstalled()) await AppServices.Tailscale.InstallAsync(this, unattended);
+            // Já instalado: só liga se nunca entrou na conta (desligado de propósito continua desligado).
+            else if (status?.NeedsLogin == true) await AppServices.Tailscale.ConnectAsync(this, unattended);
+        }
+        if (startup.InstallRadmin && !RadminSetup.IsInstalled()) await AppServices.RadminSetup.InstallAsync(this);
     }
 
     /// <summary>O instalador já libera as portas; se faltar alguma regra (portas mudadas, instalação antiga), avisa pelo sininho.</summary>
@@ -424,22 +463,66 @@ public partial class MainWindow : Window
     {
         try
         {
-            var (radmin, installed) = await Task.Run(() =>
+            var (radmin, installed, tailscale) = await Task.Run(() =>
             {
                 var found = AppServices.FindRadmin();
-                return (found, found is not null || RadminSetup.IsInstalled());
+                return (found, found is not null || RadminSetup.IsInstalled(), AppServices.FindTailscale());
             });
             _radmin = radmin;
             _radminInstalled = installed;
+            _tailscale = tailscale;
         }
         catch (Exception exception)
         {
             Log.Warn($"Falha ao ler a rede: {exception.Message}");
         }
-        RadminDot.SetResourceReference(Shape.FillProperty, _radmin is null ? "Warning" : "Success");
-        RadminText.Text = _radmin is null ? (_radminInstalled ? "Radmin sem rede ativa" : "Radmin VPN não encontrado") : $"Radmin · {_radmin.Address}";
+        ShowNetworkLine();
         RefreshStatus();
         NetworkStatusChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// A linha da rede embaixo do seu nome: o servidor (quando usa um), senão o Tailscale e o Radmin VPN. A dica mostra
+    /// tudo junto.
+    /// </summary>
+    private void ShowNetworkLine()
+    {
+        var details = new List<string>();
+        if (_tailscale is not null) details.Add($"Tailscale: {_tailscale.Address}");
+        if (_radmin is not null) details.Add($"Radmin VPN: {_radmin.Address}");
+        else if (_radminInstalled) details.Add("Radmin VPN instalado, sem rede ativa");
+        string text;
+        string dot;
+        if (AppServices.Settings.Current.ServerRole != ServerRole.None && !AppServices.DemoMode)
+        {
+            var status = AppServices.Room.ServerStatus;
+            var server = AppServices.Server;
+            var connected = status?.State == RoomServerState.Connected;
+            var name = status?.Name ?? server.Target?.Label;
+            text = server.Role == ServerRole.Host
+                ? connected ? $"Servidor neste PC · {Math.Max(1, status!.Members)}" : "Abrindo o servidor…"
+                : connected ? $"Servidor · {name}" : server.Target is null ? "Servidor: procurando…" : "Servidor: conectando…";
+            dot = connected ? "Success" : "Warning";
+            details.Insert(0, status?.Text ?? server.Problem ?? "Conectando ao servidor…");
+        }
+        else if (_tailscale is not null)
+        {
+            text = $"Tailscale · {_tailscale.Address}";
+            dot = "Success";
+        }
+        else if (_radmin is not null)
+        {
+            text = $"Radmin · {_radmin.Address}";
+            dot = "Success";
+        }
+        else
+        {
+            text = _radminInstalled ? "Radmin sem rede ativa" : "Sem Radmin nem Tailscale";
+            dot = "Warning";
+        }
+        RadminDot.SetResourceReference(Shape.FillProperty, dot);
+        RadminText.Text = text;
+        RadminText.ToolTip = details.Count == 0 ? null : string.Join(Environment.NewLine, details);
     }
 
     /// <summary>Pílula de status da barra superior: ao vivo, assistindo, disponível ou sem Radmin.</summary>
@@ -454,9 +537,9 @@ public partial class MainWindow : Window
             ? (_transmit!.Viewers switch { 0 => "Ao vivo", 1 => "Ao vivo · 1 pessoa", var n => $"Ao vivo · {n} pessoas" }, "Pink", "PinkSoft", Color.FromRgb(0xFF, 0x4D, 0x8D))
             : IsWatching
                 ? ("Assistindo", "Cyan", "CyanSoft", Color.FromRgb(0x22, 0xD3, 0xEE))
-                : _radmin is null
-                    ? ("Sem Radmin", "Amber", "AmberSoft", Color.FromRgb(0xFF, 0xB5, 0x47))
-                    : ("Disponível", "AccentText", "AccentSoft", Color.FromRgb(0x2E, 0xE6, 0xA6));
+                : !HasNetwork
+                    ? ("Sem VPN", "Amber", "AmberSoft", Color.FromRgb(0xFF, 0xB5, 0x47))
+                    : ("Disponível", "AccentText", "AccentSoft", ThemeManager.ColorOf("Accent", Color.FromRgb(0x2E, 0xE6, 0xA6)));
         StatusText.Text = text;
         StatusPill.SetResourceReference(TextElement.ForegroundProperty, foreground);
         StatusPill.SetResourceReference(Border.BackgroundProperty, background);
@@ -859,12 +942,34 @@ public partial class MainWindow : Window
         else Toast($"{person.Name} começou a transmitir: {what}.", ToastKind.Info, person.ActionText, () => WatchPerson(person));
     }
 
-    /// <summary>Abre o player na transmissão de alguém da sala.</summary>
+    /// <summary>Abre o player na transmissão de alguém da sala (direto no PC dela, ou pelo servidor ScreenFlow).</summary>
     public void WatchPerson(RoomPersonRow person)
     {
+        if (!person.IsLive) return;
+        if (person.ViaServer)
+        {
+            if (AppServices.Server.Target is not { } server)
+            {
+                Toast($"{person.Name} está transmitindo pelo servidor. Entre no mesmo servidor em Configurações › Servidor para assistir.", ToastKind.Info,
+                    "Configurações", () => OpenSettings(SettingsTab.Server));
+                return;
+            }
+            ShowFromTray(WatchPage);
+            WatchPage.ConnectToServer(server, person.Id, person.Name, person.LiveMode);
+            return;
+        }
         if (person.WatchAddress is not { } address) return;
         ShowFromTray(WatchPage);
-        WatchPage.ConnectTo(address, person.LiveMode);
+        WatchPage.ConnectTo(address, person.LiveMode, person.WatchPort);
+    }
+
+    /// <summary>O servidor em uso mudou: a linha da rede, a pílula e o que a sala sabe da transmissão.</summary>
+    private void OnServerChanged()
+    {
+        ShowNetworkLine();
+        RefreshStatus();
+        PushRoomState();
+        NetworkStatusChanged?.Invoke();
     }
 
     /// <summary>Corta o texto num limite sem partir um emoji no meio.</summary>
@@ -884,6 +989,9 @@ public partial class MainWindow : Window
         var transmit = _transmit;
         var live = transmit?.IsRunning == true;
         var settings = AppServices.Settings.Current;
+        // Pelo servidor (1.4.1), quem está nele pede a transmissão ao servidor (com a senha dele, sem o PIN). Só depois que
+        // ela já chegou lá: antes disso, quem assiste entra direto no IP deste PC.
+        var viaServer = live && transmit!.LiveViaServer;
         AppServices.Room.UpdateLocal(new RoomLocalState(
             settings.DeviceName,
             Live: live,
@@ -891,10 +999,11 @@ public partial class MainWindow : Window
             LiveAudio: live && transmit!.LiveAudio,
             LiveCamera: live && transmit!.LiveCamera,
             Viewers: live ? transmit!.Viewers : 0,
-            PinRequired: live && transmit!.LivePinRequired,
+            PinRequired: live && !viaServer && transmit!.LivePinRequired,
             LiveAddress: live ? transmit!.LiveAddress : null,
             Watching: IsWatching,
-            ControlPort: settings.ControlPort));
+            ControlPort: settings.ControlPort,
+            LiveViaServer: viaServer));
     }
 
     private static MenuItem TrayItem(string text, string glyph, Action action, bool? isChecked = null)
@@ -910,6 +1019,7 @@ public partial class MainWindow : Window
         if (_transmit is not null) await _transmit.StopAsync();
         if (_watch is not null) await _watch.ShutdownAsync();
         await AppServices.Room.StopAsync();
+        await AppServices.Server.StopAsync();
     }
 
     /// <summary>Encerramento limpo: para captura, encoder, sockets e áudio antes de fechar.</summary>

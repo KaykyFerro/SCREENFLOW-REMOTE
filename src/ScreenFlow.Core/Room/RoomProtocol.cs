@@ -19,7 +19,21 @@ namespace ScreenFlow.Core.Room;
 /// <see cref="PresenceFlags.InVoice"/> (as versões antigas ouvem e são ouvidas); nos outros canais vai
 /// <see cref="PresenceFlags.InVoiceChannel"/>, que as versões antigas não conhecem.
 /// </remarks>
-public enum RoomPacketType : byte { Presence = 1, Leave = 2, Chat = 3, ChatAck = 4, Voice = 5, HistoryRequest = 6, BlobRequest = 7, BlobChunk = 8 }
+/// <remarks>
+/// 1.4.0: sala privada. <see cref="Sealed"/> leva qualquer outro pacote cifrado com a chave da sala
+/// (<see cref="RoomSeal"/>); <see cref="Rekey"/> (a chave nova, cifrada para uma pessoa) e <see cref="Roster"/> (quem o
+/// dono aprovou) só valem dentro de um pacote lacrado.
+/// </remarks>
+/// <remarks>
+/// 1.4.1: servidor. <see cref="Relay"/> leva qualquer outro pacote (aberto ou lacrado) para o servidor repassar a uma
+/// lista de pessoas ou a todo mundo; <see cref="ServerInfo"/> é a sondagem e a resposta do servidor (nome, senha, quantos
+/// estão nele); <see cref="ChannelOp"/> cria, renomeia ou apaga um canal do servidor. Só o servidor entende esses tipos.
+/// </remarks>
+public enum RoomPacketType : byte
+{
+    Presence = 1, Leave = 2, Chat = 3, ChatAck = 4, Voice = 5, HistoryRequest = 6, BlobRequest = 7, BlobChunk = 8, Sealed = 9, Rekey = 10, Roster = 11,
+    Relay = 12, ServerInfo = 13, ChannelOp = 14,
+}
 
 [Flags]
 public enum PresenceFlags : ushort
@@ -40,6 +54,10 @@ public enum PresenceFlags : ushort
     Channels = 512,
     /// <summary>Na voz, num canal que não é o "Geral" (o nome vai no campo do canal de voz).</summary>
     InVoiceChannel = 1024,
+    /// <summary>(1.4.1) É um servidor ScreenFlow: os canais dele são os do servidor, e ele não aparece entre as pessoas.</summary>
+    Server = 2048,
+    /// <summary>(1.4.1) Ao vivo pelo servidor: quem quiser assistir entra no servidor e pede a transmissão pelo id desta pessoa.</summary>
+    ViaServer = 4096,
 }
 
 /// <summary>Um arquivo da sala (a foto do perfil ou uma imagem do chat): o id (hash do conteúdo) e o tamanho em bytes.</summary>
@@ -66,7 +84,8 @@ public sealed record RoomPresence(
     uint Sequence = 0,
     RoomBlobRef? Avatar = null,
     string? VoiceChannel = null,
-    ValueList<RoomChannel>? Channels = null)
+    ValueList<RoomChannel>? Channels = null,
+    string? ExchangeKey = null)
 {
     /// <summary>Na voz "Geral" (a única das versões antigas).</summary>
     public bool InVoice => Flags.HasFlag(PresenceFlags.InVoice);
@@ -92,6 +111,12 @@ public sealed record RoomPresence(
     public bool Live => Flags.HasFlag(PresenceFlags.Live);
     public bool Watching => Flags.HasFlag(PresenceFlags.Watching);
 
+    /// <summary>É um servidor ScreenFlow (1.4.1), não uma pessoa.</summary>
+    public bool IsServer => Flags.HasFlag(PresenceFlags.Server);
+
+    /// <summary>Ao vivo pelo servidor (1.4.1): assistir é pedir ao servidor a transmissão com o id desta pessoa.</summary>
+    public bool LiveViaServer => Live && Flags.HasFlag(PresenceFlags.ViaServer);
+
     /// <summary>O que está ao vivo, em palavras ("tela, câmera e áudio"). Vazio se não está transmitindo.</summary>
     public string LiveSummary => Live ? StreamModes.Summary(LiveMode, Flags.HasFlag(PresenceFlags.LiveAudio), Flags.HasFlag(PresenceFlags.LiveCamera)) : string.Empty;
 }
@@ -114,7 +139,7 @@ public sealed record RoomChatMessage(Guid AuthorId, string AuthorName, ulong Mes
     public bool InDefaultChannel => RoomChannels.IsDefaultText(Channel);
 }
 
-public static class RoomPacket
+public static partial class RoomPacket
 {
     public const ushort Magic = 0x5352; // "SR"
     public const byte Version = 1;
@@ -134,6 +159,7 @@ public static class RoomPacket
     private const byte AvatarField = 1;
     private const byte VoiceChannelField = 2;
     private const byte CreatedChannelField = 3;
+    private const byte ExchangeKeyField = 4;
 
     // ───────────────────────── Cabeçalho ─────────────────────────
 
@@ -141,10 +167,17 @@ public static class RoomPacket
     {
         type = default;
         sender = default;
-        if (data.Length < HeaderSize || data.Length > MaximumSize) return false;
+        if (data.Length < HeaderSize) return false;
         if (BinaryPrimitives.ReadUInt16BigEndian(data) != Magic || data[2] != Version) return false;
         type = (RoomPacketType)data[3];
-        if (type is < RoomPacketType.Presence or > RoomPacketType.BlobChunk) return false;
+        if (type is < RoomPacketType.Presence or > RoomPacketType.ChannelOp) return false;
+        var limit = type switch
+        {
+            RoomPacketType.Sealed => RoomSeal.MaximumSealedSize,
+            RoomPacketType.Relay => MaximumRelaySize,
+            _ => MaximumSize,
+        };
+        if (data.Length > limit) return false;
         sender = new Guid(data.Slice(4, 16), bigEndian: true);
         return sender != Guid.Empty;
     }
@@ -159,6 +192,74 @@ public static class RoomPacket
     }
 
     public static ReadOnlySpan<byte> Body(ReadOnlySpan<byte> packet) => packet[HeaderSize..];
+
+    internal static void WriteSealedHeader(Span<byte> destination, Guid sender) => WriteHeader(destination, RoomPacketType.Sealed, sender);
+
+    // ───────────────────────── Sala privada (1.4.0) ─────────────────────────
+
+    private const int RekeyBodyBytes = 16 + 4 + RoomKeyExchange.PublicKeyBytes + RoomSeal.NonceBytes + RoomKeys.SecretBytes + RoomSeal.TagBytes;
+
+    /// <summary>A chave nova da sala, cifrada só para <paramref name="recipient"/> (vai dentro de um pacote lacrado).</summary>
+    public static byte[] Rekey(Guid sender, Guid recipient, uint epoch, string senderPublicKey, ReadOnlySpan<byte> wrapped)
+    {
+        var key = Convert.FromBase64String(senderPublicKey);
+        if (key.Length != RoomKeyExchange.PublicKeyBytes || wrapped.Length != RoomSeal.NonceBytes + RoomKeys.SecretBytes + RoomSeal.TagBytes)
+            throw new ArgumentException("Troca de chave com tamanho errado.");
+        var buffer = new byte[HeaderSize + RekeyBodyBytes];
+        var offset = WriteHeader(buffer, RoomPacketType.Rekey, sender);
+        recipient.TryWriteBytes(buffer.AsSpan(offset, 16), bigEndian: true, out _); offset += 16;
+        BinaryPrimitives.WriteUInt32BigEndian(buffer.AsSpan(offset), epoch); offset += 4;
+        key.CopyTo(buffer, offset); offset += key.Length;
+        wrapped.CopyTo(buffer.AsSpan(offset));
+        return buffer;
+    }
+
+    public static bool TryReadRekey(ReadOnlySpan<byte> body, out Guid recipient, out uint epoch, out string senderPublicKey, out byte[] wrapped)
+    {
+        recipient = default;
+        epoch = 0;
+        senderPublicKey = string.Empty;
+        wrapped = [];
+        if (body.Length != RekeyBodyBytes) return false;
+        recipient = new Guid(body[..16], bigEndian: true);
+        epoch = BinaryPrimitives.ReadUInt32BigEndian(body[16..]);
+        senderPublicKey = Convert.ToBase64String(body.Slice(20, RoomKeyExchange.PublicKeyBytes));
+        wrapped = body[(20 + RoomKeyExchange.PublicKeyBytes)..].ToArray();
+        return recipient != Guid.Empty;
+    }
+
+    /// <summary>Até quantas pessoas a lista do dono leva (cabe num pacote).</summary>
+    public const int MaxRoster = 64;
+
+    /// <summary>Quem o dono aprovou e se a sala é só para quem foi aprovado (vai dentro de um pacote lacrado).</summary>
+    public static byte[] Roster(Guid sender, bool approvedOnly, IReadOnlyCollection<Guid> members)
+    {
+        var list = members.Distinct().Where(m => m != Guid.Empty).Take(MaxRoster).ToList();
+        var buffer = new byte[HeaderSize + 2 + list.Count * 16];
+        var offset = WriteHeader(buffer, RoomPacketType.Roster, sender);
+        buffer[offset++] = approvedOnly ? (byte)1 : (byte)0;
+        buffer[offset++] = (byte)list.Count;
+        foreach (var member in list)
+        {
+            member.TryWriteBytes(buffer.AsSpan(offset, 16), bigEndian: true, out _);
+            offset += 16;
+        }
+        return buffer;
+    }
+
+    public static bool TryReadRoster(ReadOnlySpan<byte> body, out bool approvedOnly, out IReadOnlyList<Guid> members)
+    {
+        approvedOnly = false;
+        members = [];
+        if (body.Length < 2) return false;
+        approvedOnly = body[0] == 1;
+        var count = body[1];
+        if (count > MaxRoster || body.Length != 2 + count * 16) return false;
+        var list = new List<Guid>(count);
+        for (var i = 0; i < count; i++) list.Add(new Guid(body.Slice(2 + i * 16, 16), bigEndian: true));
+        members = list;
+        return true;
+    }
 
     // ───────────────────────── Presença ─────────────────────────
 
@@ -188,11 +289,20 @@ public static class RoomPacket
             buffer[offset++] = VoiceChannelField;
             offset += WriteShortString(buffer.AsSpan(offset), voiceName, MaxChannelBytes);
         }
-        // Um campo por canal criado (cada campo tem no máximo 255 bytes).
-        foreach (var channel in RoomChannels.Normalize(presence.Channels))
+        // A chave de troca (só na sala privada, dentro do pacote lacrado): o dono cifra a chave nova da sala com ela.
+        if (presence.ExchangeKey is { } exchange && TryDecodeKey(exchange) is { } exchangeBytes)
         {
-            buffer[offset++] = CreatedChannelField;
+            buffer[offset++] = ExchangeKeyField;
+            buffer[offset++] = (byte)exchangeBytes.Length;
+            exchangeBytes.CopyTo(buffer, offset); offset += exchangeBytes.Length;
+        }
+        // Um campo por canal criado (cada campo tem no máximo 255 bytes). Os que não cabem no pacote ficam de fora.
+        var maxChannels = presence.IsServer ? RoomChannels.MaxPerServer : RoomChannels.MaxPerPerson;
+        foreach (var channel in RoomChannels.Normalize(presence.Channels, maxChannels))
+        {
             var bytes = Encoding.UTF8.GetBytes(TrimToBytes(channel.Name, MaxChannelBytes));
+            if (offset + 3 + bytes.Length > MaximumSize) break;
+            buffer[offset++] = CreatedChannelField;
             buffer[offset++] = (byte)(bytes.Length + 1);
             buffer[offset++] = (byte)channel.Kind;
             bytes.CopyTo(buffer, offset); offset += bytes.Length;
@@ -221,6 +331,8 @@ public static class RoomPacket
         RoomBlobRef? avatar = null;
         string? voiceChannel = null;
         List<RoomChannel>? created = null;
+        string? exchangeKey = null;
+        var maxChannels = flags.HasFlag(PresenceFlags.Server) ? RoomChannels.MaxPerServer : RoomChannels.MaxPerPerson;
         while (offset + 2 <= body.Length)
         {
             var field = body[offset];
@@ -239,7 +351,11 @@ public static class RoomPacket
                 var clean = RoomChannels.CleanName(RoomChannelKind.Voice, Encoding.UTF8.GetString(value));
                 if (clean.Length > 0) voiceChannel = clean;
             }
-            else if (field == CreatedChannelField && length > 1 && (created?.Count ?? 0) < RoomChannels.MaxPerPerson
+            else if (field == ExchangeKeyField && length == RoomKeyExchange.PublicKeyBytes && value[0] == 0x04)
+            {
+                exchangeKey = Convert.ToBase64String(value);
+            }
+            else if (field == CreatedChannelField && length > 1 && (created?.Count ?? 0) < maxChannels
                      && RoomChannels.Create((RoomChannelKind)value[0], Encoding.UTF8.GetString(value[1..])) is { IsDefault: false } channel)
             {
                 created ??= [];
@@ -248,8 +364,18 @@ public static class RoomPacket
         }
         presence = new RoomPresence(name, Truncate(version, 24), flags, mode, viewers, port,
             address.Equals(IPAddress.Any) ? null : address, sequence, avatar, voiceChannel,
-            created is null ? null : new ValueList<RoomChannel>(created));
+            created is null ? null : new ValueList<RoomChannel>(created), exchangeKey);
         return true;
+    }
+
+    private static byte[]? TryDecodeKey(string base64)
+    {
+        try
+        {
+            var bytes = Convert.FromBase64String(base64);
+            return bytes.Length == RoomKeyExchange.PublicKeyBytes && bytes[0] == 0x04 ? bytes : null;
+        }
+        catch (FormatException) { return null; }
     }
 
     public static byte[] Leave(Guid sender)

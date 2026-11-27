@@ -1,6 +1,7 @@
 using Windows.Media.Control;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
+using ScreenFlow.Core.Protocol;
 
 namespace ScreenFlow.Infrastructure.Media;
 
@@ -16,10 +17,20 @@ public sealed record MediaSessionInfo(
     bool CanNext,
     bool CanPlayPause,
     bool CanSeek,
-    byte[]? Thumbnail)
+    byte[]? Thumbnail,
+    SeekRange SeekRange = default,
+    bool Live = false)
 {
     public bool Playing => Timeline.Playing;
 }
+
+/// <summary>Qual sessão de mídia a tela Transmissão controla, e por quê (1.4.0).</summary>
+/// <param name="Info">A sessão, ou null se nenhuma está ligada ao que é transmitido.</param>
+/// <param name="Bound">
+/// A sessão é do app transmitido (a janela ou a festa de um app só), foi escolhida por quem transmite ou é a única
+/// tocando com o som indo junto. Só uma sessão ligada vai para quem assiste e recebe os comandos dele.
+/// </param>
+public readonly record struct MediaBinding(MediaSessionInfo? Info, bool Bound);
 
 public enum MediaCommand { PlayPause, Previous, Next }
 
@@ -77,16 +88,15 @@ public sealed class MediaControls : IDisposable
     public event Action? Changed;
 
     /// <summary>
-    /// O que mostrar: o app que está sendo transmitido (janela ou festa com um app só), se ele estiver nos controles; senão
-    /// o que as teclas de mídia controlariam; senão o primeiro tocando.
+    /// A sessão ligada ao que está sendo transmitido. Nunca escolhe uma sessão só por ser a mais recente ou a que as teclas
+    /// de mídia controlariam: ela precisa ser do app transmitido (janela ou festa de um app só), ter sido escolhida por
+    /// quem transmite (<paramref name="pinnedId"/>) ou, transmitindo a tela inteira, ser a única com som indo junto
+    /// (<paramref name="shareable"/>). Fora isso, devolve a sessão para mostrar só a quem transmite, sem ligar.
     /// </summary>
-    public MediaSessionInfo? Pick(string? preferredExe, string? keepId = null)
+    public MediaBinding Bind(string? sharedExe, string? pinnedId, Func<MediaSessionInfo, bool> shareable)
     {
-        var sessions = Sessions;
-        if (keepId is not null && sessions.FirstOrDefault(s => s.Id == keepId) is { } kept) return kept;
-        if (preferredExe is not null && sessions.FirstOrDefault(s => MediaApps.Matches(s.AppId, preferredExe)) is { } shared) return shared;
-        var current = CurrentId;
-        return sessions.FirstOrDefault(s => s.Id == current) ?? sessions.FirstOrDefault(s => s.Playing) ?? sessions.FirstOrDefault();
+        var (info, bound) = MediaBindingRules.Bind(Sessions, s => s.Id, s => s.AppId, CurrentId, sharedExe, pinnedId, shareable, s => s.Playing);
+        return new MediaBinding(info, bound);
     }
 
     public async Task<bool> SendAsync(string id, MediaCommand command)
@@ -110,23 +120,62 @@ public sealed class MediaControls : IDisposable
         finally { Refresh(); }
     }
 
-    /// <summary>Vai para <paramref name="position"/> da música ou do vídeo.</summary>
-    public async Task<bool> SeekAsync(string id, TimeSpan position)
+    /// <summary>
+    /// Vai para <paramref name="position"/> (contada do começo da mídia) e confere: relê a posição do app depois de um
+    /// instante e só diz que deu certo se ela chegou perto do pedido. Devolve um dos <see cref="MediaSeek"/>.Outcome*.
+    /// </summary>
+    public async Task<string> SeekAsync(string id, TimeSpan position)
     {
         var session = Find(id);
-        if (session is null) return false;
+        if (session is null) return MediaSeek.OutcomeUnavailable;
         try
         {
             var timeline = session.GetTimelineProperties();
-            var ticks = Math.Clamp((timeline.StartTime + position).Ticks, timeline.StartTime.Ticks, Math.Max(timeline.StartTime.Ticks, timeline.EndTime.Ticks));
-            return await session.TryChangePlaybackPositionAsync(ticks);
+            var range = RangeOf(timeline);
+            if (range.IsEmpty) return MediaSeek.OutcomeUnavailable;
+            var target = range.Clamp(position.TotalSeconds);
+            var ticks = (timeline.StartTime + TimeSpan.FromSeconds(target)).Ticks;
+            if (!await session.TryChangePlaybackPositionAsync(ticks)) return MediaSeek.OutcomeRejected;
+            // O app avisa a posição nova logo depois (o navegador e o Spotify, em menos de meio segundo).
+            for (var attempt = 0; attempt < 6; attempt++)
+            {
+                await Task.Delay(250);
+                var after = session.GetTimelineProperties();
+                if (after is null) continue;
+                var observed = Observed(after, session);
+                if (MediaSeek.Confirms(target, observed)) return MediaSeek.OutcomeDone;
+            }
+            return MediaSeek.OutcomeUnconfirmed;
         }
         catch (Exception exception)
         {
             Log.Warn($"Mudar a posição da mídia falhou: {exception.Message}");
-            return false;
+            return MediaSeek.OutcomeRejected;
         }
         finally { Refresh(); }
+    }
+
+    /// <summary>A posição de agora (andando com o relógio desde o último aviso do app), em segundos do começo da mídia.</summary>
+    public double PositionNow(string id)
+    {
+        var info = Sessions.FirstOrDefault(s => s.Id == id);
+        return info is null ? 0 : info.Timeline.PositionAt(DateTimeOffset.UtcNow).TotalSeconds;
+    }
+
+    private static double Observed(GlobalSystemMediaTransportControlsSessionTimelineProperties timeline, GlobalSystemMediaTransportControlsSession session)
+    {
+        var position = (timeline.Position - timeline.StartTime).TotalSeconds;
+        var updated = timeline.LastUpdatedTime;
+        var playing = session.GetPlaybackInfo()?.PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing;
+        if (playing && updated.Year >= 2000 && DateTimeOffset.UtcNow > updated) position += (DateTimeOffset.UtcNow - updated).TotalSeconds;
+        return position;
+    }
+
+    private static SeekRange RangeOf(GlobalSystemMediaTransportControlsSessionTimelineProperties? timeline)
+    {
+        if (timeline is null) return SeekRange.Empty;
+        var duration = (timeline.EndTime - timeline.StartTime).TotalSeconds;
+        return MediaSeek.FromTimeline(duration, (timeline.MinSeekTime - timeline.StartTime).TotalSeconds, (timeline.MaxSeekTime - timeline.StartTime).TotalSeconds);
     }
 
     private GlobalSystemMediaTransportControlsSession? Find(string id)
@@ -198,12 +247,16 @@ public sealed class MediaControls : IDisposable
             var updatedAt = timeline?.LastUpdatedTime ?? DateTimeOffset.UtcNow;
             // Alguns apps não mandam a hora do aviso: conta a partir de agora.
             if (updatedAt.Year < 2000) updatedAt = DateTimeOffset.UtcNow;
+            var range = RangeOf(timeline);
+            var canSeek = controls?.IsPlaybackPositionEnabled == true && !range.IsEmpty;
             list.Add(new MediaSessionInfo(id, appId, MediaApps.DisplayName(appId), title, artist,
                 new PlaybackTimeline(position, duration < TimeSpan.Zero ? TimeSpan.Zero : duration, updatedAt, playing),
                 controls?.IsPreviousEnabled == true, controls?.IsNextEnabled == true,
                 controls is null || controls.IsPlayPauseToggleEnabled || controls.IsPlayEnabled || controls.IsPauseEnabled,
-                controls?.IsPlaybackPositionEnabled == true && duration > TimeSpan.Zero,
-                thumbnail));
+                canSeek,
+                thumbnail,
+                canSeek ? range : SeekRange.Empty,
+                Live: canSeek && duration <= TimeSpan.Zero));
         }
         List<GlobalSystemMediaTransportControlsSession> closed;
         lock (_gate)

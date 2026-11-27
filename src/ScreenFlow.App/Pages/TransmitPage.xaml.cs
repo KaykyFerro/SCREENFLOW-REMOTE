@@ -1,3 +1,4 @@
+using SeekRules = ScreenFlow.Core.Protocol.MediaSeek;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
@@ -9,6 +10,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using ScreenFlow.App.Services;
+using ScreenFlow.App.Windows;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
@@ -33,6 +35,8 @@ public partial class TransmitPage : UserControl, IShellPage
     private bool _fillingPartyApps;
     private HostSession? _session;
     private System.Net.IPAddress? _liveAddress;
+    private string? _liveServerLabel;
+    private bool _loadingServer;
     private IReadOnlyList<DisplayMonitor> _monitors = [];
     private bool _loaded;
     private bool _starting;
@@ -42,6 +46,12 @@ public partial class TransmitPage : UserControl, IShellPage
     private MediaControls? _media;
     private string? _mediaId;
     private bool _mediaPinned;
+    // A sessão de mídia ligada ao que é transmitido (1.4.0): só ela vai para quem assiste e recebe os comandos dele.
+    private bool _mediaBound;
+    private string? _mediaKey;
+    private MediaSessionInfo? _mediaInfo;
+    private readonly SeekTracker _hostSeek = new();
+    private readonly SemaphoreSlim _seekGate = new(1, 1);
     private bool _mediaSeeking;
     private bool _fillingMediaSessions;
     private string? _mediaArtKey;
@@ -89,12 +99,17 @@ public partial class TransmitPage : UserControl, IShellPage
             else UpdateRadminPanel();
         };
         AppServices.RadminSetup.Changed += UpdateRadminPanel;
+        // (1.4.1) O servidor em uso mudou (achou o endereço, este PC virou o servidor): o cartão do servidor acompanha.
+        AppServices.Server.Changed += UpdateServerPanel;
     }
 
     public bool IsRunning => _session is not null;
 
-    /// <summary>Pessoas assistindo agora.</summary>
-    public int Viewers => _viewerRows.Count;
+    /// <summary>Pessoas assistindo agora: as diretas e as que assistem pelo servidor.</summary>
+    public int Viewers => _viewerRows.Sum(r => r.People);
+
+    /// <summary>(1.4.1) A transmissão já está no servidor ScreenFlow: quem está nele assiste por lá.</summary>
+    public bool LiveViaServer => _session?.ServerState == ServerLinkState.Live;
 
     /// <summary>O que está indo para quem assiste agora ("tela, câmera e áudio"). Vazio quando parado.</summary>
     public string LiveSummary => _session?.Summary ?? string.Empty;
@@ -133,9 +148,17 @@ public partial class TransmitPage : UserControl, IShellPage
         AudioToggle.IsChecked = Settings.AudioEnabled;
         FixedQualityToggle.IsChecked = !Settings.AdaptiveQuality;
         CameraWithScreenToggle.IsChecked = Settings.CameraWithScreen;
+        _loadingArea = true;
+        CursorToggle.IsChecked = Settings.CaptureShowCursor;
+        MaskNotificationsToggle.IsChecked = Settings.MaskNotifications;
+        _loadingArea = false;
+        UpdateAreaSummary();
         ApproveToggle.IsChecked = Settings.ApproveEachViewer;
         ViewerControlsToggle.IsChecked = Settings.ViewerControls;
         PinBox.Text = Settings.Pin ?? string.Empty;
+        _loadingServer = true;
+        ViaServerToggle.IsChecked = Settings.TransmitViaServer;
+        _loadingServer = false;
         (Settings.Mode switch
         {
             StreamMode.Camera => ModeCamera,
@@ -149,6 +172,85 @@ public partial class TransmitPage : UserControl, IShellPage
     }
 
     // ───────────────────────── Modo ─────────────────────────
+
+    // ── O que aparece para quem assiste (1.4.0) ─────────────────────────────────────────────────────────────
+
+    private bool _loadingArea;
+
+    private void Area_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_loadingArea || !IsInitialized) return;
+        Settings.CaptureShowCursor = CursorToggle.IsChecked == true;
+        Settings.MaskNotifications = MaskNotificationsToggle.IsChecked == true;
+        ApplyArea();
+    }
+
+    private void ChooseRegion_Click(object sender, RoutedEventArgs e)
+    {
+        if (PickArea(mask: false) is { } region)
+        {
+            Settings.CaptureRegion = region;
+            // As áreas tapadas são da tela inteira: continuam valendo dentro da parte nova.
+            ApplyArea();
+        }
+    }
+
+    private void AddMask_Click(object sender, RoutedEventArgs e)
+    {
+        if (Settings.CaptureMasks.Count >= CaptureArea.MaxMasks - 1)
+        {
+            _shell.Toast($"Dá para tapar até {CaptureArea.MaxMasks - 1} áreas. Use “Mostrar tudo de novo” para recomeçar.", ToastKind.Warning);
+            return;
+        }
+        if (PickArea(mask: true) is { } mask)
+        {
+            Settings.CaptureMasks.Add(mask);
+            ApplyArea();
+        }
+    }
+
+    private void ClearArea_Click(object sender, RoutedEventArgs e)
+    {
+        Settings.CaptureRegion = null;
+        Settings.CaptureMasks.Clear();
+        ApplyArea();
+    }
+
+    private RelativeRect? PickArea(bool mask)
+    {
+        var source = _session?.Options.Target ?? SourceCombo.SelectedItem as CaptureTarget;
+        if (source is null || source.Kind == CaptureKind.Camera)
+        {
+            _shell.Toast("Escolha um monitor ou uma janela primeiro.", ToastKind.Warning);
+            return null;
+        }
+        var monitor = source.Kind == CaptureKind.Monitor ? _monitors.FirstOrDefault(m => m.DeviceName == source.Id) : null;
+        var owner = Window.GetWindow(this);
+        var existing = mask ? Settings.CaptureAreaNow().Masks ?? [] : Settings.CaptureRegion is { } r ? [r] : [];
+        var picked = AreaPickerWindow.Pick(owner, source, monitor, mask, existing);
+        owner?.Activate();
+        return picked;
+    }
+
+    /// <summary>Salva e, ao vivo, troca a captura na hora (o que estava embaixo de uma área nova para de ir no próximo frame).</summary>
+    private void ApplyArea()
+    {
+        Settings.Normalize();
+        AppServices.Settings.Save();
+        UpdateAreaSummary();
+        if (_session is { HasVideo: true } session && session.Mode == StreamMode.Screen) session.SetCaptureArea(Settings.CaptureAreaNow());
+    }
+
+    private void UpdateAreaSummary()
+    {
+        var area = Settings.CaptureAreaNow();
+        var text = area.Describe();
+        var source = _session?.Options.Target ?? SourceCombo.SelectedItem as CaptureTarget;
+        if (area.Region is not null && source?.Kind == CaptureKind.Window) text += " A parte escolhida é da janela.";
+        AreaSummary.Text = text;
+        ClearAreaButton.Visibility = area.Region is not null || Settings.CaptureMasks.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ChooseRegionButton.Content = area.Region is null ? "Escolher uma parte" : "Escolher outra parte";
+    }
 
     private void Mode_Checked(object sender, RoutedEventArgs e)
     {
@@ -380,12 +482,18 @@ public partial class TransmitPage : UserControl, IShellPage
     {
         IReadOnlyList<NetworkAdapterInfo> adapters = AppServices.DemoMode ? [DemoData.Radmin] : RadminNetwork.GetIPv4Adapters().Where(a => a.IsUp).ToList();
         var radmin = adapters.FirstOrDefault(a => a.IsRadmin && Core.Network.RadminAddress.IsRadmin(a.Address));
+        var tailscale = adapters.FirstOrDefault(a => a.IsTailscale);
         var previous = AdapterCombo.Value<NetworkAdapterInfo>();
-        AdapterCombo.Fill(adapters.Select(a => new Choice<NetworkAdapterInfo>(a, a.IsRadmin ? $"Radmin VPN · {a.Address}" : $"{a.Name} · {a.Address}")));
-        AdapterCombo.SelectValue(adapters.FirstOrDefault(a => a.Address.Equals(previous?.Address)) ?? radmin ?? adapters.FirstOrDefault()!);
-        RadminMissing.Visibility = radmin is null ? Visibility.Visible : Visibility.Collapsed;
+        // (1.4.1) A rede que chega no servidor em uso vem primeiro; depois o Radmin VPN, o Tailscale e a rede local.
+        var toServer = AppServices.Server.Target is { ThisPc: false } server && Core.Network.LocalNetworks.RouteTo(server.Address) is { } route
+            ? adapters.FirstOrDefault(a => a.Address.Equals(route))
+            : null;
+        AdapterCombo.Fill(adapters.Select(a => new Choice<NetworkAdapterInfo>(a, a.Label)));
+        AdapterCombo.SelectValue(adapters.FirstOrDefault(a => a.Address.Equals(previous?.Address)) ?? toServer ?? radmin ?? tailscale ?? adapters.FirstOrDefault()!);
+        RadminMissing.Visibility = radmin is null && tailscale is null && AppServices.Server.Target is null ? Visibility.Visible : Visibility.Collapsed;
         UpdateIp();
         UpdateRadminPanel();
+        UpdateServerPanel();
     }
 
     /// <summary>Sem o Radmin: instalar pelo app (com o andamento aqui) ou, já instalado, abrir para entrar numa rede.</summary>
@@ -399,8 +507,8 @@ public partial class TransmitPage : UserControl, IShellPage
         var setup = AppServices.RadminSetup;
         var installed = _shell.RadminInstalled;
         RadminMissingText.Text = setup.Busy || (setup.Status is not null && !installed) ? setup.Status
-            : installed ? "O Radmin VPN está instalado, mas sem rede ativa. Abra o Radmin, entre na mesma rede que os outros e clique em Tentar de novo."
-            : "O Radmin VPN não está instalado. O ScreenFlow baixa do site oficial e instala para você (o Windows vai pedir permissão).";
+            : installed ? "Nenhuma VPN conectada. O Radmin VPN está instalado, mas sem rede ativa: abra o Radmin, entre na mesma rede que os outros e clique em Tentar de novo. Quem usa o Tailscale: ligue o Tailscale."
+            : "Nenhuma VPN conectada (nem o Radmin VPN nem o Tailscale). O ScreenFlow baixa o Radmin VPN do site oficial e instala para você (o Windows vai pedir permissão). Quem usa o Tailscale: ligue o Tailscale e clique em Tentar de novo.";
         RadminProgress.Visibility = setup.Progress is null ? Visibility.Collapsed : Visibility.Visible;
         RadminProgress.Value = setup.Progress ?? 0;
         RadminActionButton.Content = installed && !setup.Busy ? "Abrir o Radmin VPN" : "Instalar o Radmin VPN";
@@ -412,10 +520,14 @@ public partial class TransmitPage : UserControl, IShellPage
         if (AdapterCombo.Value<NetworkAdapterInfo>() is { } adapter)
         {
             IpText.Text = adapter.Address.ToString();
-            IpHint.Text = adapter.IsRadmin ? "Passe este IP para quem vai assistir." : "Este IP não é do Radmin: só funciona para quem está na mesma rede local.";
+            IpCaption.Text = adapter.IsTailscale ? "Seu IP do Tailscale" : adapter.IsRadmin ? "Seu IP do Radmin" : "Seu IP";
+            IpHint.Text = adapter.IsTailscale || adapter.IsRadmin
+                ? "Passe este IP para quem vai assistir."
+                : "Este IP não é do Radmin VPN nem do Tailscale: só funciona para quem está na mesma rede local.";
         }
         else
         {
+            IpCaption.Text = "Seu IP";
             IpText.Text = "—";
             IpHint.Text = "Nenhuma rede ativa encontrada.";
         }
@@ -431,6 +543,85 @@ public partial class TransmitPage : UserControl, IShellPage
             return;
         }
         if (await AppServices.RadminSetup.InstallAsync(_shell)) RefreshNetwork();
+    }
+
+    // ───────────────────────── Pelo servidor ScreenFlow (1.4.1) ─────────────────────────
+
+    /// <summary>O cartão "Transmitir também pelo servidor": só aparece com um servidor escolhido em Configurações › Servidor.</summary>
+    private void UpdateServerPanel()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(UpdateServerPanel);
+            return;
+        }
+        var service = AppServices.Server;
+        var role = Settings.ServerRole;
+        var show = role != ServerRole.None && !AppServices.DemoMode;
+        ServerPanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        var on = show && ViaServerToggle.IsChecked == true;
+        AccessHint.Text = on
+            ? "Qualquer pessoa na mesma rede (Radmin VPN ou Tailscale) alcança o seu IP. O PIN e a aprovação valem para quem entra direto no seu IP; pelo servidor, vale a senha do servidor."
+            : "Qualquer pessoa na mesma rede (Radmin VPN ou Tailscale) alcança o seu IP. Use PIN ou aprovação para controlar quem entra.";
+        if (!show) return;
+        var target = service.Target;
+        var label = target?.Label ?? (role == ServerRole.Host ? "este PC" : Settings.ServerAddress ?? "do ScreenFlow");
+        ServerHint.Text = !on
+            ? $"Desligado: só quem entra direto no seu IP assiste. Quem está no servidor {label} não vê esta transmissão."
+            : target is null && service.Problem is { } problem
+                ? problem
+                : $"Uma cópia só vai para o servidor {label}, e quem está nele assiste por lá (economiza o seu upload). Quem entra pelo servidor usa a senha dele, sem PIN nem aprovação.";
+    }
+
+    private void ViaServer_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsInitialized) return;
+        if (!_loadingServer && Settings.TransmitViaServer != (ViaServerToggle.IsChecked == true))
+        {
+            Settings.TransmitViaServer = ViaServerToggle.IsChecked == true;
+            AppServices.Settings.Save();
+        }
+        UpdateServerPanel();
+    }
+
+    /// <summary>Para onde vai a cópia da transmissão (null: só direto). O endereço é resolvido de novo a cada conexão.</summary>
+    private ServerPublish? ServerToPublish(out string? problem)
+    {
+        problem = null;
+        if (AppServices.DemoMode || Settings.ServerRole == ServerRole.None || ViaServerToggle.IsChecked != true) return null;
+        var id = AppServices.Room.SelfId != Guid.Empty ? AppServices.Room.SelfId
+            : Guid.TryParseExact(Settings.InstanceId, "N", out var instance) ? instance : Guid.NewGuid();
+        if (AppServices.Server.Target is { } target) return new ServerPublish(target.Host, target.ControlPort, target.Password, id);
+        if (Settings.ServerRole == ServerRole.Host)
+            return new ServerPublish(System.Net.IPAddress.Loopback.ToString(), AppInfo.DefaultServerControlPort, Settings.HostedServerPassword, id);
+        if (Settings.ServerEndpoint() is { } endpoint) return new ServerPublish(endpoint.Host, endpoint.Port, Settings.ServerPassword, id);
+        problem = "Coloque o endereço do servidor em Configurações › Servidor, ou desligue “Transmitir também pelo servidor”.";
+        return null;
+    }
+
+    /// <summary>A linha "No servidor X: 3 pessoas assistindo" na lista de quem assiste.</summary>
+    private void UpdateServerLive()
+    {
+        var session = _session;
+        var on = session?.Options.Server is not null;
+        ServerLive.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        if (!on) return;
+        ServerLiveText.Text = session!.ServerStatus is { Length: > 0 } status ? status : $"Conectando ao servidor {_liveServerLabel}…";
+        ServerLiveText.SetResourceReference(TextBlock.ForegroundProperty, session.ServerState switch
+        {
+            ServerLinkState.NeedsPassword or ServerLinkState.Refused => "Danger",
+            ServerLinkState.Live => "Text",
+            _ => "Amber",
+        });
+    }
+
+    private void OnSessionServerChanged()
+    {
+        if (_session is null) return;
+        UpdateServerLive();
+        RefreshViewers();
+        // A sala fica sabendo se a transmissão já está no servidor (quem está nele assiste por lá).
+        _shell.NotifyLiveStateChanged();
     }
 
     private void RefreshSources()
@@ -516,7 +707,13 @@ public partial class TransmitPage : UserControl, IShellPage
         if (_session is not null || _starting) return;
         if (AdapterCombo.Value<NetworkAdapterInfo>() is not { } adapter)
         {
-            ShowError("Nenhuma rede ativa. Conecte o Radmin VPN e tente de novo.");
+            ShowError("Nenhuma rede ativa. Conecte o Radmin VPN ou o Tailscale e tente de novo.");
+            return;
+        }
+        var publish = ServerToPublish(out var serverProblem);
+        if (serverProblem is not null)
+        {
+            ShowError(serverProblem);
             return;
         }
         var mode = SelectedMode;
@@ -605,7 +802,11 @@ public partial class TransmitPage : UserControl, IShellPage
                 Settings.PreferredCodec, Settings.PreferredEncoder, hardware.Encoders,
                 mode == StreamMode.AudioOnly || Settings.AudioEnabled, Settings.AudioBitrateKbps, Settings.AdaptiveQuality, Settings.FecGroupSize, Settings.UploadMbps,
                 mode, Settings.MusicBitrateKbps, OverlayCamera: overlay,
-                AudioSeparation: AudioOptions(mode));
+                AudioSeparation: AudioOptions(mode),
+                Area: mode == StreamMode.Screen ? Settings.CaptureAreaNow() : null,
+                Server: publish,
+                // O Tailscale não repassa broadcast: o anúncio da transmissão vai direto para quem está na sala.
+                AnnounceTo: AppServices.DemoMode ? null : () => AppServices.Room.PeerAddresses);
 
             var session = new HostSession(options) { ApprovalHandler = RequestApprovalAsync };
             session.StatusChanged += message => Dispatcher.BeginInvoke(() => StateText.Text = message);
@@ -613,8 +814,10 @@ public partial class TransmitPage : UserControl, IShellPage
             session.StatisticsUpdated += stats => Dispatcher.BeginInvoke(() => ShowStatistics(stats));
             session.BandwidthMeasured += (name, mbps) => Dispatcher.BeginInvoke(() => OnBandwidthMeasured(name, mbps));
             session.RemoteRequested += request => Dispatcher.BeginInvoke(() => OnRemoteRequested(request));
+            session.ServerChanged += () => Dispatcher.BeginInvoke(OnSessionServerChanged);
             await Task.Run(session.Start);
             _liveAddress = adapter.Address;
+            _liveServerLabel = publish is null ? null : AppServices.Server.Target?.Label ?? publish.Host;
             _liveWindowExe = target.Kind == CaptureKind.Window ? WindowDiscovery.ProcessExe(target.Handle) : null;
             _session = session;
             PublishRemoteState();
@@ -626,9 +829,11 @@ public partial class TransmitPage : UserControl, IShellPage
             StartButton.Visibility = Visibility.Collapsed;
             StopButton.Visibility = Visibility.Visible;
             SetBadge("Ao vivo", "Pink", "PinkSoft");
-            StateText.Text = mode == StreamMode.AudioOnly
+            var viaServer = publish is null ? string.Empty : $" Quem está no servidor {_liveServerLabel} {(mode == StreamMode.AudioOnly ? "ouve" : "assiste")} por lá.";
+            StateText.Text = (mode == StreamMode.AudioOnly
                 ? $"Festa no ar em {adapter.Address}. Quem quiser ouvir só precisa digitar esse IP."
-                : $"Transmitindo {session.Summary} em {adapter.Address}. Quem quiser assistir só precisa digitar esse IP.";
+                : $"Transmitindo {session.Summary} em {adapter.Address}. Quem quiser assistir só precisa digitar esse IP.") + viaServer;
+            UpdateServerLive();
             StatFpsLabel.Text = mode == StreamMode.AudioOnly ? "Opus" : "FPS";
             StatBitrateLabel.Text = mode == StreamMode.AudioOnly ? "Áudio enviado" : "Vídeo";
             AudioDescription.Text = session.AudioDescription ?? (session.AudioEnabled ? "Som do PC" : "Som desligado");
@@ -672,6 +877,8 @@ public partial class TransmitPage : UserControl, IShellPage
         _viewerRows.Clear();
         NoViewers.Visibility = Visibility.Visible;
         ViewerCount.Text = string.Empty;
+        _liveServerLabel = null;
+        ServerLive.Visibility = Visibility.Collapsed;
         LockWhileLive(false);
         StartButton.Visibility = Visibility.Visible;
         StopButton.Visibility = Visibility.Collapsed;
@@ -713,6 +920,10 @@ public partial class TransmitPage : UserControl, IShellPage
         media?.Dispose();
         _mediaId = null;
         _mediaPinned = false;
+        _mediaBound = false;
+        _mediaKey = null;
+        _mediaInfo = null;
+        _hostSeek.Reset();
         _mediaSeeking = false;
         _mediaArtKey = null;
         MediaCard.Visibility = Visibility.Collapsed;
@@ -723,28 +934,40 @@ public partial class TransmitPage : UserControl, IShellPage
 
     private void UpdateMedia()
     {
-        if (_media is not { } media || _session is null)
+        if (_media is not { } media || _session is not { } session)
         {
             MediaCard.Visibility = Visibility.Collapsed;
             return;
         }
+        _hostSeek.Tick(Environment.TickCount64);
         var sessions = media.Sessions;
-        if (media.Pick(SharedAppExe(), _mediaPinned ? _mediaId : null) is not { } info)
+        var binding = media.Bind(SharedAppExe(), _mediaPinned ? _mediaId : null, info => SoundGoesWithStream(session, info));
+        if (binding.Info is not { } info)
         {
             MediaCard.Visibility = Visibility.Collapsed;
+            _mediaBound = false;
+            _mediaInfo = null;
             PublishMedia(null);
             return;
         }
+        // Outro app (ou o mesmo, agora ligado ou desligado): chave nova, e um pedido feito para o app antigo é recusado.
+        if (info.Id != _mediaId || binding.Bound != _mediaBound || _mediaKey is null)
+        {
+            _mediaKey = Guid.NewGuid().ToString("N")[..12];
+            _hostSeek.Reset();
+        }
         _mediaId = info.Id;
-        FillMediaSessions(sessions, info.Id);
+        _mediaBound = binding.Bound;
+        _mediaInfo = info;
+        FillMediaSessions(sessions, info.Id, binding.Bound);
         ShowMedia(info, DateTimeOffset.UtcNow);
-        PublishMedia(info);
+        PublishMedia(binding.Bound ? info : null);
     }
 
     private void ShowMedia(MediaSessionInfo info, DateTimeOffset now)
     {
         MediaCard.Visibility = Visibility.Visible;
-        MediaApp.Text = $"{info.AppName} · {(info.Playing ? "tocando agora" : "pausado")}";
+        MediaApp.Text = $"{info.AppName} · {(info.Live ? "ao vivo" : info.Playing ? "tocando agora" : "pausado")}";
         MediaTitle.Text = info.Title.Length > 0 ? info.Title : info.AppName;
         MediaArtist.Text = info.Artist;
         MediaArtist.Visibility = info.Artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -755,16 +978,30 @@ public partial class TransmitPage : UserControl, IShellPage
         MediaPlayPause.IsEnabled = info.CanPlayPause;
 
         var duration = info.Timeline.Duration;
-        MediaSeekRow.Visibility = duration > TimeSpan.Zero ? Visibility.Visible : Visibility.Collapsed;
-        MediaSeek.IsEnabled = info.CanSeek;
-        MediaDuration.Text = MediaApps.FormatTime(duration);
+        var range = info.CanSeek ? info.SeekRange : SeekRange.Empty;
+        var pending = _hostSeek.Phase == SeekPhase.Pending;
+        MediaSeekRow.Visibility = duration > TimeSpan.Zero || !range.IsEmpty ? Visibility.Visible : Visibility.Collapsed;
+        MediaSeek.IsEnabled = !range.IsEmpty;
+        MediaBack.IsEnabled = MediaForward.IsEnabled = !range.IsEmpty && !pending;
+        MediaBack.Visibility = MediaForward.Visibility = MediaSeekRow.Visibility;
+        MediaDuration.Text = info.Live ? "ao vivo" : MediaApps.FormatTime(duration);
         if (!_mediaSeeking)
         {
-            var position = info.Timeline.PositionAt(now);
-            MediaSeek.Maximum = Math.Max(1, duration.TotalSeconds);
-            MediaSeek.Value = Math.Min(MediaSeek.Maximum, position.TotalSeconds);
+            var position = pending ? TimeSpan.FromSeconds(_hostSeek.Target) : info.Timeline.PositionAt(now);
+            if (range.IsEmpty)
+            {
+                MediaSeek.Minimum = 0;
+                MediaSeek.Maximum = Math.Max(1, duration.TotalSeconds);
+            }
+            else
+            {
+                MediaSeek.Minimum = range.Start;
+                MediaSeek.Maximum = range.End;
+            }
+            MediaSeek.Value = Math.Clamp(position.TotalSeconds, MediaSeek.Minimum, MediaSeek.Maximum);
             MediaPosition.Text = MediaApps.FormatTime(position);
         }
+        ShowSeekNote(info, range);
 
         var artKey = info.Thumbnail is null ? null : $"{info.Id}\n{info.Title}\n{info.Artist}\n{info.Thumbnail.Length}";
         if (artKey == _mediaArtKey) return;
@@ -774,29 +1011,58 @@ public partial class TransmitPage : UserControl, IShellPage
         MediaArt.Visibility = image is null ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    /// <summary>Com mais de um app tocando, uma lista para escolher qual controlar.</summary>
-    private void FillMediaSessions(IReadOnlyList<MediaSessionInfo> sessions, string selected)
+    /// <summary>
+    /// Diz o que está acontecendo com a minutagem: indo para um ponto, pronto, recusado, ao vivo, por que não dá para
+    /// buscar, ou que o app mostrado não está ligado à transmissão (e quem assiste não vê nem controla).
+    /// </summary>
+    private void ShowSeekNote(MediaSessionInfo info, SeekRange range)
     {
-        MediaSessionCombo.Visibility = sessions.Count > 1 ? Visibility.Visible : Visibility.Collapsed;
+        string? note;
+        if (!_mediaBound)
+            note = SharedAppExe() is not null
+                ? $"{info.AppName} não é o app que você está transmitindo: quem assiste não vê nem controla. Escolha na lista para ligar."
+                : "Mais de um app está tocando. Escolha na lista qual a transmissão controla; até lá, só você vê e controla.";
+        else if (_hostSeek.Phase == SeekPhase.Pending) note = $"Indo para {MediaApps.FormatTime(TimeSpan.FromSeconds(_hostSeek.Target))}…";
+        else if (_hostSeek.Phase is SeekPhase.Done or SeekPhase.Failed && _hostSeek.Outcome is { } outcome) note = SeekRules.Describe(outcome);
+        else if (range.IsEmpty)
+            note = info.Timeline.Duration > TimeSpan.Zero
+                ? "Esse app não deixa mudar o ponto pelos controles de mídia do Windows."
+                : "Esse app não informa a posição e a duração, então não dá para mudar o ponto.";
+        else if (info.Live) note = $"Ao vivo: dá para voltar até {MediaApps.FormatTime(TimeSpan.FromSeconds(range.Length))}.";
+        else if (range.Start > 0.5 || (info.Timeline.Duration.TotalSeconds > 0 && range.End < info.Timeline.Duration.TotalSeconds - 0.5))
+            note = $"O app só deixa buscar entre {MediaApps.FormatTime(TimeSpan.FromSeconds(range.Start))} e {MediaApps.FormatTime(TimeSpan.FromSeconds(range.End))}.";
+        else note = null;
+        MediaSeekNote.Text = note ?? string.Empty;
+        MediaSeekNote.Visibility = note is null ? Visibility.Collapsed : Visibility.Visible;
+    }
+
+    /// <summary>A lista para escolher qual app controlar: com mais de um tocando, ou quando o mostrado não está ligado.</summary>
+    private void FillMediaSessions(IReadOnlyList<MediaSessionInfo> sessions, string selected, bool bound)
+    {
+        MediaSessionCombo.Visibility = sessions.Count > 1 || !bound ? Visibility.Visible : Visibility.Collapsed;
         var choices = sessions.Select((s, i) => new Choice<string>(s.Id, sessions.Take(i).Any(o => o.AppName == s.AppName) ? $"{s.AppName} ({i + 1})" : s.AppName)).ToList();
+        if (!bound) choices.Insert(0, new Choice<string>(string.Empty, "Escolher o app…"));
         _fillingMediaSessions = true;
         if (!choices.SequenceEqual(MediaSessionCombo.Items.OfType<Choice<string>>())) MediaSessionCombo.Fill(choices);
-        MediaSessionCombo.SelectValue(selected);
+        MediaSessionCombo.SelectValue(bound ? selected : string.Empty);
         _fillingMediaSessions = false;
     }
 
     private void MediaSession_Changed()
     {
-        if (_fillingMediaSessions || MediaSessionCombo.Value<string>() is not { } id) return;
+        if (_fillingMediaSessions || MediaSessionCombo.Value<string>() is not { Length: > 0 } id) return;
         _mediaId = id;
         _mediaPinned = true;
         _mediaArtKey = null;
+        _mediaKey = null;
         UpdateMedia();
     }
 
     private async void MediaPrevious_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.Previous);
     private async void MediaPlayPause_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.PlayPause);
     private async void MediaNext_Click(object sender, RoutedEventArgs e) => await MediaCommandAsync(MediaCommand.Next);
+    private async void MediaBack_Click(object sender, RoutedEventArgs e) => await HostSkipAsync(-SeekRules.SkipSeconds);
+    private async void MediaForward_Click(object sender, RoutedEventArgs e) => await HostSkipAsync(SeekRules.SkipSeconds);
 
     private async Task MediaCommandAsync(MediaCommand command)
     {
@@ -804,22 +1070,58 @@ public partial class TransmitPage : UserControl, IShellPage
         if (!await media.SendAsync(id, command)) _shell.Toast("O app não aceitou o comando. Alguns apps não deixam pular ou voltar.", ToastKind.Warning);
     }
 
+    private async Task HostSkipAsync(double delta)
+    {
+        if (_media is not { } media || _mediaId is not { } id || _mediaInfo is not { CanSeek: true } info) return;
+        await HostSeekAsync(info.SeekRange.Clamp(media.PositionNow(id) + delta));
+    }
+
+    /// <summary>Quem transmite muda o ponto: mostra "indo para…" e depois o que o app confirmou.</summary>
+    private async Task HostSeekAsync(double target)
+    {
+        if (_media is not { } media || _mediaId is not { } id) return;
+        var now = Environment.TickCount64;
+        if (_hostSeek.Begin(target, now) is not { } request) return;
+        if (_mediaInfo is { } shown) ShowMedia(shown, DateTimeOffset.UtcNow);
+        var outcome = await SeekOneAtATimeAsync(media, id, target);
+        _hostSeek.Resolve(new MediaCommandResultMessage(request, MediaCommandMessage.Seek, outcome), Environment.TickCount64);
+        if (!SeekRules.Succeeded(outcome)) _shell.Toast(SeekRules.Describe(outcome), ToastKind.Warning);
+        UpdateMedia();
+    }
+
+    /// <summary>Uma busca por vez no app (a de quem transmite e as de quem assiste esperam a anterior terminar).</summary>
+    private async Task<string> SeekOneAtATimeAsync(MediaControls media, string id, double target)
+    {
+        await _seekGate.WaitAsync();
+        try { return await media.SeekAsync(id, TimeSpan.FromSeconds(target)); }
+        finally { _seekGate.Release(); }
+    }
+
     private void MediaSeek_PreviewMouseLeftButtonDown(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (MediaSeek.IsEnabled) _mediaSeeking = true;
     }
 
+    /// <summary>Arrastando, só a prévia muda aqui; a posição vai para o app uma vez, ao soltar.</summary>
     private async void MediaSeek_PreviewMouseLeftButtonUp(object sender, System.Windows.Input.MouseButtonEventArgs e)
     {
         if (!_mediaSeeking) return;
         _mediaSeeking = false;
-        if (_media is not { } media || _mediaId is not { } id) return;
-        if (!await media.SeekAsync(id, TimeSpan.FromSeconds(MediaSeek.Value))) _shell.Toast("O app não deixou mudar o ponto da música ou do vídeo.", ToastKind.Warning);
+        await HostSeekAsync(MediaSeek.Value);
+    }
+
+    /// <summary>Pelo teclado (setas, Page Up e Page Down), a busca vai quando a tecla é solta.</summary>
+    private async void MediaSeek_PreviewKeyUp(object sender, System.Windows.Input.KeyEventArgs e)
+    {
+        if (!MediaSeek.IsEnabled || e.Key is not (System.Windows.Input.Key.Left or System.Windows.Input.Key.Right or System.Windows.Input.Key.PageUp
+                or System.Windows.Input.Key.PageDown or System.Windows.Input.Key.Home or System.Windows.Input.Key.End)) return;
+        _mediaSeeking = false;
+        await HostSeekAsync(MediaSeek.Value);
     }
 
     private void MediaSeek_ValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_mediaSeeking) MediaPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(e.NewValue));
+        if (_mediaSeeking || MediaSeek.IsKeyboardFocusWithin) MediaPosition.Text = MediaApps.FormatTime(TimeSpan.FromSeconds(e.NewValue));
     }
 
     private void ShowError(string message)
@@ -878,17 +1180,20 @@ public partial class TransmitPage : UserControl, IShellPage
             var row = _viewerRows.FirstOrDefault(r => r.Id == info.Id);
             if (row is null)
             {
-                _viewerRows.Add(row = new ViewerRow(info.Id, info.Name, info.Address));
+                // O servidor fica no topo da lista (é por ele que passa quem assiste por lá).
+                var index = info.IsServer ? 0 : _viewerRows.Count;
+                _viewerRows.Insert(index, row = new ViewerRow(info.Id, info.Name, info.Address, info.IsServer));
                 joined = true;
             }
             row.Update(info, audioOnly);
         }
         // Quem entrou já recebeu a lista de apps do som guardada; uma lida nova vai logo em seguida.
         if (joined) _ = PublishAudioAppsAsync();
-        var changed = StatViewers.Text != _viewerRows.Count.ToString();
+        var people = Viewers;
+        var changed = StatViewers.Text != people.ToString();
         NoViewers.Visibility = _viewerRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        ViewerCount.Text = _viewerRows.Count switch { 0 => string.Empty, 1 => "1 pessoa", var n => $"{n} pessoas" };
-        StatViewers.Text = _viewerRows.Count.ToString();
+        ViewerCount.Text = people switch { 0 => string.Empty, 1 => "1 pessoa", var n => $"{n} pessoas" };
+        StatViewers.Text = people.ToString();
         if (changed) _shell.NotifyLiveStateChanged();
     }
 
@@ -924,7 +1229,8 @@ public partial class TransmitPage : UserControl, IShellPage
 
     private void Kick_Click(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.Tag is Guid id) _session?.Kick(id);
+        // O servidor não sai por aqui (voltaria sozinho): para tirar, encerre e transmita sem o servidor.
+        if ((sender as FrameworkElement)?.Tag is Guid id && _viewerRows.FirstOrDefault(r => r.Id == id) is { IsServer: false }) _session?.Kick(id);
     }
 
     private async void Bandwidth_Click(object sender, RoutedEventArgs e)
@@ -1144,9 +1450,12 @@ public partial class TransmitPage : UserControl, IShellPage
     /// O que está tocando vai para quem assiste só se o som dele vai junto: um app tirado do som (ou fora da festa de um
     /// app só) continua sendo só de quem transmite, e ninguém controla.
     /// </summary>
-    private bool ShareableMedia(HostSession session, MediaSessionInfo info)
+    private bool ShareableMedia(HostSession session, MediaSessionInfo info) => Settings.ViewerControls && SoundGoesWithStream(session, info);
+
+    /// <summary>O som do app vai na transmissão (não foi tirado e, na festa de um app só, é esse app).</summary>
+    private bool SoundGoesWithStream(HostSession session, MediaSessionInfo info)
     {
-        if (!Settings.ViewerControls || !session.AudioEnabled) return false;
+        if (!session.AudioEnabled) return false;
         if (Settings.MutedApps.Any(app => MediaApps.Matches(info.AppId, app.Exe))) return false;
         return !(session.Mode == StreamMode.AudioOnly && Settings.PartyApp is { } party && !MediaApps.Matches(info.AppId, party.Exe));
     }
@@ -1159,7 +1468,12 @@ public partial class TransmitPage : UserControl, IShellPage
         var next = info is null
             ? MediaStateMessage.None
             : new MediaStateMessage(info.AppName, info.Title, info.Artist, info.Playing, info.Timeline.PositionAt(DateTimeOffset.UtcNow).TotalSeconds,
-                info.Timeline.Duration.TotalSeconds, info.CanPrevious, info.CanNext, info.CanPlayPause, info.CanSeek, CoverFor(info.Thumbnail));
+                info.Timeline.Duration.TotalSeconds, info.CanPrevious, info.CanNext, info.CanPlayPause, info.CanSeek, CoverFor(info.Thumbnail),
+                SessionKey: _mediaKey,
+                SeekStartSeconds: info.CanSeek ? info.SeekRange.Start : 0,
+                SeekEndSeconds: info.CanSeek ? info.SeekRange.End : 0,
+                Live: info.Live,
+                NoSeek: info.CanSeek ? null : info.Timeline.Duration > TimeSpan.Zero ? SeekRules.NoSeekUnsupported : SeekRules.NoSeekNoTimeline);
         var now = Environment.TickCount64;
         if (!RemoteControl.ShouldPublish(_publishedMedia, (now - _publishedMediaAt) / 1000.0, next)) return;
         _publishedMedia = next;
@@ -1258,7 +1572,7 @@ public partial class TransmitPage : UserControl, IShellPage
                 ApplyRemoteQuality(session, request.ViewerName, quality);
                 break;
             case MediaCommandMessage command:
-                _ = RemoteMediaAsync(request.ViewerName, command);
+                _ = RemoteMediaAsync(session, request, command);
                 break;
             case AudioAppsRequestMessage apps:
                 ApplyRemoteApps(session, request.ViewerName, apps);
@@ -1287,20 +1601,65 @@ public partial class TransmitPage : UserControl, IShellPage
         if (!ApplyLiveQuality(viewer)) PublishRemoteState();
     }
 
-    private async Task RemoteMediaAsync(string viewer, MediaCommandMessage command)
+    /// <summary>
+    /// Um comando de quem assiste. Só vai para a sessão ligada à transmissão e com a mesma chave que a pessoa estava vendo;
+    /// a busca é no app de origem (todo mundo vê o vídeo no ponto novo) e só conta como feita depois de conferida.
+    /// </summary>
+    private async Task RemoteMediaAsync(HostSession session, RemoteRequest request, MediaCommandMessage command)
     {
-        if (_media is not { } media || _mediaId is not { } id) return;
-        var what = _publishedMedia is { Title.Length: > 0 } playing ? $"“{(playing.Title.Length > 60 ? playing.Title[..60] + "…" : playing.Title)}”" : "o que está tocando";
-        var (ok, done) = command.Command switch
+        var viewer = request.ViewerName;
+        void Reply(string outcome, double position = 0)
+            => session.SendMediaResult(request.ViewerId, new MediaCommandResultMessage(command.RequestId, command.Command, outcome, position));
+
+        if (_media is not { } media || _mediaId is not { } id || !_mediaBound || _publishedMedia is not { Available: true } published)
         {
-            MediaCommandMessage.PlayPause => (await media.SendAsync(id, MediaCommand.PlayPause), _publishedMedia?.Playing == true ? $"{viewer} pausou {what}." : $"{viewer} deu play em {what}."),
-            MediaCommandMessage.Previous => (await media.SendAsync(id, MediaCommand.Previous), $"{viewer} voltou para a anterior."),
-            MediaCommandMessage.Next => (await media.SendAsync(id, MediaCommand.Next), $"{viewer} pulou para a próxima."),
-            MediaCommandMessage.Seek => (await media.SeekAsync(id, TimeSpan.FromSeconds(command.PositionSeconds)), $"{viewer} mudou o ponto de {what}."),
-            _ => (false, string.Empty),
-        };
-        if (ok) _shell.Toast(done);
-        else Log.Info($"O app não aceitou o comando de {viewer} ({command.Command}).");
+            Reply(SeekRules.OutcomeUnavailable);
+            return;
+        }
+        if (!SeekRules.SameSession(published, command))
+        {
+            Reply(SeekRules.OutcomeStale);
+            return;
+        }
+        var what = published.Title.Length > 0 ? $"“{(published.Title.Length > 60 ? published.Title[..60] + "…" : published.Title)}”" : "o que está tocando";
+        string outcome;
+        string done;
+        double position = 0;
+        switch (command.Command)
+        {
+            case MediaCommandMessage.Seek or MediaCommandMessage.SkipBy:
+                if (SeekRules.Target(published, command, media.PositionNow(id)) is not { } target)
+                {
+                    Reply(SeekRules.OutcomeUnavailable);
+                    return;
+                }
+                outcome = await SeekOneAtATimeAsync(media, id, target);
+                position = target;
+                done = command.Command == MediaCommandMessage.SkipBy
+                    ? $"{viewer} {(command.DeltaSeconds > 0 ? "avançou" : "voltou")} {Math.Abs(command.DeltaSeconds):0} s em {what}."
+                    : $"{viewer} levou {what} para {MediaApps.FormatTime(TimeSpan.FromSeconds(target))}.";
+                break;
+            case MediaCommandMessage.PlayPause:
+                outcome = await media.SendAsync(id, MediaCommand.PlayPause) ? SeekRules.OutcomeDone : SeekRules.OutcomeRejected;
+                done = published.Playing ? $"{viewer} pausou {what}." : $"{viewer} deu play em {what}.";
+                break;
+            case MediaCommandMessage.Previous:
+                outcome = await media.SendAsync(id, MediaCommand.Previous) ? SeekRules.OutcomeDone : SeekRules.OutcomeRejected;
+                done = $"{viewer} voltou para a anterior.";
+                break;
+            case MediaCommandMessage.Next:
+                outcome = await media.SendAsync(id, MediaCommand.Next) ? SeekRules.OutcomeDone : SeekRules.OutcomeRejected;
+                done = $"{viewer} pulou para a próxima.";
+                break;
+            default:
+                Reply(SeekRules.OutcomeUnavailable);
+                return;
+        }
+        Reply(outcome, position);
+        if (SeekRules.Succeeded(outcome)) _shell.Toast(done);
+        else Log.Info($"O app não confirmou o comando de {viewer} ({command.Command}): {outcome}.");
+        // A posição nova vai para todo mundo logo, sem esperar a próxima leitura.
+        _publishedMedia = null;
         UpdateMedia();
     }
 
@@ -1386,7 +1745,8 @@ public partial class TransmitPage : UserControl, IShellPage
         UpdateAudioCard();
         var now = DateTimeOffset.UtcNow;
         ShowMedia(new MediaSessionInfo("Spotify.exe", "Spotify.exe", "Spotify", "Noite de Sexta", "Banda da Rede",
-            new PlaybackTimeline(TimeSpan.FromSeconds(83), TimeSpan.FromSeconds(214), now, true), true, true, true, true, null), now);
+            new PlaybackTimeline(TimeSpan.FromSeconds(83), TimeSpan.FromSeconds(214), now, true), true, true, true, true, null,
+            new SeekRange(0, 214)), now);
     }
 
     /// <summary>Abre "Tirar o som de apps" com apps de exemplo (para a captura de tela).</summary>
@@ -1415,7 +1775,7 @@ public partial class TransmitPage : UserControl, IShellPage
         public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    public sealed class ViewerRow(Guid id, string name, string address) : INotifyPropertyChanged
+    public sealed class ViewerRow(Guid id, string name, string address, bool isServer = false) : INotifyPropertyChanged
     {
         private string _details = "Conectando…";
         private bool _testing;
@@ -1426,6 +1786,17 @@ public partial class TransmitPage : UserControl, IShellPage
         public string Initial => Name.Length > 0 ? char.ToUpperInvariant(Name[0]).ToString() : "?";
         public string TestText => _testing ? "Testando…" : "Testar banda";
         public bool CanTest => !_testing;
+
+        /// <summary>(1.4.1) O servidor ScreenFlow: uma linha só para todo mundo que assiste por ele.</summary>
+        public bool IsServer { get; } = isServer;
+        public bool IsPerson => !IsServer;
+        public bool CanKick => !IsServer;
+
+        /// <summary>Quantas pessoas esta linha conta (o servidor conta quem assiste por ele).</summary>
+        public int People { get; private set; } = isServer ? 0 : 1;
+
+        public string TestTip => IsServer ? "Mede a banda até o servidor por 3 segundos (o servidor manda para cada pessoa que assiste por lá)"
+            : "Mede a banda até esta pessoa por 3 segundos";
 
         public string Details
         {
@@ -1445,11 +1816,27 @@ public partial class TransmitPage : UserControl, IShellPage
         }
 
         public void Update(ViewerInfo info, bool audioOnly)
-            => Details = info.RoundTripMs <= 0
+        {
+            People = info.People;
+            if (IsServer)
+            {
+                var names = info.AudienceNames is { Count: > 0 } list ? " (" + string.Join(", ", list.Take(4)) + (list.Count > 4 ? "…" : string.Empty) + ")" : string.Empty;
+                var who = info.Audience switch
+                {
+                    0 => "Ninguém assistindo por lá ainda",
+                    1 => $"1 pessoa assistindo por lá{names}",
+                    var n => $"{n} pessoas assistindo por lá{names}",
+                };
+                Details = info.RoundTripMs <= 0 || info.Audience == 0 ? who
+                    : $"{who} · o servidor recebe {info.ReceivedMbps:0.#} Mbps · ping {info.RoundTripMs:0} ms · perda {info.LossRate:P1}";
+                return;
+            }
+            Details = info.RoundTripMs <= 0
                 ? "Conectando…"
                 : audioOnly
                     ? $"Ouvindo · ping {info.RoundTripMs:0} ms · perda {info.LossRate:P1}"
                     : $"Recebendo {info.ReceivedMbps:0.#} Mbps · ping {info.RoundTripMs:0} ms · latência {info.LatencyMs:0} ms · perda {info.LossRate:P1}";
+        }
 
         public event PropertyChangedEventHandler? PropertyChanged;
 

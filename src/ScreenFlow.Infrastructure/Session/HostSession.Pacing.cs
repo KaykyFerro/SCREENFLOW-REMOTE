@@ -32,7 +32,7 @@ public sealed partial class HostSession
     /// <summary>Ritmo para o que está indo agora: vídeo, câmera e áudio de cada viewer, com folga para FEC e cabeçalhos.</summary>
     private double PacingRate()
     {
-        var watching = Math.Max(1, _viewers.Values.Count(v => v.State == ViewerState.Streaming));
+        var watching = Math.Max(1, _viewers.Values.Count(IsWatching));
         var perViewerKbps = (HasVideo ? _target.BitrateKbps : 0) + (HasCameraOverlay ? Volatile.Read(ref _cameraKbps) : 0) + _audioProfile.BitrateKbps * 2;
         return SendPacing.RateBytesPerSecond(watching * perViewerKbps * 1.25 / 1000.0, _options.UploadMbps);
     }
@@ -115,7 +115,8 @@ public sealed partial class HostSession
                 {
                     var viewer = item.Viewer;
                     if (viewer.State != ViewerState.Streaming) continue;
-                    _sender.Send(viewer.Cipher, ref viewer.PacketCounter, item.Chunk, viewer.MediaAddress, item.Retransmit);
+                    // O servidor (1.4.1) tem um socket próprio, que sai pela rede que chega nele.
+                    (viewer.Sender ?? _sender).Send(viewer.Cipher, ref viewer.PacketCounter, item.Chunk, viewer.MediaAddress, item.Retransmit);
                 }
 
                 if (wait == Timeout.InfiniteTimeSpan) _work.WaitOne(250);

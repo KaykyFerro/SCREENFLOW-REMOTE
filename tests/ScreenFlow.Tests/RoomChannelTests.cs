@@ -45,7 +45,8 @@ public class RoomChannelTests
             new RoomChannel(RoomChannelKind.Text, "fora-da-lista"),
             new RoomChannel(RoomChannelKind.Voice, "Apex"),
         ]);
-        Assert.Equal(["Geral", "Jogando", "Música", "Apex", "Valorant"], voice.Select(c => c.Name));
+        // 1.4.1: só a "Geral" vem pronta; "Jogando" agora é um canal como os outros.
+        Assert.Equal(["Geral", "Apex", "jogando", "Valorant"], voice.Select(c => c.Name));
         Assert.Equal(RoomChannels.MaxListed, RoomChannels.Merge(RoomChannelKind.Text,
             Enumerable.Range(0, 100).Select(i => new RoomChannel(RoomChannelKind.Text, $"canal-{i}"))).Count);
     }
@@ -59,7 +60,7 @@ public class RoomChannelTests
             new RoomChannel(RoomChannelKind.Text, "Memes e Prints"),
             new RoomChannel(RoomChannelKind.Text, "memes-e-prints"),   // repetido
             new RoomChannel(RoomChannelKind.Voice, "  "),              // vazio
-            .. Enumerable.Range(1, 10).Select(i => new RoomChannel(RoomChannelKind.Voice, $"Sala {i}")),
+            .. Enumerable.Range(1, 20).Select(i => new RoomChannel(RoomChannelKind.Voice, $"Sala {i}")),
         ]);
         Assert.Equal(RoomChannels.MaxPerPerson, list.Count);
         Assert.Equal(new RoomChannel(RoomChannelKind.Text, "memes-e-prints"), list[0]);
@@ -106,7 +107,7 @@ public class RoomChannelTests
         var packet = RoomPacket.Presence(Me, presence);
         Assert.True(packet.Length <= RoomPacket.MaximumSize);
         Assert.True(RoomPacket.TryReadPresence(RoomPacket.Body(packet), out var read));
-        Assert.Equal(RoomChannels.MaxPerPerson, read.CreatedChannels.Count);
+        Assert.Equal(Math.Min(10, RoomChannels.MaxPerPerson), read.CreatedChannels.Count);
         Assert.NotNull(read.Avatar);
     }
 

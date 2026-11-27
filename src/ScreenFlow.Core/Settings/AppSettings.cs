@@ -8,9 +8,17 @@ namespace ScreenFlow.Core.Settings;
 
 public enum AppTheme { Dark, Light }
 
+/// <summary>
+/// (1.4.1) Como este PC usa um servidor ScreenFlow: nenhum (a sala é direta entre os PCs da rede), entrar num servidor
+/// de outro PC, ou ser o servidor (ele roda dentro do app, e o próprio app entra nele).
+/// </summary>
+public enum ServerRole { None, Join, Host }
+
 public sealed class AppSettings
 {
     public AppTheme Theme { get; set; } = AppTheme.Dark;
+    /// <summary>(1.4.1) A cor do tema (id de <see cref="ColorThemes"/>), só deste PC. Null: a menta de sempre.</summary>
+    public string? ColorTheme { get; set; }
     /// <summary>Seu nome: aparece no chat, na voz e para quem assiste (no começo é o nome do PC).</summary>
     public string DeviceName { get; set; } = Environment.MachineName;
     /// <summary>A sua foto do perfil (id do arquivo guardado na pasta de imagens). Null: aparece a inicial do nome.</summary>
@@ -21,7 +29,9 @@ public sealed class AppSettings
     public int ControlPort { get; set; } = AppInfo.DefaultControlPort;
     public int DiscoveryPort { get; set; } = AppInfo.DefaultDiscoveryPort;
     public bool FirewallConfigured { get; set; }
-    public bool AllowNonRadminFallback { get; set; }
+    // (1.4.0) "AllowNonRadminFallback" saiu: nunca teve tela nem uso. Configurações antigas que ainda têm a chave abrem
+    // normalmente (chaves desconhecidas são ignoradas) e ela some no próximo salvamento. Na 1.4.1, o Tailscale e o
+    // servidor ScreenFlow (docs/SERVIDOR.md) entraram ao lado do Radmin VPN.
 
     // Transmissão
     /// <summary>O que transmitir: tela (monitor ou janela), câmera ou só o áudio (festa de música).</summary>
@@ -44,6 +54,25 @@ public sealed class AppSettings
     public int MusicBitrateKbps { get; set; } = 256;
     /// <summary>No modo tela, manda a câmera junto (quem assiste vê num quadrinho por cima da tela).</summary>
     public bool CameraWithScreen { get; set; }
+
+    // O que a captura mostra (1.4.0)
+    /// <summary>Mostra o cursor do mouse na transmissão (no DXGI, a captura de reserva, ele nunca aparece).</summary>
+    public bool CaptureShowCursor { get; set; } = true;
+    /// <summary>Só esta parte da tela ou da janela vai para quem assiste. Null = tudo.</summary>
+    public RelativeRect? CaptureRegion { get; set; }
+    /// <summary>Tapa de preto o canto onde o Windows mostra as notificações.</summary>
+    public bool MaskNotifications { get; set; }
+    /// <summary>Outras áreas tapadas de preto (frações da tela ou da janela).</summary>
+    public List<RelativeRect> CaptureMasks { get; set; } = [];
+
+    /// <summary>O cursor, a região e as áreas tapadas para a captura.</summary>
+    public CaptureArea CaptureAreaNow()
+    {
+        var masks = new List<RelativeRect>();
+        if (MaskNotifications) masks.Add(RelativeRect.Notifications);
+        masks.AddRange(CaptureMasks ?? []);
+        return new CaptureArea(CaptureShowCursor, CaptureRegion, masks.Take(CaptureArea.MaxMasks).ToList());
+    }
 
     // Som do PC
     /// <summary>
@@ -107,6 +136,12 @@ public sealed class AppSettings
     public double VoiceVolume { get; set; } = 1.0;
     public bool VoiceMuted { get; set; }
     public bool VoiceSounds { get; set; } = true;
+    /// <summary>(1.4.0) Saída de som da voz da sala (fone, caixa). Null = a padrão do Windows.</summary>
+    public string? SpeakerId { get; set; }
+    /// <summary>(1.4.0) Apertar para falar: a voz só vai enquanto <see cref="PushToTalkKey"/> está apertada, em qualquer app.</summary>
+    public bool PushToTalk { get; set; }
+    /// <summary>(1.4.0) A tecla (nome da tecla do WPF, como "F8") ou o botão lateral do mouse ("XButton1", "XButton2").</summary>
+    public string PushToTalkKey { get; set; } = "F8";
     /// <summary>Sensibilidade do microfone: 0 capta só voz alta, 1 capta tudo.</summary>
     public double VoiceSensitivity { get; set; } = 0.6;
     /// <summary>IPs adicionados à mão na sala (para redes em que o aviso automático não chega).</summary>
@@ -118,6 +153,40 @@ public sealed class AppSettings
     public string? LastVoiceChannel { get; set; }
     /// <summary>Volume de cada pessoa na voz, só para você (id da pessoa → 0 a 2; sem a pessoa = 1).</summary>
     public Dictionary<string, double> PeerVolumes { get; set; } = [];
+
+    // Sala privada e moderação (1.4.0). Independentes do PIN e da aprovação para assistir à transmissão.
+    /// <summary>O convite da sala privada em uso (o código "SF1-…"). Null: sala aberta, como nas versões antigas.</summary>
+    public string? PrivateRoomCode { get; set; }
+    /// <summary>Só para o dono: a sala é só para quem ele aprovou (quem tem o convite e não foi aprovado espera).</summary>
+    public bool PrivateRoomApprovedOnly { get; set; }
+    /// <summary>Só para o dono: quem ele aprovou (ids da sala).</summary>
+    public List<string> PrivateRoomApproved { get; set; } = [];
+    /// <summary>Quem você bloqueou: nada dessas pessoas chega até você (ids da sala).</summary>
+    public List<string> BlockedPeers { get; set; } = [];
+
+    // Servidor ScreenFlow (1.4.1)
+    /// <summary>
+    /// Entrar num servidor ScreenFlow (ou ser um): a sala (chat, voz e canais) passa por ele, e as transmissões também
+    /// (quem está no servidor assiste por ele). <see cref="ServerRole.None"/>: a sala direta entre os PCs da rede.
+    /// </summary>
+    public ServerRole ServerRole { get; set; }
+    /// <summary>
+    /// Endereço do servidor para entrar: o IP (do Tailscale, do Radmin VPN ou da rede local) ou o nome do PC no
+    /// Tailscale. Com ":porta" no fim quando o servidor usa outras portas (a do servidor e as duas seguintes).
+    /// </summary>
+    public string? ServerAddress { get; set; }
+    /// <summary>A senha do servidor em que você entra (se ele tiver uma). No lugar do PIN de quem transmite.</summary>
+    public string? ServerPassword { get; set; }
+    /// <summary>No servidor, a sua transmissão vai para ele e quem está nele assiste por ele (desligado: direto, como antes).</summary>
+    public bool TransmitViaServer { get; set; } = true;
+    /// <summary>O nome do servidor quando este PC é o servidor (vazio: o nome do PC).</summary>
+    public string? HostedServerName { get; set; }
+    /// <summary>A senha do servidor quando este PC é o servidor (vazio: sem senha, entra quem alcançar o PC).</summary>
+    public string? HostedServerPassword { get; set; }
+
+    /// <summary>O endereço do servidor configurado, separado em nome e porta (null sem endereço válido).</summary>
+    public (string Host, int Port)? ServerEndpoint()
+        => Network.LocalNetworks.TrySplitHostPort(ServerAddress, AppInfo.DefaultServerControlPort, out var host, out var port) ? (host, port) : null;
 
     // Chat guardado numa pasta (1.3.0)
     /// <summary>
@@ -177,8 +246,15 @@ public sealed class AppSettings
         RecentHosts ??= [];
         if (InstanceId is null || !Guid.TryParseExact(InstanceId, "N", out _)) InstanceId = Guid.NewGuid().ToString("N");
         if (string.IsNullOrWhiteSpace(MicrophoneId)) MicrophoneId = null;
+        if (string.IsNullOrWhiteSpace(SpeakerId)) SpeakerId = null;
+        if (string.IsNullOrWhiteSpace(PushToTalkKey) || PushToTalkKey.Length > 32) PushToTalkKey = "F8";
+        CaptureRegion = CaptureRegion?.Clean();
+        CaptureMasks = (CaptureMasks ?? []).Where(m => m is not null).Select(m => m.Clean()).OfType<RelativeRect>().Take(CaptureArea.MaxMasks - 1).ToList();
         VoiceVolume = Math.Clamp(VoiceVolume, 0, 1.5);
         VoiceSensitivity = Math.Clamp(VoiceSensitivity, 0, 1);
+        if (!Room.RoomInvite.TryParse(PrivateRoomCode, out _)) PrivateRoomCode = null;
+        PrivateRoomApproved = ValidIds(PrivateRoomApproved, Room.RoomPacket.MaxRoster);
+        BlockedPeers = ValidIds(BlockedPeers, 200);
         RoomPeers = (RoomPeers ?? []).Select(p => p.Trim()).Where(p => p.Length is > 0 and <= 64).Distinct(StringComparer.OrdinalIgnoreCase).Take(16).ToList();
         MutedApps = MutedApp.Normalize(MutedApps);
         PartyApp = MutedApp.Normalize([PartyApp]).FirstOrDefault();
@@ -189,6 +265,13 @@ public sealed class AppSettings
             .Where(p => Guid.TryParseExact(p.Key, "N", out _) && double.IsFinite(p.Value) && Math.Abs(p.Value - 1) > 0.001)
             .Take(256)
             .ToDictionary(p => p.Key, p => Math.Clamp(p.Value, 0, 2));
+        if (!Enum.IsDefined(ServerRole)) ServerRole = ServerRole.None;
+        ServerAddress = string.IsNullOrWhiteSpace(ServerAddress) || ServerAddress.Trim().Length > 255 ? null : ServerAddress.Trim();
+        ServerPassword = CleanPassword(ServerPassword);
+        HostedServerPassword = CleanPassword(HostedServerPassword);
+        HostedServerName = RoomPacket.CleanName(HostedServerName) is { Length: > 0 } serverName ? serverName : null;
+        ColorTheme = ColorThemes.Find(ColorTheme)?.Id;
+        if (ColorTheme == ColorThemes.Default.Id) ColorTheme = null;
         if (string.IsNullOrWhiteSpace(ChatArchiveFolder)) ChatArchiveFolder = null;
         else
         {
@@ -208,6 +291,13 @@ public sealed class AppSettings
         SettingsVersion = CurrentSettingsVersion;
         return true;
     }
+
+    /// <summary>Senha vazia é sem senha; uma senha longa demais (colada errado) também não vale.</summary>
+    private static string? CleanPassword(string? password)
+        => string.IsNullOrEmpty(password) || password.Length > Server.ServerCommandLine.MaxPasswordLength ? null : password;
+
+    private static List<string> ValidIds(List<string>? ids, int max)
+        => (ids ?? []).Where(id => Guid.TryParseExact(id, "N", out var guid) && guid != Guid.Empty).Distinct(StringComparer.OrdinalIgnoreCase).Take(max).ToList();
 
     private static int ValidPort(int port, int fallback) => port is >= 1024 and <= 65535 ? port : fallback;
 }
@@ -232,6 +322,32 @@ public sealed class SettingsStore
 
     public AppSettings Current { get; private set; }
     public bool IsFirstRun { get; }
+
+    /// <summary>
+    /// (1.4.0) O arquivo de configurações não abriu (JSON quebrado, por exemplo) e foi copiado para cá antes do app usar
+    /// os padrões, para nada se perder no próximo salvamento. Null quando abriu normalmente.
+    /// </summary>
+    public string? RecoveredCopy { get; private set; }
+
+    /// <summary>Copia o arquivo que não abriu para "settings.invalido-AAAAMMDD-HHMMSS.json", ao lado dele.</summary>
+    private string? PreserveInvalid()
+    {
+        try
+        {
+            if (!File.Exists(_path)) return null;
+            var folder = Path.GetDirectoryName(_path) ?? ".";
+            var name = Path.GetFileNameWithoutExtension(_path);
+            var copy = Path.Combine(folder, $"{name}.invalido-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+            for (var n = 2; File.Exists(copy); n++) copy = Path.Combine(folder, $"{name}.invalido-{DateTime.Now:yyyyMMdd-HHmmss}-{n}.json");
+            File.Copy(_path, copy);
+            return copy;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Log.Warn($"Não deu para guardar a cópia das configurações inválidas: {exception.Message}");
+            return null;
+        }
+    }
     public string FilePath => _path;
 
     public event Action<AppSettings>? Saved;
@@ -250,7 +366,9 @@ public sealed class SettingsStore
         }
         catch (Exception exception)
         {
-            Log.Warn($"Configurações corrompidas, usando padrão: {exception.Message}");
+            RecoveredCopy = PreserveInvalid();
+            Log.Warn($"Configurações inválidas, usando o padrão: {exception.Message}" +
+                     (RecoveredCopy is null ? string.Empty : $" O arquivo antigo foi guardado em {RecoveredCopy}."));
         }
         var settings = new AppSettings { SettingsVersion = AppSettings.CurrentSettingsVersion };
         settings.Normalize();

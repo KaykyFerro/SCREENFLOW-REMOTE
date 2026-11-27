@@ -42,14 +42,33 @@ public sealed record HostOptions(
     int MusicBitrateKbps = 256,
     Func<AudioProfile, IAudioSource>? AudioSourceFactory = null,
     CameraOverlay? OverlayCamera = null,
-    SystemAudioOptions? AudioSeparation = null);
+    SystemAudioOptions? AudioSeparation = null,
+    CaptureArea? Area = null,
+    ServerPublish? Server = null,
+    Func<IReadOnlyList<IPAddress>>? AnnounceTo = null);
+
+/// <summary>
+/// Transmitir também pelo servidor ScreenFlow (1.4.1): uma cópia só vai para o servidor e ele manda para quem assiste por
+/// ele. O id é o da pessoa na sala (quem assiste pelo servidor acha a transmissão por ele). A senha do servidor vale no
+/// lugar do PIN e da aprovação para quem entra pelo servidor.
+/// </summary>
+public sealed record ServerPublish(string Host, int Port, string? Password, Guid StreamId);
+
+/// <summary>Como está a transmissão pelo servidor.</summary>
+public enum ServerLinkState { Off, Connecting, Live, NeedsPassword, Refused }
 
 /// <summary>Câmera junto com a tela: vai numa segunda faixa de vídeo e aparece num quadrinho por cima da tela.</summary>
 public sealed record CameraOverlay(string DeviceId, string Name, int Width, int Height, int Fps);
 
 public enum ViewerState { Authenticating, WaitingApproval, Streaming }
 
-public sealed record ViewerInfo(Guid Id, string Name, string Address, ViewerState State, double RoundTripMs, double LossRate, double ReceivedMbps, double LatencyMs);
+/// <param name="IsServer">É o servidor ScreenFlow (1.4.1): <paramref name="Audience"/> pessoas assistem por ele.</param>
+public sealed record ViewerInfo(Guid Id, string Name, string Address, ViewerState State, double RoundTripMs, double LossRate, double ReceivedMbps, double LatencyMs,
+    bool IsServer = false, int Audience = 0, IReadOnlyList<string>? AudienceNames = null)
+{
+    /// <summary>Quantas pessoas esta linha representa (o servidor conta quem assiste por ele).</summary>
+    public int People => IsServer ? Audience : 1;
+}
 
 /// <param name="Camera">A câmera que vai junto com a tela ("1280×720 · 30 FPS · 2,1 Mbps"), o problema dela, ou vazio.</param>
 public sealed record HostStatistics(int Viewers, double EncodeFps, double BitrateMbps, double UploadMbps, string Encoder, string Capture, StreamTarget Target, string Reason,
@@ -57,7 +76,10 @@ public sealed record HostStatistics(int Viewers, double EncodeFps, double Bitrat
 
 public sealed record ApprovalRequest(Guid Id, string Name, string Address);
 
-/// <summary>Um pedido de quem assiste (1.2.0): <see cref="QualityRequestMessage"/>, <see cref="MediaCommandMessage"/> ou <see cref="AudioAppsRequestMessage"/>.</summary>
+/// <summary>
+/// Um pedido de quem assiste (1.2.0): <see cref="QualityRequestMessage"/>, <see cref="MediaCommandMessage"/> ou
+/// <see cref="AudioAppsRequestMessage"/>. Pelo servidor (1.4.1), o nome é o de quem pediu, e não o do servidor.
+/// </summary>
 public sealed record RemoteRequest(Guid ViewerId, string ViewerName, ControlMessage Message);
 
 /// <summary>
@@ -71,6 +93,7 @@ public sealed partial class HostSession : IAsyncDisposable
 {
     // Trocado inteiro (é imutável) quando quem transmite muda a qualidade ao vivo.
     private volatile HostOptions _options;
+    private volatile CaptureArea _captureArea = CaptureArea.Default;
     private readonly ConcurrentDictionary<Guid, RemoteViewer> _viewers = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Start, int Count)> _failures = new();
     private readonly CancellationTokenSource _cancellation = new();
@@ -112,10 +135,18 @@ public sealed partial class HostSession : IAsyncDisposable
     private string _captureBackend = "";
     private long _lastKeyframeUs;
     private (int Width, int Height) _sourceSize;
+    // Transmissão pelo servidor (1.4.1).
+    private Task? _publishLoop;
+    private Socket? _serverSocket;
+    private MediaSender? _serverSender;
+    private volatile ServerLinkState _serverState = ServerLinkState.Off;
+    private volatile string _serverStatus = string.Empty;
+    private volatile string? _serverName;
 
     public HostSession(HostOptions options)
     {
         _options = options;
+        _captureArea = options.Area ?? CaptureArea.Default;
         var bitrate = options.BitrateKbps > 0 ? options.BitrateKbps : Quality.TargetBitrateKbps(options.Resolution, options.Fps, options.PreferredCodec ?? VideoCodec.Hevc);
         _profile = new StreamTarget(bitrate, options.Fps, options.Resolution);
         _target = _profile;
@@ -168,8 +199,52 @@ public sealed partial class HostSession : IAsyncDisposable
     public event Action<RemoteRequest>? RemoteRequested;
     public Func<ApprovalRequest, CancellationToken, Task<bool>>? ApprovalHandler { get; set; }
 
-    public IReadOnlyList<ViewerInfo> Viewers => _viewers.Values.Select(v => v.Info).OrderBy(v => v.Name).ToArray();
+    public IReadOnlyList<ViewerInfo> Viewers => _viewers.Values.Select(v => v.Info).OrderBy(v => v.IsServer ? 0 : 1).ThenBy(v => v.Name).ToArray();
     public HostOptions Options => _options;
+
+    /// <summary>Quantas pessoas estão assistindo: as diretas e as que assistem pelo servidor.</summary>
+    public int WatchingCount => _viewers.Values.Where(v => v.State == ViewerState.Streaming).Sum(v => v.IsServer ? v.Audience : 1);
+
+    // ───────────────────────── Pelo servidor (1.4.1) ─────────────────────────
+
+    /// <summary>Como está a transmissão pelo servidor (<see cref="ServerLinkState.Off"/> sem servidor).</summary>
+    public ServerLinkState ServerState => _serverState;
+
+    /// <summary>Uma frase sobre a transmissão pelo servidor ("No servidor X: 3 assistindo"), ou vazio sem servidor.</summary>
+    public string ServerStatus => _serverStatus;
+
+    /// <summary>O nome do servidor (depois que ele aceitou a transmissão).</summary>
+    public string? ServerName => _serverName;
+
+    /// <summary>A transmissão pelo servidor mudou de estado. Chamado fora da thread da interface.</summary>
+    public event Action? ServerChanged;
+
+    private void SetServerState(ServerLinkState state, string status)
+    {
+        if (_serverState == state && _serverStatus == status) return;
+        _serverState = state;
+        _serverStatus = status;
+        Log.Info($"Servidor: {status}");
+        ServerChanged?.Invoke();
+    }
+
+    /// <summary>
+    /// Recebe a tela agora: está assistindo e, se for o servidor, tem alguém assistindo por ele (sem ninguém lá, a
+    /// captura e o envio para o servidor param, como sem ninguém assistindo direto).
+    /// </summary>
+    private static bool IsWatching(RemoteViewer viewer) => viewer.State == ViewerState.Streaming && (!viewer.IsServer || viewer.Audience > 0);
+
+    private MediaSender SenderFor(RemoteViewer viewer) => viewer.Sender ?? _sender!;
+
+    /// <summary>O cursor, a região e as áreas tapadas da captura da tela (1.4.0).</summary>
+    public CaptureArea CaptureArea => _captureArea;
+
+    /// <summary>Troca o cursor, a região ou as áreas tapadas ao vivo: a captura é refeita no próximo frame.</summary>
+    public void SetCaptureArea(CaptureArea area)
+    {
+        _captureArea = area;
+        _wake.Set();
+    }
 
     /// <summary>Alguém assistindo tem os controles de quem assiste (1.2.0 ou mais nova).</summary>
     public bool HasRemoteViewers => _viewers.Values.Any(v => v.State == ViewerState.Streaming && v.Remote);
@@ -231,9 +306,15 @@ public sealed partial class HostSession : IAsyncDisposable
     private void HandleRemoteRequest(RemoteViewer viewer, ControlMessage message)
     {
         if (!viewer.Remote) return;
-        if (!viewer.Limiter.TryTake(Environment.TickCount64))
+        // O servidor já limita os pedidos de cada pessoa que assiste por ele (e junta os de todo mundo).
+        if (!viewer.IsServer && !viewer.Limiter.TryTake(Environment.TickCount64))
         {
             Log.Debug($"Pedido de {viewer.Name} ignorado: pedidos demais seguidos.");
+            return;
+        }
+        if (message is MediaCommandMessage repeated && !viewer.Requests.IsNew(repeated.RequestId))
+        {
+            Log.Debug($"Pedido repetido de {viewer.Name} ignorado ({repeated.Command} #{repeated.RequestId}).");
             return;
         }
         var state = _remoteState;
@@ -247,9 +328,29 @@ public sealed partial class HostSession : IAsyncDisposable
         if (!ok)
         {
             Log.Info($"Pedido de {viewer.Name} recusado: {message.GetType().Name}.");
+            if (message is MediaCommandMessage refused)
+            {
+                var outcome = MediaSeek.SameSession(_mediaState, refused) ? MediaSeek.OutcomeUnavailable : MediaSeek.OutcomeStale;
+                SendMediaResult(viewer.Id, new MediaCommandResultMessage(refused.RequestId, refused.Command, outcome));
+            }
             return;
         }
-        RemoteRequested?.Invoke(new RemoteRequest(viewer.Id, viewer.Name, message));
+        var from = message switch
+        {
+            QualityRequestMessage quality => quality.From,
+            MediaCommandMessage command => command.From,
+            AudioAppsRequestMessage apps => apps.From,
+            _ => null,
+        };
+        var who = viewer.IsServer && Core.Room.RoomPacket.CleanName(from) is { Length: > 0 } person ? person : viewer.Name;
+        RemoteRequested?.Invoke(new RemoteRequest(viewer.Id, who, message));
+    }
+
+    /// <summary>Conta a quem pediu como o comando de mídia terminou (só para quem entende, 1.4.0).</summary>
+    public void SendMediaResult(Guid viewerId, MediaCommandResultMessage result)
+    {
+        if (result.RequestId == 0) return;
+        if (_viewers.TryGetValue(viewerId, out var viewer) && viewer.State == ViewerState.Streaming && viewer.SupportsMediaSeek) SendQuietly(viewer, result);
     }
 
     public void Start()
@@ -262,7 +363,7 @@ public sealed partial class HostSession : IAsyncDisposable
         _listener.Start(32);
         _announcer = new DiscoveryAnnouncer(_options.BindAddress, _options.BroadcastAddress, _options.DiscoveryPort, () =>
             new DiscoveryAnnouncement(AppInfo.Name, AppInfo.ProtocolVersion, _options.DeviceName, _options.BindAddress.ToString(), _options.ControlPort, AppInfo.DisplayVersion,
-                !string.IsNullOrEmpty(_options.Pin), _viewers.Values.Count(v => v.State == ViewerState.Streaming), _options.Mode, HasCameraOverlay));
+                !string.IsNullOrEmpty(_options.Pin), WatchingCount, _options.Mode, HasCameraOverlay), _options.AnnounceTo);
         _announcer.Start();
         _acceptLoop = Task.Run(AcceptLoopAsync);
         _udpDrain = Task.Run(DrainUdpAsync);
@@ -278,6 +379,7 @@ public sealed partial class HostSession : IAsyncDisposable
         }
         StartAudio();
         _ = Task.Run(StatsLoopAsync);
+        if (_options.Server is not null) _publishLoop = Task.Run(PublishLoopAsync);
         Log.Info($"Host iniciado em {_options.BindAddress} (controle TCP {_options.ControlPort}, mídia UDP {_options.MediaPort}), modo {_options.Mode}, "
                  + (HasVideo ? $"perfil {_profile}" : $"áudio {_audioProfile.BitrateKbps} kbps")
                  + (HasCameraOverlay ? $", câmera junto ({_options.OverlayCamera!.Name})" : string.Empty));
@@ -305,7 +407,6 @@ public sealed partial class HostSession : IAsyncDisposable
         client.NoDelay = true;
         var remote = (IPEndPoint)client.Client.RemoteEndPoint!;
         var ip = remote.Address.ToString();
-        RemoteViewer? viewer = null;
         try
         {
             if (IsThrottled(ip))
@@ -319,6 +420,38 @@ public sealed partial class HostSession : IAsyncDisposable
             handshakeTimeout.CancelAfter(TimeSpan.FromSeconds(15));
             if (await ControlFraming.ReadAsync(stream, handshakeTimeout.Token) is not HelloMessage hello)
                 return;
+            await ServeViewerAsync(client, stream, remote, hello, null, null, token);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception exception) when (exception is IOException or SocketException or InvalidDataException or System.Text.Json.JsonException)
+        {
+            Log.Info($"Conexão com {ip} encerrada: {exception.Message}");
+        }
+        catch (Exception exception)
+        {
+            Log.Error($"Erro com viewer {ip}", exception);
+        }
+        finally
+        {
+            client.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// O handshake e a conversa com quem assiste. <paramref name="serverName"/> diferente de null: é o servidor ScreenFlow
+    /// (1.4.1), que já provou a senha dele e assiste por todo mundo que está nele, então não tem PIN, aprovação nem limite
+    /// de pessoas (o servidor cuida disso). A mídia para ele sai por <paramref name="serverSender"/>.
+    /// </summary>
+    private async Task ServeViewerAsync(TcpClient client, NetworkStream stream, IPEndPoint remote, HelloMessage hello, string? serverName, MediaSender? serverSender,
+        CancellationToken token)
+    {
+        var ip = remote.Address.ToString();
+        var isServer = serverName is not null;
+        RemoteViewer? viewer = null;
+        using var handshakeTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
+        handshakeTimeout.CancelAfter(TimeSpan.FromSeconds(15));
+        try
+        {
             if (hello.Protocol != AppInfo.ProtocolVersion)
             {
                 await ControlFraming.WriteAsync(stream, new RejectedMessage(RejectedMessage.VersionMismatch, $"Versões diferentes do ScreenFlow (host {AppInfo.DisplayVersion}, viewer {hello.AppVersion}). Atualize os dois."), token);
@@ -330,7 +463,7 @@ public sealed partial class HostSession : IAsyncDisposable
                     $"{_options.DeviceName} está numa festa de música (só áudio). Atualize o ScreenFlow para a versão {AppInfo.DisplayVersion} para ouvir."), token);
                 return;
             }
-            if (_viewers.Count >= _options.MaxViewers)
+            if (!isServer && _viewers.Values.Count(v => !v.IsServer) >= _options.MaxViewers)
             {
                 await ControlFraming.WriteAsync(stream, new RejectedMessage(RejectedMessage.Busy, $"O host já tem {_options.MaxViewers} pessoas assistindo."), token);
                 return;
@@ -338,13 +471,14 @@ public sealed partial class HostSession : IAsyncDisposable
 
             using var exchange = new KeyExchange();
             var nonce = SessionCrypto.CreateNonce();
-            var pinRequired = !string.IsNullOrEmpty(_options.Pin);
+            // O servidor já provou a senha dele quando a transmissão foi aceita: com ele não tem PIN.
+            var pinRequired = !isServer && !string.IsNullOrEmpty(_options.Pin);
             await ControlFraming.WriteAsync(stream, new ChallengeMessage(_options.DeviceName, exchange.PublicKey, nonce, pinRequired), token);
             if (await ControlFraming.ReadAsync(stream, handshakeTimeout.Token) is not AuthMessage auth) return;
 
             var secret = exchange.DeriveSharedSecret(hello.PublicKey);
             var transcript = SessionCrypto.Transcript(hello.PublicKey, exchange.PublicKey, nonce);
-            if (!SessionCrypto.VerifyProof(secret, _options.Pin, transcript, auth.Proof))
+            if (!SessionCrypto.VerifyProof(secret, pinRequired ? _options.Pin : null, transcript, auth.Proof))
             {
                 RegisterFailure(ip);
                 Log.Warn($"PIN incorreto de {ip}");
@@ -356,13 +490,18 @@ public sealed partial class HostSession : IAsyncDisposable
             var key = SessionCrypto.DeriveMediaKey(secret, transcript);
             CryptographicOperations.ZeroMemory(secret);
             var salt = RandomNumberGenerator.GetBytes(4);
-            var name = string.IsNullOrWhiteSpace(hello.ViewerName) ? ip : hello.ViewerName.Trim()[..Math.Min(40, hello.ViewerName.Trim().Length)];
-            viewer = new RemoteViewer(Guid.NewGuid(), name, client, stream, new IPEndPoint(remote.Address, hello.UdpPort), key, salt, hello, ip);
+            var name = isServer ? $"Servidor {serverName}"
+                : string.IsNullOrWhiteSpace(hello.ViewerName) ? ip : hello.ViewerName.Trim()[..Math.Min(40, hello.ViewerName.Trim().Length)];
+            viewer = new RemoteViewer(Guid.NewGuid(), name, client, stream, new IPEndPoint(remote.Address, hello.UdpPort), key, salt, hello, ip)
+            {
+                IsServer = isServer,
+                Sender = serverSender,
+            };
             CryptographicOperations.ZeroMemory(key);
             _viewers[viewer.Id] = viewer;
             ViewersChanged?.Invoke();
 
-            if (_options.ApproveEachViewer)
+            if (_options.ApproveEachViewer && !isServer)
             {
                 viewer.State = ViewerState.WaitingApproval;
                 ViewersChanged?.Invoke();
@@ -389,7 +528,9 @@ public sealed partial class HostSession : IAsyncDisposable
                 return;
             }
 
-            await viewer.SendAsync(new WelcomeMessage(_options.DeviceName, Convert.ToBase64String(salt), _options.MediaPort, CurrentConfig("conexão"), [.. StreamModes.HostFeatures]), token);
+            // A mídia para o servidor sai pelo socket próprio dele (a porta que vai no Welcome é a desse socket).
+            var mediaPort = serverSender is not null && _serverSocket?.LocalEndPoint is IPEndPoint serverLocal ? serverLocal.Port : _options.MediaPort;
+            await viewer.SendAsync(new WelcomeMessage(_options.DeviceName, Convert.ToBase64String(salt), mediaPort, CurrentConfig("conexão"), [.. StreamModes.HostFeatures]), token);
             viewer.State = ViewerState.Streaming;
             SendRemoteSnapshot(viewer);
             _keyframeRequested = true;
@@ -397,20 +538,15 @@ public sealed partial class HostSession : IAsyncDisposable
             _wake.Set();
             _cameraWake.Set();
             ViewersChanged?.Invoke();
-            Log.Info($"Viewer {name} ({ip}) conectado. Total: {_viewers.Count}");
-            StatusChanged?.Invoke(_options.Mode == StreamMode.AudioOnly ? $"{name} entrou na festa." : $"{name} começou a assistir.");
+            if (isServer) Log.Info($"Transmitindo pelo servidor {serverName} ({ip}).");
+            else
+            {
+                Log.Info($"Viewer {name} ({ip}) conectado. Total: {_viewers.Count}");
+                StatusChanged?.Invoke(_options.Mode == StreamMode.AudioOnly ? $"{name} entrou na festa." : $"{name} começou a assistir.");
+            }
             UpdateAudioPause();
 
             await ControlLoopAsync(viewer, token);
-        }
-        catch (OperationCanceledException) { }
-        catch (Exception exception) when (exception is IOException or SocketException or InvalidDataException or System.Text.Json.JsonException)
-        {
-            Log.Info($"Conexão com {ip} encerrada: {exception.Message}");
-        }
-        catch (Exception exception)
-        {
-            Log.Error($"Erro com viewer {ip}", exception);
         }
         finally
         {
@@ -418,11 +554,10 @@ public sealed partial class HostSession : IAsyncDisposable
             {
                 viewer.Dispose();
                 ViewersChanged?.Invoke();
-                if (viewer.State == ViewerState.Streaming) StatusChanged?.Invoke($"{viewer.Name} saiu.");
+                if (viewer.State == ViewerState.Streaming && !isServer) StatusChanged?.Invoke($"{viewer.Name} saiu.");
                 Renegotiate(null);
                 UpdateAudioPause();
             }
-            client.Dispose();
         }
     }
 
@@ -458,10 +593,14 @@ public sealed partial class HostSession : IAsyncDisposable
                 case QualityRequestMessage or MediaCommandMessage or AudioAppsRequestMessage:
                     HandleRemoteRequest(viewer, message);
                     break;
+                case AudienceMessage audience when viewer.IsServer:
+                    OnServerAudience(viewer, audience);
+                    break;
                 case UnknownControlMessage unknown:
                     Log.Debug($"Mensagem de tipo desconhecido de {viewer.Name}: {unknown.Type}");
                     break;
-                case ByeMessage:
+                case ByeMessage bye:
+                    if (viewer.IsServer) Log.Info($"O servidor encerrou a conexão: {bye.Reason}");
                     return;
             }
         }
@@ -493,7 +632,7 @@ public sealed partial class HostSession : IAsyncDisposable
                 while (sent < watch.Elapsed.TotalMilliseconds * bytesPerMs)
                 {
                     var chunk = new MediaChunk { Header = new MediaHeader { Type = MediaPacketType.Probe, FrameId = index++, Count = 1 }, Payload = payload };
-                    _sender.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress);
+                    SenderFor(viewer).Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress);
                     sent += payload.Length + MediaHeader.Size;
                 }
                 Thread.Sleep(1);
@@ -533,7 +672,7 @@ public sealed partial class HostSession : IAsyncDisposable
     {
         lock (_configGate)
         {
-            var audience = _viewers.Values.Where(v => v.State == ViewerState.Streaming || v == joining).ToList();
+            var audience = _viewers.Values.Where(v => IsWatching(v) || v == joining).ToList();
             if (audience.Count == 0 || !HasVideo) return true;
             IEnumerable<VideoCodec> common = [VideoCodec.Av1, VideoCodec.Hevc, VideoCodec.H264];
             foreach (var v in audience) common = common.Intersect(v.Hello.Decoders);
@@ -572,7 +711,8 @@ public sealed partial class HostSession : IAsyncDisposable
     {
         // Qualidade fixa: nada muda sozinho, nem a divisão do upload entre quem assiste.
         if (!_options.Adaptive) return target;
-        var watching = Math.Max(1, _viewers.Values.Count(v => v.State == ViewerState.Streaming));
+        // O servidor conta como uma pessoa: vai uma cópia só para ele, não importa quantos assistem por ele.
+        var watching = Math.Max(1, _viewers.Values.Count(IsWatching));
         // A câmera junto usa um pedaço do upload de cada pessoa: a tela fica com o resto.
         var camera = HasCameraOverlay ? Volatile.Read(ref _cameraKbps) : 0;
         var limit = Math.Max(1_000, Quality.PerViewerBitrateKbps(target.BitrateKbps + camera, _options.UploadMbps, watching) - camera);
@@ -635,7 +775,7 @@ public sealed partial class HostSession : IAsyncDisposable
         while (!token.IsCancellationRequested)
         {
             try { await Task.Delay(1000, token); } catch (OperationCanceledException) { break; }
-            var streaming = _viewers.Values.Where(v => v.State == ViewerState.Streaming).ToList();
+            var streaming = _viewers.Values.Where(IsWatching).ToList();
             var now = MediaClock.NowUs;
 
             // Controle adaptativo pela pior rede entre os viewers. O FPS que o viewer decodifica é comparado com o que
@@ -657,10 +797,11 @@ public sealed partial class HostSession : IAsyncDisposable
             if (_sender is not null)
             {
                 var total = Interlocked.Exchange(ref _sender.BytesSent, 0);
+                if (_serverSender is { } serverSender) total += Interlocked.Exchange(ref serverSender.BytesSent, 0);
                 sentMbps = total * 8 / 1_000_000.0;
             }
             var encoder = !HasVideo ? $"Opus {_audioProfile.BitrateKbps} kbps" : string.IsNullOrEmpty(_encoderName) ? "—" : $"{Quality.CodecLabel(_codec)} · {_encoderName}";
-            StatisticsUpdated?.Invoke(new HostStatistics(streaming.Count, _encodedFrames.PerSecond(now), _encodedBytes.PerSecond(now) * 8 / 1_000_000.0, sentMbps,
+            StatisticsUpdated?.Invoke(new HostStatistics(streaming.Sum(v => v.IsServer ? v.Audience : 1), _encodedFrames.PerSecond(now), _encodedBytes.PerSecond(now) * 8 / 1_000_000.0, sentMbps,
                 encoder, HasVideo ? _captureBackend : "WASAPI loopback", _target, HasVideo ? _reason : "festa de música", _options.Mode, _audioBytes.PerSecond(now) * 8 / 1000.0,
                 CameraSummary(streaming, now)));
             ViewersChanged?.Invoke();
@@ -682,6 +823,7 @@ public sealed partial class HostSession : IAsyncDisposable
         uint frameId = 0;
         var packets = new List<EncodedPacket>(4);
         long lastEncodeUs = 0;
+        CaptureArea? captureArea = null;
 
         void TearDown()
         {
@@ -696,7 +838,7 @@ public sealed partial class HostSession : IAsyncDisposable
         {
             while (!_cancellation.IsCancellationRequested)
             {
-                var audience = _viewers.Values.Where(v => v.State == ViewerState.Streaming).ToArray();
+                var audience = _viewers.Values.Where(IsWatching).ToArray();
                 if (audience.Length == 0)
                 {
                     if (gpu is not null) { TearDown(); Log.Info("Ninguém assistindo: captura e encoder pausados."); }
@@ -712,7 +854,8 @@ public sealed partial class HostSession : IAsyncDisposable
                         captureTarget = _options.Target;
                         captureFps = target.Fps;
                         gpu = GpuDevice.Create(_options.Monitor?.DeviceName);
-                        capture = CaptureFactory.Create(gpu, captureTarget, _options.Monitor, captureFps);
+                        captureArea = _captureArea;
+                        capture = CaptureFactory.Create(gpu, captureTarget, _options.Monitor, captureFps, captureArea);
                         _captureBackend = capture.Backend;
                         _sourceSize = (capture.Width, capture.Height);
                     }
@@ -724,7 +867,7 @@ public sealed partial class HostSession : IAsyncDisposable
                     }
                     // Qualidade trocada ao vivo: a câmera muda de formato, e a captura da tela foi aberta com um limite
                     // de FPS (ela entrega no máximo isso), então um FPS maior precisa de uma captura nova.
-                    if (_options.Target != captureTarget || target.Fps > captureFps)
+                    if (_options.Target != captureTarget || target.Fps > captureFps || !ReferenceEquals(_captureArea, captureArea))
                     {
                         Log.Info("Qualidade nova pede outra captura: recriando.");
                         TearDown();
@@ -796,7 +939,7 @@ public sealed partial class HostSession : IAsyncDisposable
 
     /// <summary>Quem recebe a câmera: está assistindo e tem uma versão que mostra o quadrinho (1.1.0 ou mais nova).</summary>
     private RemoteViewer[] CameraAudience()
-        => _viewers.Values.Where(v => v.State == ViewerState.Streaming && v.Hello.Supports(StreamModes.FeatureCameraOverlay)).ToArray();
+        => _viewers.Values.Where(v => IsWatching(v) && v.Hello.Supports(StreamModes.FeatureCameraOverlay)).ToArray();
 
     /// <summary>
     /// A segunda faixa de vídeo: a câmera, no mesmo codec da tela e num tamanho de quadrinho (até 720p). Tem device,
@@ -1021,7 +1164,7 @@ public sealed partial class HostSession : IAsyncDisposable
 
     private void UpdateAudioPause()
     {
-        if (_audio is not null) _audio.Paused = !_viewers.Values.Any(v => v.State == ViewerState.Streaming);
+        if (_audio is not null) _audio.Paused = !_viewers.Values.Any(IsWatching);
     }
 
     private void OnAudioPacket(AudioPacket packet)
@@ -1049,8 +1192,8 @@ public sealed partial class HostSession : IAsyncDisposable
         var now = MediaClock.NowUs;
         foreach (var viewer in _viewers.Values)
         {
-            if (viewer.State != ViewerState.Streaming) continue;
-            _sender.Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress);
+            if (!IsWatching(viewer)) continue;
+            SenderFor(viewer).Send(viewer.Cipher, ref viewer.PacketCounter, chunk, viewer.MediaAddress);
             _audioBytes.Add(chunk.Payload.Length + MediaHeader.Size + PacketCipher.TagSize, now);
         }
     }
@@ -1066,6 +1209,7 @@ public sealed partial class HostSession : IAsyncDisposable
         _wake.Set();
         _cameraWake.Set();
         _listener?.Stop();
+        if (_publishLoop is not null) try { await _publishLoop.WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
         if (_announcer is not null) await _announcer.DisposeAsync();
         _audio?.Dispose();
         foreach (var viewer in _viewers.Values) viewer.Dispose();
@@ -1095,9 +1239,10 @@ public sealed partial class HostSession : IAsyncDisposable
             MediaAddress = mediaEndpoint.Serialize();
             Address = address;
             Cipher = new PacketCipher(key, salt);
-            Hello = hello;
+            _hello = hello;
             SpreadFec = hello.Supports(StreamModes.FeatureSpreadFec);
             Remote = hello.Supports(StreamModes.FeatureRemoteControl);
+            SupportsMediaSeek = Remote && hello.Supports(StreamModes.FeatureMediaSeek);
         }
 
         public Guid Id { get; }
@@ -1108,7 +1253,25 @@ public sealed partial class HostSession : IAsyncDisposable
         public SocketAddress MediaAddress { get; }
         public string Address { get; }
         public PacketCipher Cipher { get; }
-        public HelloMessage Hello { get; }
+
+        /// <summary>O Hello de quem assiste. Do servidor, muda quando muda quem assiste por ele (<see cref="AudienceMessage"/>).</summary>
+        public HelloMessage Hello
+        {
+            get => _hello;
+            set => _hello = value;
+        }
+
+        private volatile HelloMessage _hello;
+
+        /// <summary>É o servidor ScreenFlow (1.4.1).</summary>
+        public bool IsServer { get; init; }
+
+        /// <summary>O socket do servidor (null: o socket de mídia da transmissão).</summary>
+        public MediaSender? Sender { get; init; }
+
+        /// <summary>Quantas pessoas assistem pelo servidor, e quem.</summary>
+        public volatile int Audience;
+        public volatile string[] AudienceNames = [];
 
         /// <summary>Entende a paridade espalhada (1.1.1). Versões antigas recebem a paridade de pacotes seguidos.</summary>
         public bool SpreadFec { get; }
@@ -1116,14 +1279,19 @@ public sealed partial class HostSession : IAsyncDisposable
         /// <summary>Tem os controles de quem assiste (1.2.0): recebe e manda as mensagens novas. As versões antigas não entendem.</summary>
         public bool Remote { get; }
 
+        /// <summary>Entende a minutagem da 1.4.0: recebe a resposta de cada comando de mídia.</summary>
+        public bool SupportsMediaSeek { get; }
+
         public RequestLimiter Limiter { get; } = new();
+        public RequestDeduper Requests { get; } = new();
         public ulong PacketCounter;
         public volatile ViewerState State = ViewerState.Authenticating;
         public StatsMessage? LastStats { get; set; }
         public CancellationTokenSource Kicked { get; } = new();
 
         public ViewerInfo Info => new(Id, Name, Address, State,
-            LastStats?.RoundTripMs ?? 0, LastStats?.LossRate ?? 0, (LastStats?.ReceivedKbps ?? 0) / 1000, LastStats?.LatencyMs ?? 0);
+            LastStats?.RoundTripMs ?? 0, LastStats?.LossRate ?? 0, (LastStats?.ReceivedKbps ?? 0) / 1000, LastStats?.LatencyMs ?? 0,
+            IsServer, Audience, AudienceNames);
 
         public async Task SendAsync(ControlMessage message, CancellationToken token)
         {

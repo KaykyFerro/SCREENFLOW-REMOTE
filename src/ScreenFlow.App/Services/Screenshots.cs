@@ -123,6 +123,36 @@ public static class Screenshots
         });
         ThemeManager.Apply(AppTheme.Dark);
 
+        // (1.4.1) Duas das 10 cores, uma no escuro e uma no claro, e a escolha da cor nas Configurações.
+        await Shot("33-tema-violeta.png", async () =>
+        {
+            ThemeManager.Apply(AppTheme.Dark, "violeta");
+            window.Navigate(window.WatchPage);
+            await Go(window, window.OverviewPage);
+        });
+        await Shot("34-tema-laranja-claro.png", async () =>
+        {
+            ThemeManager.Apply(AppTheme.Light, "laranja");
+            window.Navigate(window.OverviewPage);
+            await Go(window, window.TransmitPage, 600);
+        });
+        await Shot("35-escolher-a-cor.png", () =>
+        {
+            ThemeManager.Apply(AppTheme.Dark, "rosa");
+            window.SettingsPage.ShowTab(SettingsTab.General);
+            return Go(window, window.SettingsPage, 600);
+        });
+        ThemeManager.Apply(AppTheme.Dark, null);
+
+        // (1.4.1) A aba do servidor, com este PC como servidor (depois de abrir a tela, que lê as configurações ao abrir).
+        await Shot("36-configuracoes-servidor.png", async () =>
+        {
+            window.Navigate(window.SettingsPage);
+            window.SettingsPage.ShowServerDemo();
+            window.SettingsPage.ShowTab(SettingsTab.Server);
+            await Task.Delay(600);
+        });
+
         // Voz conectada no menu lateral e o chat da rede aberto.
         await Shot("15-chat-da-rede.png", () =>
         {

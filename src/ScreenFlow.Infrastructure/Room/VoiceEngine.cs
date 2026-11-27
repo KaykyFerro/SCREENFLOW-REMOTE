@@ -24,14 +24,17 @@ public sealed class VoiceEngine : IDisposable
     private volatile bool _deafened;
     private bool _disposed;
 
-    public VoiceEngine(IVoiceInput input, float volume, double sensitivity, bool outputEnabled = true)
+    /// <summary>Apertar para falar (1.4.0): com ele ligado, a voz só vai enquanto a tecla está apertada.</summary>
+    public PushToTalk PushToTalk { get; } = new();
+
+    public VoiceEngine(IVoiceInput input, float volume, double sensitivity, bool outputEnabled = true, string? speakerId = null)
     {
         _input = input;
         _encoder = new VoiceEncoder();
         _gate.Sensitivity = sensitivity;
         if (outputEnabled)
         {
-            try { _output = new VoiceOutput(volume); }
+            try { _output = new VoiceOutput(volume, speakerId); }
             catch (Exception exception) { Log.Warn($"Saída da voz indisponível: {exception.Message}"); }
         }
     }
@@ -70,7 +73,7 @@ public sealed class VoiceEngine : IDisposable
     }
 
     /// <summary>Você está falando agora (portão aberto e microfone ligado).</summary>
-    public bool IsSpeaking => !_muted && _gate.IsOpen;
+    public bool IsSpeaking => !_muted && PushToTalk.ShouldSend(_gate.IsOpen, Environment.TickCount64);
 
     /// <summary>Volume do microfone em dBFS (mesmo mudo, para o medidor das configurações).</summary>
     public double InputLevelDb => _gate.LevelDb;
@@ -96,7 +99,7 @@ public sealed class VoiceEngine : IDisposable
         lock (_encodeGate)
         {
             if (_disposed) return;
-            var open = _gate.Process(frame);
+            var open = PushToTalk.ShouldSend(_gate.Process(frame), Environment.TickCount64);
             if (_muted || !open)
             {
                 _previous = [];
