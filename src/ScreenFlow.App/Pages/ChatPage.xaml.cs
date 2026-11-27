@@ -17,8 +17,9 @@ using ScreenFlow.Core.Room;
 namespace ScreenFlow.App.Pages;
 
 /// <summary>
-/// Sala da rede, como um servidor do Discord (1.3.0): canais de texto e de voz à esquerda (com quem está em cada canal
-/// de voz), a conversa do canal aberto no meio e quem está na rede à direita.
+/// O chat, como no Discord: (1.5.0) os servidores na barra da esquerda (a sala da rede e os servidores por rede do
+/// Radmin), os canais de texto e de voz do servidor aberto (1.3.0, com quem está em cada canal de voz), a conversa do
+/// canal aberto no meio e quem está no servidor à direita.
 /// </summary>
 public partial class ChatPage : UserControl, IShellPage
 {
@@ -28,16 +29,21 @@ public partial class ChatPage : UserControl, IShellPage
     private ObservableCollection<ChatRow>? _messages;
     /// <summary>Mostrar quem está na rede: null segue a largura da janela; o botão de pessoas escolhe.</summary>
     private bool? _peopleWanted;
+    /// <summary>(1.5.0) O que estava escrito (e a imagem anexada) em cada servidor, para não mandar no servidor errado.</summary>
+    private readonly Dictionary<RoomServer, (string Text, PreparedImage? Image)> _drafts = [];
+    private RoomServer? _shownServer;
 
     public ChatPage(MainWindow shell)
     {
         _shell = shell;
         InitializeComponent();
         var room = AppServices.Room;
-        TextChannelList.ItemsSource = room.TextChannels;
-        VoiceChannelList.ItemsSource = room.VoiceChannels;
-        PeopleList.ItemsSource = room.People;
+        ServerList.ItemsSource = room.Servers;
+        BindServer();
+        room.ActiveServerChanged += OnActiveServerChanged;
+        room.ServersChanged += OnServersChanged;
         room.CurrentTextChanged += ShowChannel;
+        room.Changed += UpdateState;
         room.Changed += UpdatePeople;
         room.ProfileChanged += UpdatePeople;
         room.ArchiveChanged += UpdateArchive;
@@ -65,14 +71,226 @@ public partial class ChatPage : UserControl, IShellPage
 
     private void UpdateAll()
     {
-        var room = AppServices.Room;
-        var available = room.IsAvailable;
-        ContentGrid.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
-        ErrorPanel.Visibility = available ? Visibility.Collapsed : Visibility.Visible;
-        ErrorText.Text = $"{room.Error} Feche o programa que está usando a porta UDP {AppServices.Settings.Current.DiscoveryPort} (ou mude a porta de descoberta em Configurações) e abra o ScreenFlow de novo.";
+        UpdateState();
         UpdateColumns();
         UpdatePeople();
         UpdateArchive();
+    }
+
+    // ───────────────────────── Servidores (1.5.0) ─────────────────────────
+
+    /// <summary>As listas da tela são as do servidor aberto.</summary>
+    private void BindServer()
+    {
+        var room = AppServices.Room;
+        TextChannelList.ItemsSource = room.TextChannels;
+        VoiceChannelList.ItemsSource = room.VoiceChannels;
+        PeopleList.ItemsSource = room.People;
+        _shownServer = room.Active;
+    }
+
+    /// <summary>Trocou o servidor aberto: as listas e a caixa de escrever passam a ser as dele.</summary>
+    private void OnActiveServerChanged()
+    {
+        var room = AppServices.Room;
+        if (_shownServer is { } previous)
+        {
+            if (Composer.Text.Length > 0 || _attachment is not null) _drafts[previous] = (Composer.Text, _attachment);
+            else _drafts.Remove(previous);
+        }
+        BindServer();
+        if (_drafts.Remove(room.Active, out var draft))
+        {
+            Composer.Text = draft.Text;
+            Composer.CaretIndex = Composer.Text.Length;
+            SetAttachment(draft.Image);
+        }
+        else
+        {
+            Composer.Clear();
+            SetAttachment(null);
+        }
+        _stickToBottom = true;
+        UpdateAll();
+        if (room.IsAvailable && IsVisible && !AppServices.DemoMode) Composer.Focus();
+    }
+
+    private void OnServersChanged()
+    {
+        var servers = AppServices.Room.AllServers;
+        foreach (var gone in _drafts.Keys.Where(s => !servers.Contains(s)).ToList()) _drafts.Remove(gone);
+        UpdateState();
+    }
+
+    /// <summary>O cabeçalho do servidor aberto e, quando ele não está funcionando, o aviso com o que fazer.</summary>
+    private void UpdateState()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(UpdateState);
+            return;
+        }
+        if (!IsInitialized) return;
+        var room = AppServices.Room;
+        var server = room.Active;
+        var available = room.IsAvailable;
+        ContentGrid.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
+        ErrorPanel.Visibility = available ? Visibility.Collapsed : Visibility.Visible;
+        UpdateServerHeader(server);
+        if (available) return;
+        var port = AppServices.Settings.Current.DiscoveryPort;
+        if (server.Space is { } space)
+        {
+            var connection = server.Connection;
+            var byNetwork = space.KeySource == SpaceKeySource.Network;
+            ErrorTitle.Text = connection switch
+            {
+                ServerConnection.Disconnected => $"{server.DisplayName} está desconectado",
+                ServerConnection.NeedsKey => $"A chave de {server.DisplayName} não abriu neste PC",
+                _ => $"{server.DisplayName} não abriu",
+            };
+            ErrorText.Text = connection switch
+            {
+                ServerConnection.Disconnected => "Desconectado, você não aparece para ninguém do servidor e não recebe nada dele. A conversa guardada neste PC continua aqui para quando conectar de novo.",
+                ServerConnection.NeedsKey => byNetwork
+                    ? "A chave do servidor fica protegida pela sua conta do Windows e não abriu aqui (outra conta ou outro PC). Digite a senha da rede de novo para abrir."
+                    : "A chave do servidor fica protegida pela sua conta do Windows e não abriu aqui (outra conta ou outro PC). Cole o convite do servidor de novo para abrir.",
+                _ => $"{server.Error} Feche o programa que está usando a porta UDP {port} (ou mude a porta de descoberta em Configurações) e abra o ScreenFlow de novo.",
+            };
+            ErrorConnectButton.Visibility = connection == ServerConnection.Disconnected ? Visibility.Visible : Visibility.Collapsed;
+            ErrorEditButton.Content = connection != ServerConnection.NeedsKey ? "Editar o servidor"
+                : byNetwork ? "Digitar a senha de novo" : "Colar o convite de novo";
+            ErrorActions.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            ErrorTitle.Text = "A sala da rede está desligada";
+            ErrorText.Text = $"{room.Error} Feche o programa que está usando a porta UDP {port} (ou mude a porta de descoberta em Configurações) e abra o ScreenFlow de novo.";
+            ErrorActions.Visibility = Visibility.Collapsed;
+        }
+    }
+
+    private void UpdateServerHeader(RoomServer server)
+    {
+        var space = server.IsSpace;
+        ServerTitle.Text = server.DisplayName;
+        NetworkTile.Visibility = space ? Visibility.Collapsed : Visibility.Visible;
+        ServerTile.Visibility = space ? Visibility.Visible : Visibility.Collapsed;
+        ServerMenuButton.Visibility = space ? Visibility.Visible : Visibility.Collapsed;
+        if (space)
+        {
+            var colors = server.Row.Colors;
+            ServerTile.Background = colors.Background;
+            ServerTileText.Foreground = colors.Foreground;
+            ServerTileText.Text = server.Row.Initials;
+        }
+        PeopleTitle.Text = space ? "No servidor" : "Na rede";
+        PeopleToggle.ToolTip = space ? "Mostrar ou esconder quem está no servidor" : "Mostrar ou esconder quem está na rede";
+        PeerHint.Text = space ? "Alguém do servidor não aparece? Adicione pelo IP (fica guardado no servidor)." : "Não está vendo alguém? Adicione pelo IP do Radmin.";
+    }
+
+    private void Server_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is ServerRailRow row) AppServices.Room.ShowServer(row.Server);
+    }
+
+    private void Server_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.DataContext is not ServerRailRow row) return;
+        e.Handled = true;
+        OpenServerMenu(element, row.Server);
+    }
+
+    private void ServerMenu_Click(object sender, RoutedEventArgs e) => OpenServerMenu((FrameworkElement)sender, AppServices.Room.Active);
+
+    /// <summary>O menu de um servidor: abrir, mudar o nome, editar, convite, conectar, mover e remover.</summary>
+    private void OpenServerMenu(FrameworkElement target, RoomServer server)
+    {
+        var room = AppServices.Room;
+        var menu = new ContextMenu { PlacementTarget = target };
+        if (server != room.Active) menu.Items.Add(MenuItemFor("Abrir", "", () => room.ShowServer(server)));
+        if (server.Unread > 0) menu.Items.Add(MenuItemFor("Marcar tudo como lido", "", server.MarkAllRead));
+        if (server.Space is not { } space)
+        {
+            menu.Items.Add(MenuItemFor("Configurações da rede", "", () => _shell.OpenSettings(SettingsTab.Network)));
+            menu.Items.Add(MenuItemFor("Adicionar um servidor…", "", () => AddServer()));
+            menu.IsOpen = true;
+            return;
+        }
+        if (menu.Items.Count > 0) menu.Items.Add(new Separator());
+        menu.Items.Add(MenuItemFor("Mudar o nome…", "", () => RenameServer(server)));
+        menu.Items.Add(MenuItemFor("Editar a rede e a conexão…", "", () => EditServer(server)));
+        if (space.Secret is not null) menu.Items.Add(MenuItemFor("Copiar o convite…", "", () => ServerDialogs.ShowInvite(Window.GetWindow(this), server)));
+        menu.Items.Add(space.Connected
+            ? MenuItemFor("Desconectar", "", () => _ = SetConnectedAsync(server, false))
+            : MenuItemFor("Conectar", "", () => _ = SetConnectedAsync(server, true)));
+        var all = room.AllServers;
+        var spaces = all.Count - 1;
+        var index = IndexOf(all, server) - 1;
+        if (spaces > 1)
+        {
+            menu.Items.Add(new Separator());
+            if (index > 0) menu.Items.Add(MenuItemFor("Mover para cima", "", () => room.MoveServer(server, index - 1)));
+            if (index < spaces - 1) menu.Items.Add(MenuItemFor("Mover para baixo", "", () => room.MoveServer(server, index + 1)));
+        }
+        menu.Items.Add(new Separator());
+        menu.Items.Add(MenuItemFor("Remover o servidor…", "", () => _ = RemoveServerAsync(server), danger: true));
+        menu.IsOpen = true;
+    }
+
+    private static int IndexOf(IReadOnlyList<RoomServer> servers, RoomServer server)
+    {
+        for (var i = 0; i < servers.Count; i++)
+            if (servers[i] == server) return i;
+        return -1;
+    }
+
+    private void AddServer_Click(object sender, RoutedEventArgs e) => AddServer();
+
+    private void AddServer(ServerDialogs.AddMode mode = ServerDialogs.AddMode.Network)
+    {
+        if (ServerDialogs.Add(Window.GetWindow(this), mode, out var chosen) is not { } server) return;
+        if (chosen == ServerDialogs.AddMode.Create) ServerDialogs.ShowInvite(Window.GetWindow(this), server, created: true);
+        else _shell.Toast($"Servidor {server.DisplayName} adicionado. Quem estiver nele aparece em alguns segundos.", ToastKind.Success);
+    }
+
+    private void RenameServer(RoomServer server)
+    {
+        if (ServerDialogs.AskName(Window.GetWindow(this), server) is not { } name) return;
+        if (AppServices.Room.RenameServer(server, name) is { } error) _shell.Toast(error, ToastKind.Warning);
+    }
+
+    private void EditServer(RoomServer server)
+    {
+        if (ServerDialogs.Edit(Window.GetWindow(this), server)) _shell.Toast("Servidor salvo.", ToastKind.Success);
+    }
+
+    private async Task SetConnectedAsync(RoomServer server, bool connected)
+    {
+        await AppServices.Room.SetServerConnectedAsync(server, connected);
+        UpdateAll();
+    }
+
+    private async Task RemoveServerAsync(RoomServer server)
+    {
+        if (!ConfirmDialog.Ask(Window.GetWindow(this), $"Remover {server.DisplayName} deste PC?",
+                "Você sai do servidor e a conversa guardada dele neste PC é apagada. Quem está nele continua com tudo; para voltar, adicione de novo (a mesma rede e senha, ou o convite).",
+                "Remover", danger: true))
+            return;
+        await AppServices.Room.RemoveServerAsync(server);
+        _shell.Toast($"{server.DisplayName} saiu da sua lista.", ToastKind.Success);
+    }
+
+    private void ErrorConnect_Click(object sender, RoutedEventArgs e) => _ = SetConnectedAsync(AppServices.Room.Active, true);
+
+    private void ErrorEdit_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Room.Active.IsSpace) EditServer(AppServices.Room.Active);
+    }
+
+    private void ErrorRemove_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Room.Active.IsSpace) _ = RemoveServerAsync(AppServices.Room.Active);
     }
 
     /// <summary>
@@ -106,16 +324,25 @@ public partial class ChatPage : UserControl, IShellPage
             return;
         }
         var room = AppServices.Room;
+        var server = room.Active;
         var others = room.People.Count;
-        OnlineText.Text = $"{others + 1} online";
+        var online = Math.Max(1, server.OnlineCount);
+        OnlineText.Text = $"{online} online";
         NoPeople.Visibility = others == 0 ? Visibility.Visible : Visibility.Collapsed;
+        NoPeopleText.Text = !server.IsSpace
+            ? "Ninguém da rede apareceu ainda. Quem abrir o ScreenFlow 1.1 ou mais novo na mesma rede do Radmin aparece aqui sozinho."
+            : server.Connection == ServerConnection.NoNetwork
+                ? server.Space?.Adapter is null
+                    ? "O Radmin VPN está desligado neste PC. Ligue e entre na rede para achar quem está no servidor."
+                    : "A rede escolhida para este servidor está desligada. Ligue ou escolha outra em Editar a rede e a conexão."
+                : "Ninguém do servidor apareceu ainda. Quem adicionar este servidor (a mesma rede e senha do Radmin, ou o convite) aparece aqui sozinho.";
         var voice = room.VoiceCount;
-        RoomInfo.Text = (others, voice) switch
+        RoomInfo.Text = (online, voice) switch
         {
-            (0, 0) => "Só você online",
-            (_, 0) => $"{others + 1} online",
-            (_, 1) => $"{others + 1} online · 1 na voz",
-            _ => $"{others + 1} online · {voice} na voz",
+            (1, 0) => "Só você online",
+            (_, 0) => $"{online} online",
+            (_, 1) => $"{online} online · 1 na voz",
+            _ => $"{online} online · {voice} na voz",
         };
 
         SelfAvatar.Colors = AvatarColors.For(room.SelfId);
@@ -128,6 +355,7 @@ public partial class ChatPage : UserControl, IShellPage
         SelfStatus.Text = status;
         ChannelTopic.Text = room.CurrentText.Topic;
         ChannelTopic.ToolTip = room.CurrentText.Topic;
+        ChannelTitle.Text = room.CurrentText.DisplayName;
         UpdateComposerHint();
     }
 
@@ -142,14 +370,19 @@ public partial class ChatPage : UserControl, IShellPage
         _messages.CollectionChanged += OnMessagesChanged;
         MessageList.ItemsSource = _messages;
         var channel = room.CurrentText;
-        ChannelTitle.Text = channel.Name;
+        var space = room.Active.IsSpace;
+        ChannelTitle.Text = channel.DisplayName;
         ChannelTopic.Text = channel.Topic;
         ChannelTopic.ToolTip = channel.Topic;
-        Composer.Tag = $"Conversar em #{channel.Name}";
-        EmptyTitle.Text = channel.IsDefaultText ? "Ninguém escreveu nada ainda" : $"Este é o começo do #{channel.Name}";
-        EmptyText.Text = channel.IsDefaultText
-            ? "Mande um oi: a mensagem vai para todo mundo que está com o ScreenFlow aberto na sua rede."
-            : "Mande a primeira mensagem do canal. Quem está na sala vê o canal na lista da esquerda.";
+        Composer.Tag = $"Conversar em #{channel.DisplayName}";
+        EmptyTitle.Text = channel.IsDefaultText ? "Ninguém escreveu nada ainda" : $"Este é o começo do #{channel.DisplayName}";
+        EmptyText.Text = (channel.IsDefaultText, space) switch
+        {
+            (true, false) => "Mande um oi: a mensagem vai para todo mundo que está com o ScreenFlow aberto na sua rede.",
+            (true, true) => "Mande um oi: a mensagem vai só para quem está neste servidor, cifrada com a chave dele.",
+            (false, false) => "Mande a primeira mensagem do canal. Quem está na sala vê o canal na lista da esquerda.",
+            _ => "Mande a primeira mensagem do canal. Todo mundo do servidor vê o canal na lista da esquerda.",
+        };
         NoMessages.Visibility = _messages.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         JumpButton.Visibility = Visibility.Collapsed;
         UpdateComposerHint();
@@ -173,8 +406,8 @@ public partial class ChatPage : UserControl, IShellPage
         if (channel.CanEdit)
         {
             menu.Items.Add(new Separator());
-            menu.Items.Add(MenuItemFor("Mudar o nome", "", () => RenameChannel(channel.Channel)));
-            menu.Items.Add(MenuItemFor("Apagar o canal", "", () => DeleteChannel(channel.Channel), danger: true));
+            menu.Items.Add(MenuItemFor("Mudar o nome", "", () => RenameChannel(channel.Channel, channel.DisplayName)));
+            if (channel.CanDelete) menu.Items.Add(MenuItemFor("Apagar o canal", "", () => DeleteChannel(channel.Channel, channel.DisplayName), danger: true));
         }
         menu.IsOpen = true;
     }
@@ -196,8 +429,8 @@ public partial class ChatPage : UserControl, IShellPage
         if (channel.CanEdit)
         {
             menu.Items.Add(new Separator());
-            menu.Items.Add(MenuItemFor("Mudar o nome", "", () => RenameChannel(channel.Channel)));
-            menu.Items.Add(MenuItemFor("Apagar o canal", "", () => DeleteChannel(channel.Channel), danger: true));
+            menu.Items.Add(MenuItemFor("Mudar o nome", "", () => RenameChannel(channel.Channel, channel.DisplayName)));
+            if (channel.CanDelete) menu.Items.Add(MenuItemFor("Apagar o canal", "", () => DeleteChannel(channel.Channel, channel.DisplayName), danger: true));
         }
         menu.IsOpen = true;
     }
@@ -221,7 +454,8 @@ public partial class ChatPage : UserControl, IShellPage
 
     private void CreateChannel(RoomChannelKind kind)
     {
-        if (ChannelDialog.Ask(Window.GetWindow(this), kind, server: AppServices.Room.ViaServer) is not { } name) return;
+        var room = AppServices.Room;
+        if (ChannelDialog.Ask(Window.GetWindow(this), kind, server: room.ViaServer || room.Active.IsSpace) is not { } name) return;
         if (AppServices.Room.CreateChannel(kind, name) is { } error)
         {
             _shell.Toast(error, ToastKind.Warning);
@@ -231,22 +465,23 @@ public partial class ChatPage : UserControl, IShellPage
         else if (!AppServices.DemoMode) Composer.Focus();
     }
 
-    private void DeleteChannel(RoomChannel channel)
+    private void DeleteChannel(RoomChannel channel, string displayName)
     {
-        var name = channel.Kind == RoomChannelKind.Text ? $"#{channel.Name}" : channel.Name;
-        var server = AppServices.Room.ViaServer;
-        if (!ConfirmDialog.Ask(Window.GetWindow(this), $"Apagar o canal {name}?",
-                server
-                    ? "Ele sai do servidor e some da lista de todo mundo. Quem já conversou nele continua vendo as mensagens até fechar o ScreenFlow."
-                    : "Ele some da lista de todo mundo. Quem já conversou nele continua vendo as mensagens até fechar o ScreenFlow.", "Apagar", danger: true))
-            return;
-        if (AppServices.Room.DeleteChannel(channel) is { } error) _shell.Toast(error, ToastKind.Warning);
+        var name = channel.Kind == RoomChannelKind.Text ? $"#{displayName}" : displayName;
+        var room = AppServices.Room;
+        var message = room.Active.IsSpace
+            ? "Ele some da lista de todo mundo do servidor, e a conversa dele deixa de aparecer."
+            : room.ViaServer
+                ? "Ele sai do servidor e some da lista de todo mundo. Quem já conversou nele continua vendo as mensagens até fechar o ScreenFlow."
+                : "Ele some da lista de todo mundo. Quem já conversou nele continua vendo as mensagens até fechar o ScreenFlow.";
+        if (!ConfirmDialog.Ask(Window.GetWindow(this), $"Apagar o canal {name}?", message, "Apagar", danger: true)) return;
+        if (room.DeleteChannel(channel) is { } error) _shell.Toast(error, ToastKind.Warning);
     }
 
-    /// <summary>(1.4.1) Muda o nome de um canal seu (no servidor, de qualquer canal do servidor).</summary>
-    private void RenameChannel(RoomChannel channel)
+    /// <summary>(1.4.1) Muda o nome de um canal seu (no servidor, de qualquer canal do servidor; 1.5.0: num servidor por rede, de qualquer canal).</summary>
+    private void RenameChannel(RoomChannel channel, string displayName)
     {
-        if (ChannelDialog.Ask(Window.GetWindow(this), channel.Kind, channel) is not { } name) return;
+        if (ChannelDialog.Ask(Window.GetWindow(this), channel.Kind, channel, currentName: displayName) is not { } name) return;
         if (AppServices.Room.RenameChannel(channel, name) is { } error) _shell.Toast(error, ToastKind.Warning);
     }
 
@@ -266,7 +501,7 @@ public partial class ChatPage : UserControl, IShellPage
         var room = AppServices.Room;
         var folder = room.ArchiveFolder;
         var problem = room.ArchiveProblem;
-        ArchivePill.Visibility = folder is not null || problem is not null ? Visibility.Visible : Visibility.Collapsed;
+        ArchivePill.Visibility = !room.Active.IsSpace && (folder is not null || problem is not null) ? Visibility.Visible : Visibility.Collapsed;
         ArchiveText.Text = problem is not null ? "Chat não guardado"
             : AppServices.Settings.Current.ChatArchiveFolder is null ? "Guardado no Google Drive" : "Guardado na pasta";
         ArchivePill.ToolTip = problem ?? $"As conversas ficam guardadas em {folder}. Clique para abrir a pasta.";
@@ -583,7 +818,9 @@ public partial class ChatPage : UserControl, IShellPage
             _shell.Toast(error, ToastKind.Warning);
             return;
         }
-        _shell.Toast($"Chamando {text}. Se o ScreenFlow estiver aberto lá, a pessoa aparece na lista em alguns segundos.", ToastKind.Success);
+        _shell.Toast(AppServices.Room.Active.IsSpace
+            ? $"Chamando {text}. Se a pessoa estiver no servidor, ela aparece em alguns segundos (o IP fica guardado no servidor)."
+            : $"Chamando {text}. Se o ScreenFlow estiver aberto lá, a pessoa aparece na lista em alguns segundos.", ToastKind.Success);
         PeerBox.Clear();
     }
 }

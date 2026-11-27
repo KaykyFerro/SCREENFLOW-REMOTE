@@ -22,8 +22,9 @@ namespace ScreenFlow.App.Services;
 /// ScreenFlow.exe --autoteste: abre uma festa de música de verdade no 127.0.0.1 (com um tom de teste no lugar do som do
 /// PC), conecta um viewer nela e confere se o áudio chega e é decodificado. Depois abre duas salas da rede no mesmo PC
 /// e confere presença, chat e voz entre elas. Depois (1.4.1) faz o mesmo pelo servidor ScreenFlow: um servidor dentro do
-/// app, a festa publicada nele e um viewer assistindo por ele, e duas salas conversando pelo servidor. Por fim, se o PC
-/// tiver saída de som, confere a separação do som do PC por app. Usa portas próprias (47900 a 47905 e 47910 a 47922).
+/// app, a festa publicada nele e um viewer assistindo por ele, e duas salas conversando pelo servidor. Depois (1.5.0)
+/// confere os servidores por rede do Radmin (isolamento entre redes na mesma porta). Por fim, se o PC tiver saída de som,
+/// confere a separação do som do PC por app. Usa portas próprias (47900 a 47905 e 47910 a 47922).
 /// </summary>
 public static class SelfTest
 {
@@ -31,6 +32,7 @@ public static class SelfTest
     private const int RoomPortA = 47910, RoomPortB = 47911, RoomPortC = 47912;
     private const int ServerHostMediaPort = 47903, ServerHostControlPort = 47904, ServerHostDiscoveryPort = 47905;
     private const int ServerRoomA = 47913, ServerRoomB = 47914;
+    private const int SpaceHubA = 47915, SpaceHubB = 47916;
     private const int ServerControlPort = 47920, ServerMediaPort = 47921, ServerRoomPort = 47922;
 
     public static async Task<(bool Ok, string Report)> RunAsync()
@@ -102,9 +104,10 @@ public static class SelfTest
         var followOk = await FollowHostTestAsync(Line);
         var roomOk = await RoomTestAsync(Line);
         var serverOk = await ServerTestAsync(Line);
+        var spacesOk = await SpacesTestAsync(Line);
         var soundOk = await PcSoundTestAsync(Line);
         var cropOk = CaptureCropTest(Line);
-        var all = ok && followOk && roomOk && serverOk && soundOk && cropOk;
+        var all = ok && followOk && roomOk && serverOk && spacesOk && soundOk && cropOk;
         Line(all ? "PASSOU: tudo certo." : "FALHOU: veja as linhas acima.");
         return (all, report.ToString());
     }
@@ -847,6 +850,145 @@ public static class SelfTest
         {
             await a.DisposeAsync();
             await b.DisposeAsync();
+        }
+    }
+
+    /// <summary>
+    /// (1.5.0) Servidores por rede do Radmin, com dois PCs de mentira que dividem a porta da sala como o app: cada um com a
+    /// sala da rede e o servidor da mesma rede ("rede-autoteste", mesma senha); A tem ainda o servidor de outra rede e B o
+    /// da mesma rede com outra senha. Confere que A e B se veem no servidor e na sala da rede, que os servidores de outra
+    /// chave não veem ninguém, que o chat do servidor só chega no servidor (e o da sala só na sala), que um canal criado
+    /// em A aparece em B com a conversa dele e que a voz do servidor chega. (A fofoca de quem está no servidor só vale
+    /// para IPs das redes do PC, não para o 127.0.0.1: ela fica para o teste em PCs de verdade.)
+    /// </summary>
+    private static async Task<bool> SpacesTestAsync(Action<string> line)
+    {
+        line("Servidores por rede: dois PCs de mentira no 127.0.0.1, cada um dividindo a sua porta da sala.");
+        var selfA = Guid.NewGuid();
+        var selfB = Guid.NewGuid();
+        using var hubA = new RoomHub(SpaceHubA);
+        using var hubB = new RoomHub(SpaceHubB);
+        var rooms = new List<NetworkRoom>();
+        NetworkRoom Room(Guid self, string name, RoomHub hub, byte[]? key)
+        {
+            var room = new NetworkRoom(self, hub.Port, new RoomLocalState(name), hub)
+            {
+                BroadcastTargets = () => [],
+                OutputEnabled = false,
+                SpaceChannels = key is null ? null : new SpaceChannelTable(),
+            };
+            if (key is not null) room.UseSpaceKey(key);
+            rooms.Add(room);
+            return room;
+        }
+        try
+        {
+            hubA.Start();
+            hubB.Start();
+            if (!hubA.IsRunning || !hubB.IsRunning)
+            {
+                line($"FALHOU: a porta da sala não abriu ({hubA.Error ?? hubB.Error}).");
+                return false;
+            }
+            var same = SpaceKeys.FromNetwork("rede-autoteste", "senha do autoteste");
+            var openA = Room(selfA, "Autoteste A", hubA, null);
+            var openB = Room(selfB, "Autoteste B", hubB, null);
+            var spaceA = Room(selfA, "Autoteste A", hubA, same);
+            var spaceB = Room(selfB, "Autoteste B", hubB, same);
+            var otherA = Room(selfA, "Autoteste A", hubA, SpaceKeys.FromNetwork("outra-rede", "senha do autoteste"));
+            var otherB = Room(selfB, "Autoteste B", hubB, SpaceKeys.FromNetwork("rede-autoteste", "outra senha"));
+            foreach (var room in rooms)
+            {
+                room.Start();
+                if (!room.IsRunning)
+                {
+                    line($"FALHOU: uma sala não abriu na porta dividida ({room.Error}).");
+                    return false;
+                }
+                room.AddManualPeer(IPAddress.Loopback, room.Port == SpaceHubA ? SpaceHubB : SpaceHubA);
+            }
+
+            var metOk = await WaitAsync(() => spaceA.Peers.Any(p => p.Id == selfB) && spaceB.Peers.Any(p => p.Id == selfA)
+                && openA.Peers.Any(p => p.Id == selfB) && openB.Peers.Any(p => p.Id == selfA), 10);
+            if (!metOk)
+                line($"FALHOU: A e B não se acharam (servidor: A vê {spaceA.Peers.Count}, B vê {spaceB.Peers.Count}; sala da rede: A vê {openA.Peers.Count}, B vê {openB.Peers.Count}).");
+            await Task.Delay(2500);
+            var isolatedOk = otherA.Peers.Count == 0 && otherB.Peers.Count == 0 && spaceA.Peers.Count == 1 && spaceB.Peers.Count == 1
+                && openA.Peers.Count == 1 && openB.Peers.Count == 1;
+            if (!isolatedOk)
+                line($"FALHOU: as redes se misturaram (outra rede em A vê {otherA.Peers.Count}, outra senha em B vê {otherB.Peers.Count}, servidor em A vê {spaceA.Peers.Count}, sala em A vê {openA.Peers.Count}).");
+
+            // O chat do servidor só chega no servidor; o da sala da rede só na sala da rede.
+            const string inSpaceText = "Só no servidor da rede-autoteste";
+            const string inOpenText = "Só na sala da rede";
+            var spaceGot = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var openGot = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var leaks = 0;
+            spaceB.MessageReceived += message =>
+            {
+                if (message.AuthorId != selfA) return;
+                if (message.Text == inSpaceText) spaceGot.TrySetResult(true);
+                if (message.Text == inOpenText) Interlocked.Increment(ref leaks);
+            };
+            openB.MessageReceived += message =>
+            {
+                if (message.AuthorId != selfA) return;
+                if (message.Text == inOpenText) openGot.TrySetResult(true);
+                if (message.Text == inSpaceText) Interlocked.Increment(ref leaks);
+            };
+            otherB.MessageReceived += message =>
+            {
+                if (message.AuthorId == selfA) Interlocked.Increment(ref leaks);
+            };
+            spaceA.SendChat(inSpaceText);
+            openA.SendChat(inOpenText);
+            await Task.WhenAny(Task.WhenAll(spaceGot.Task, openGot.Task), Task.Delay(5000));
+            var chatOk = spaceGot.Task.IsCompletedSuccessfully && openGot.Task.IsCompletedSuccessfully;
+            await Task.Delay(1000);
+            var leakOk = Volatile.Read(ref leaks) == 0;
+            if (!chatOk) line($"FALHOU: o chat não chegou (no servidor: {spaceGot.Task.IsCompletedSuccessfully}, na sala da rede: {openGot.Task.IsCompletedSuccessfully}).");
+            if (!leakOk) line($"FALHOU: {leaks} mensagem(ns) chegaram onde não deviam.");
+
+            // Um canal criado em A aparece em B (com o id, o nome e a conversa).
+            var created = spaceA.SpaceChannels!.Create(RoomChannelKind.Text, "estratégia", selfA, DateTimeOffset.UtcNow, out var problem);
+            if (created is not null) spaceA.PublishChannels([created]);
+            var tableOk = created is not null && await WaitAsync(() => spaceB.SpaceChannels!.Find(RoomChannelKind.Text, created.Id) is { Deleted: false, Name: "estratégia" }, 6);
+            if (!tableOk) line($"FALHOU: o canal criado em A não apareceu em B ({problem ?? "não chegou"}).");
+            var inChannel = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            spaceB.MessageReceived += message =>
+            {
+                if (message.AuthorId == selfA && message.Text == "No canal novo") inChannel.TrySetResult(message.ChannelName);
+            };
+            if (created is not null) spaceA.SendChat("No canal novo", channel: created.Id);
+            var channelOk = created is not null && await Task.WhenAny(inChannel.Task, Task.Delay(5000)) == inChannel.Task && inChannel.Task.Result == created.Id;
+            if (!channelOk) line("FALHOU: a mensagem do canal novo não chegou no canal certo.");
+
+            // A voz do servidor, lacrada com a chave dele.
+            spaceA.JoinVoice(new ToneVoiceInput());
+            spaceB.JoinVoice(new ToneVoiceInput());
+            var voiceOk = await WaitAsync(() => spaceA.Voice?.FramesDecoded > 50 && spaceB.Voice?.FramesDecoded > 50, 10);
+            if (!voiceOk) line($"FALHOU: a voz do servidor não chegou (A tocou {spaceA.Voice?.FramesDecoded ?? 0} quadros, B tocou {spaceB.Voice?.FramesDecoded ?? 0}).");
+            var quietOk = openB.Voice is null && otherB.Voice is null;
+            if (!quietOk) line("FALHOU: a voz abriu numa sala que não entrou nela.");
+            await spaceA.LeaveVoiceAsync();
+            await spaceB.LeaveVoiceAsync();
+
+            var ok = metOk && isolatedOk && chatOk && leakOk && tableOk && channelOk && voiceOk && quietOk;
+            line(ok
+                ? $"PASSOU: na mesma porta, A e B se viram no servidor e na sala da rede, as outras chaves ficaram sozinhas, o chat de cada um ficou no seu lugar, o canal #estratégia de A chegou em B e a voz do servidor tocou ({spaceB.Voice?.FramesDecoded ?? 0} quadros em B)."
+                : "FALHOU: os servidores por rede não funcionaram como deveriam.");
+            return ok;
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Autoteste dos servidores falhou", exception);
+            line($"FALHOU com erro nos servidores: {exception.GetType().Name}: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            foreach (var room in rooms) await room.DisposeAsync();
+            line("Servidores fechados.");
         }
     }
 

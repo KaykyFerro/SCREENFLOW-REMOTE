@@ -459,8 +459,15 @@ public partial class MainWindow : Window
 
     // ───────────────────────── Rede e status ─────────────────────────
 
-    private void OnNetworkChanged(object? sender, EventArgs e) => Dispatcher.BeginInvoke(RefreshNetworkStatus);
-    private void OnNetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e) => Dispatcher.BeginInvoke(RefreshNetworkStatus);
+    private void OnNetworkChanged(object? sender, EventArgs e) => Dispatcher.BeginInvoke(AfterNetworkChange);
+    private void OnNetworkAvailabilityChanged(object? sender, NetworkAvailabilityEventArgs e) => Dispatcher.BeginInvoke(AfterNetworkChange);
+
+    /// <summary>A rede mudou: a linha da rede se atualiza e (1.5.0) os servidores chamam todo mundo de novo.</summary>
+    private void AfterNetworkChange()
+    {
+        RefreshNetworkStatus();
+        AppServices.Room.OnNetworkChanged();
+    }
 
     public async void RefreshNetworkStatus()
     {
@@ -895,17 +902,13 @@ public partial class MainWindow : Window
 
     private void OpenChat_Click(object sender, RoutedEventArgs e) => Navigate(ChatPage);
 
-    /// <summary>Abre a Sala da rede num canal de texto (o da mensagem que chegou).</summary>
-    public void OpenChannel(string? channel)
+    /// <summary>Abre o chat num servidor (null: a sala da rede) e num canal de texto (o da mensagem que chegou).</summary>
+    public void OpenChannel(Guid? server, string? channel)
     {
-        AppServices.Room.SelectText(channel);
+        AppServices.Room.OpenChannel(server, channel);
         Navigate(ChatPage);
     }
 
-    /// <summary>
-    /// Mensagem nova com a sala fechada: aviso rápido na janela, ou notificação do Windows com o app escondido. Com a sala
-    /// aberta, a bolinha do canal já avisa.
-    /// </summary>
     // ───────────────────────── Mixer rápido (1.5.0) ─────────────────────────
 
     private void MixerButton_Click(object sender, RoutedEventArgs e)
@@ -921,6 +924,10 @@ public partial class MainWindow : Window
         OpenSettings(SettingsTab.Voice);
     }
 
+    /// <summary>
+    /// Mensagem nova com a sala fechada: aviso rápido na janela, ou notificação do Windows com o app escondido. Com a sala
+    /// aberta, a bolinha do canal já avisa.
+    /// </summary>
     private void OnRoomMessage(ChatRow row)
     {
         if (AppServices.Room.IsChatInFront?.Invoke() == true) return;
@@ -934,18 +941,27 @@ public partial class MainWindow : Window
         var preview = row.HasImage
             ? (row.HasText ? $"📷 {Preview(row.Text, 100)}" : "📷 mandou uma imagem")
             : Preview(row.Text, 110);
-        var where = RoomChannels.IsDefaultText(row.ChannelName) ? null : $"#{row.ChannelName}";
+        // (1.5.0) Num servidor por rede, o aviso diz de qual servidor é (e o canal pelo nome que aparece).
+        var channelName = RoomChannels.IsDefaultText(row.ChannelName) ? null : $"#{(row.ChannelDisplay is { Length: > 0 } shown ? shown : row.ChannelName)}";
+        var where = (channelName, row.ServerName) switch
+        {
+            (null, null) => null,
+            ({ } name, null) => name,
+            (null, { } server) => server,
+            ({ } name, { } server) => $"{name} · {server}",
+        };
         var channel = row.ChannelName;
+        var serverId = row.ServerId;
         if (IsInBackground)
         {
             if (now - _lastChatBalloon < TimeSpan.FromSeconds(20)) return;
             _lastChatBalloon = now;
-            TrayNotify(where is null ? $"{row.Author} na sala da rede" : $"{row.Author} em {where}", preview, () => OpenChannel(channel));
+            TrayNotify(where is null ? $"{row.Author} na sala da rede" : $"{row.Author} em {where}", preview, () => OpenChannel(serverId, channel));
             return;
         }
         if (now - _lastChatToast < TimeSpan.FromSeconds(4)) return;
         _lastChatToast = now;
-        Toast(where is null ? $"{row.Author}: {preview}" : $"{row.Author} em {where}: {preview}", ToastKind.Info, "Responder", () => OpenChannel(channel));
+        Toast(where is null ? $"{row.Author}: {preview}" : $"{row.Author} em {where}: {preview}", ToastKind.Info, "Responder", () => OpenChannel(serverId, channel));
     }
 
     /// <summary>O chat guardado não conseguiu gravar na pasta (o Drive fechou, a pasta sumiu): avisa uma vez por problema.</summary>

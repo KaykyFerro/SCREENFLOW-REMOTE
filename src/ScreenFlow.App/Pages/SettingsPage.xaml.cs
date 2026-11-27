@@ -927,7 +927,7 @@ public partial class SettingsPage : UserControl, IShellPage
             FillPeople(PrivatePendingList, pending.Select(p => (p.Key, p.Value)), "Aprovar", (id, _) => room.ApprovePrivateMember(id));
             var approvedOnly = AppServices.Settings.Current.PrivateRoomApprovedOnly;
             var approved = AppServices.Settings.Current.PrivateRoomApproved;
-            var members = room.People.Where(p => p.Id != room.SelfId && !pending.ContainsKey(p.Id))
+            var members = room.Open.People.Where(p => p.Id != room.SelfId && !pending.ContainsKey(p.Id))
                 .Select(p => (p.Id, approvedOnly && !approved.Contains(p.Id.ToString("N")) ? $"{p.Name} (sem aprovação)" : p.Name));
             FillPeople(PrivateMembersList, members, "Remover", (id, name) =>
             {

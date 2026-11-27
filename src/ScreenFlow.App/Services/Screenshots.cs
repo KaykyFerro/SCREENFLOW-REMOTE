@@ -303,6 +303,25 @@ public static class Screenshots
             return Task.Delay(300);
         }, () => WindowRoot(dialog!));
         dialog?.Close();
+        dialog = null;
+
+        // (1.5.0) Um servidor por rede do Radmin aberto (só as pessoas, os canais e a conversa dele) e a janela de adicionar.
+        await Shot("40-servidor-por-rede.png", () =>
+        {
+            AppServices.Room.ShowServer(AppServices.Room.AllServers[1]);
+            return Go(window, window.ChatPage, 500);
+        });
+        AppServices.Room.ShowServer(AppServices.Room.Open);
+        await Shot("41-adicionar-servidor.png", () =>
+        {
+            dialog = ServerDialogs.BuildAdd(window, ServerDialogs.AddMode.Network, out _, ("amigos-do-cs", "senha-da-rede", "Amigos do CS"));
+            dialog.WindowStartupLocation = WindowStartupLocation.Manual;
+            dialog.Left = dialog.Top = -30000;
+            dialog.ShowActivated = false;
+            dialog.Show();
+            return Task.Delay(300);
+        }, () => WindowRoot(dialog!));
+        dialog?.Close();
 
         // Janela no tamanho mínimo: o menu vira ícones e as colunas se empilham.
         Resize(window, new Size(window.MinWidth, window.MinHeight));

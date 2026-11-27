@@ -29,6 +29,7 @@ public sealed class RoomService
     private readonly List<RoomServer> _spaces = [];
     private readonly DispatcherTimer _saveTimer;
     private readonly DispatcherTimer _statusTimer;
+    private readonly DispatcherTimer _reconnectTimer;
     private RoomServer _active;
     private RoomServer? _panelSource;
     private RoomHub? _hub;
@@ -47,6 +48,8 @@ public sealed class RoomService
         {
             foreach (var server in AllServers) server.UpdateRow();
         };
+        _reconnectTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = TimeSpan.FromSeconds(2) };
+        _reconnectTimer.Tick += (_, _) => ReconnectSpaces();
         Open = Create(null);
         _active = Open;
         Open.Row.IsSelected = true;
@@ -238,26 +241,15 @@ public sealed class RoomService
     }
 
     /// <summary>
-    /// Edita um servidor: o nome que aparece, a rede do Radmin (nome e senha; com <see cref="ServerEdit.ChangeNetwork"/>),
-    /// o convite (quando a chave não abriu neste PC), o adaptador e os IPs chamados direto. Se a chave mudar, é outro
-    /// servidor: os canais e a conversa guardados aqui do servidor antigo são apagados. Devolve o motivo quando não deu.
+    /// Edita um servidor: o nome que aparece, a chave (<see cref="ServerEdit.Secret"/>: da rede do Radmin ou do convite
+    /// digitado de novo), o adaptador e os IPs chamados direto. Se a chave mudar, é outro servidor: os canais e a conversa
+    /// guardados aqui do servidor antigo são apagados (quem pergunta antes é a janela). Devolve o motivo quando não deu.
     /// </summary>
     public async Task<string?> EditServerAsync(RoomServer server, ServerEdit edit)
     {
         if (server.Space is not { } space || _store is null || !_spaces.Contains(server)) return "Esse servidor não está mais na lista.";
-        byte[]? secret = null;
-        if (edit.ChangeNetwork)
-        {
-            if (SpaceKeys.NormalizeNetworkName(edit.NetworkName).Length == 0) return "Digite o nome da rede do Radmin.";
-            try { secret = await Task.Run(() => SpaceKeys.FromNetwork(edit.NetworkName!, edit.Password)); }
-            catch (ArgumentException exception) { return exception.Message; }
-        }
-        else if (!string.IsNullOrWhiteSpace(edit.Invite))
-        {
-            if (!SpaceInvite.TryParse(edit.Invite, out var invite)) return "Esse convite não é válido. Confira se copiou o código inteiro (começa com SF2-).";
-            secret = invite.Secret;
-        }
-        if (!_spaces.Contains(server)) return "Esse servidor não está mais na lista.";
+        var secret = edit.Secret;
+        if (secret is { Length: not 32 }) return "Chave inválida.";
         if (secret is not null && _store.FindByTag(SpaceKeys.TagText(secret)) is { } other && other.Id != space.Id)
             return $"Você já tem esse servidor (\"{other.Name}\").";
         var peers = edit.Peers.Select(RoomSpace.CleanPeer).OfType<string>().Distinct().Take(RoomSpace.MaxManualPeers).ToList();
@@ -269,9 +261,9 @@ public sealed class RoomService
         space.Name = name;
         space.Adapter = edit.Adapter;
         space.ManualPeers = peers;
-        if (edit.ChangeNetwork)
+        if (secret is not null && edit.NetworkName is { } networkName)
         {
-            space.NetworkName = SpaceKeys.CleanNetworkName(edit.NetworkName);
+            space.NetworkName = SpaceKeys.CleanNetworkName(networkName);
             space.KeySource = SpaceKeySource.Network;
         }
         if (sameKey && !connection)
@@ -328,6 +320,9 @@ public sealed class RoomService
         return null;
     }
 
+    /// <summary>A chave do servidor de uma rede do Radmin (demora um pouco: roda fora da thread da interface).</summary>
+    public static Task<byte[]> NetworkKeyAsync(string networkName, string? password) => Task.Run(() => SpaceKeys.FromNetwork(networkName, password));
+
     private void AfterRename(RoomServer server)
     {
         server.RefreshNames();
@@ -382,14 +377,26 @@ public sealed class RoomService
         ServersChanged?.Invoke();
     }
 
-    /// <summary>A rede mudou (o Radmin conectou, o Wi-Fi voltou): os servidores chamam todo mundo de novo.</summary>
+    /// <summary>
+    /// A rede mudou (o Radmin conectou, o Wi-Fi voltou): os servidores chamam todo mundo de novo. O Windows avisa várias
+    /// vezes seguidas; a chamada vai uma vez só, 2 segundos depois do último aviso.
+    /// </summary>
     public void OnNetworkChanged()
     {
+        if (_demo) return;
+        _reconnectTimer.Stop();
+        _reconnectTimer.Start();
+    }
+
+    private void ReconnectSpaces()
+    {
+        _reconnectTimer.Stop();
         foreach (var server in _spaces)
         {
             server.Reconnect();
             server.UpdateRow();
         }
+        if (_spaces.Count > 0) Log.Info("A rede mudou: os servidores chamaram todo mundo de novo.");
     }
 
     /// <summary>Guarda a lista de servidores daqui a pouco (várias mudanças seguidas viram uma gravação só).</summary>
@@ -573,6 +580,7 @@ public sealed class RoomService
     {
         AppServices.Settings.Saved -= OnSettingsSaved;
         _statusTimer.Stop();
+        _reconnectTimer.Stop();
         _talkKey?.Dispose();
         _talkKey = null;
         if (_saveTimer.IsEnabled) SaveSpacesNow();
@@ -762,7 +770,7 @@ public sealed class RoomService
         SelfId = new Guid("6b1f1d5e-0c4a-4f7e-9d3b-2a8c5e7f9a0f");
         if (_spaces.Count == 0)
         {
-            AddDemoSpace("Amigos do CS", 1, unread: 3, online: 5, ServerConnection.Online);
+            AddDemoSpace("Amigos do CS", 1, unread: 3, online: 4, ServerConnection.Online, rich: true);
             AddDemoSpace("Família", 3, unread: 0, online: 3, ServerConnection.Online);
             AddDemoSpace("Trabalho", 4, unread: 0, online: 1, ServerConnection.Searching);
         }
@@ -774,16 +782,16 @@ public sealed class RoomService
         Changed?.Invoke();
     }
 
-    private void AddDemoSpace(string name, int color, int unread, int online, ServerConnection connection)
+    private void AddDemoSpace(string name, int color, int unread, int online, ServerConnection connection, bool rich = false)
     {
         var server = Create(new RoomSpace { Name = name, Color = color, NetworkName = name });
         _spaces.Add(server);
         Servers.Add(server.Row);
-        server.LoadDemoSpace(unread, online, connection);
+        server.LoadDemoSpace(unread, online, connection, rich);
     }
 }
 
 /// <summary>(1.5.0) O que a janela de editar um servidor mudou.</summary>
-/// <param name="ChangeNetwork">Trocar a chave pela da rede do Radmin com <paramref name="NetworkName"/> e <paramref name="Password"/>.</param>
-/// <param name="Invite">O convite digitado de novo (quando a chave não abriu neste PC), ou null.</param>
-public sealed record ServerEdit(string Name, bool ChangeNetwork, string? NetworkName, string? Password, string? Invite, string? Adapter, IReadOnlyList<string> Peers);
+/// <param name="Secret">A chave nova (da rede do Radmin ou do convite digitado de novo), ou null para continuar com a mesma.</param>
+/// <param name="NetworkName">Com <paramref name="Secret"/> vinda da rede do Radmin, o nome da rede.</param>
+public sealed record ServerEdit(string Name, byte[]? Secret, string? NetworkName, string? Adapter, IReadOnlyList<string> Peers);

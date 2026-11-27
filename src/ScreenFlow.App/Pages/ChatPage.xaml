@@ -20,6 +20,32 @@
             <Setter Property="Content" Value="&#xE710;"/>
         </Style>
 
+        <!-- (1.5.0) O + de adicionar servidor, no fim da lista de servidores -->
+        <Style x:Key="ServerAddButton" TargetType="Button">
+            <Setter Property="Width" Value="46"/>
+            <Setter Property="Height" Value="46"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="{DynamicResource Success}"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Root" CornerRadius="23" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource Border}" BorderThickness="1">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE710;" FontSize="16" Foreground="{TemplateBinding Foreground}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="CornerRadius" Value="15"/>
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource Success}"/>
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{DynamicResource Success}"/>
+                                <Setter Property="Foreground" Value="#03231A"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Botão de ícone que fica marcado (mostrar quem está na rede) -->
         <Style x:Key="IconToggle" TargetType="ToggleButton">
             <Setter Property="Foreground" Value="{DynamicResource TextMuted}"/>
@@ -92,10 +118,92 @@
         </DataTemplate>
     </UserControl.Resources>
 
-    <!-- Como um servidor do Discord: canais à esquerda, a conversa do canal no meio e quem está na rede à direita. Só a
-         conversa rola; a caixa de escrever fica sempre embaixo. -->
+    <!-- Como no Discord: os servidores na barra da esquerda (1.5.0), os canais do servidor aberto, a conversa do canal no
+         meio e quem está nele à direita. Só a conversa rola; a caixa de escrever fica sempre embaixo. -->
     <Grid Margin="24,18,24,24" MaxWidth="1680">
-        <Grid x:Name="ContentGrid">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- ───────────── Servidores: a sala da rede e os servidores por rede do Radmin (1.5.0) ───────────── -->
+        <Border x:Name="ServerRail" Style="{StaticResource Card}" Margin="0,0,14,0" Padding="0" Width="72">
+            <DockPanel>
+                <Button x:Name="AddServerButton" DockPanel.Dock="Bottom" Style="{StaticResource ServerAddButton}" Margin="0,6,0,14"
+                        ToolTip="Adicionar um servidor (de uma rede do Radmin, por convite ou um novo)" Click="AddServer_Click"/>
+                <Border DockPanel.Dock="Bottom" Height="2" Width="30" CornerRadius="1" Background="{DynamicResource Divider}" Margin="0,4,0,4"/>
+                <ScrollViewer Style="{StaticResource PageScroll}" VerticalScrollBarVisibility="Hidden">
+                    <ItemsControl x:Name="ServerList" Margin="0,10,0,0" Focusable="False">
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel>
+                                    <Grid x:Name="Item" Height="56" Background="Transparent" Cursor="Hand" ToolTip="{Binding Hint}"
+                                          MouseLeftButtonUp="Server_MouseLeftButtonUp" MouseRightButtonUp="Server_MouseRightButtonUp">
+                                        <!-- A marca à esquerda: pequena com mensagens novas, grande no servidor aberto -->
+                                        <Border x:Name="Marker" Width="4" Height="8" CornerRadius="0,4,4,0" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                                Background="{DynamicResource Text}" Opacity="0"/>
+                                        <Grid Width="46" Height="46" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                            <Border x:Name="Icon" CornerRadius="23" Background="{Binding Colors.Background}">
+                                                <TextBlock Text="{Binding Initials}" Foreground="{Binding Colors.Foreground}" FontWeight="Bold" FontSize="15"
+                                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Border>
+                                            <Border x:Name="NetworkIcon" CornerRadius="23" Background="{DynamicResource AccentGradient}"
+                                                    Visibility="{Binding IsNetworkRoom, Converter={StaticResource BoolToVisibility}}">
+                                                <TextBlock Style="{StaticResource Icon}" Text="&#xE8F2;" FontSize="19" Foreground="{DynamicResource OnAccent}"/>
+                                            </Border>
+                                            <!-- Você está na voz deste servidor -->
+                                            <Border Width="19" Height="19" CornerRadius="9.5" HorizontalAlignment="Left" VerticalAlignment="Bottom" Margin="-5,0,0,-3"
+                                                    Background="{DynamicResource Success}" BorderThickness="2.5" BorderBrush="{DynamicResource Surface}" IsHitTestVisible="False"
+                                                    Visibility="{Binding InVoice, Converter={StaticResource BoolToVisibility}}">
+                                                <TextBlock Style="{StaticResource Icon}" Text="&#xE767;" FontSize="8.5" Foreground="#03231A"/>
+                                            </Border>
+                                            <!-- Conexão: verde com gente, âmbar procurando, cinza desligado -->
+                                            <Border x:Name="Dot" Width="15" Height="15" CornerRadius="7.5" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="0,0,-3,-3"
+                                                    BorderThickness="3" BorderBrush="{DynamicResource Surface}" Background="{DynamicResource Success}" IsHitTestVisible="False"/>
+                                            <!-- Mensagens novas -->
+                                            <Border Style="{StaticResource CountBadge}" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-4,-7,0" Height="21"
+                                                    CornerRadius="10.5" BorderThickness="2.5" BorderBrush="{DynamicResource Surface}"
+                                                    Visibility="{Binding HasUnread, Converter={StaticResource BoolToVisibility}}">
+                                                <TextBlock Text="{Binding UnreadText}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                            </Border>
+                                        </Grid>
+                                    </Grid>
+                                    <Border Height="2" Width="30" CornerRadius="1" Background="{DynamicResource Divider}" Margin="0,4,0,6"
+                                            Visibility="{Binding IsNetworkRoom, Converter={StaticResource BoolToVisibility}}"/>
+                                </StackPanel>
+                                <DataTemplate.Triggers>
+                                    <Trigger SourceName="Item" Property="IsMouseOver" Value="True">
+                                        <Setter TargetName="Icon" Property="CornerRadius" Value="15"/>
+                                        <Setter TargetName="NetworkIcon" Property="CornerRadius" Value="15"/>
+                                        <Setter TargetName="Marker" Property="Height" Value="20"/>
+                                        <Setter TargetName="Marker" Property="Opacity" Value="1"/>
+                                    </Trigger>
+                                    <DataTrigger Binding="{Binding HasUnread}" Value="True">
+                                        <Setter TargetName="Marker" Property="Opacity" Value="1"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                        <Setter TargetName="Icon" Property="CornerRadius" Value="15"/>
+                                        <Setter TargetName="NetworkIcon" Property="CornerRadius" Value="15"/>
+                                        <Setter TargetName="Marker" Property="Height" Value="36"/>
+                                        <Setter TargetName="Marker" Property="Opacity" Value="1"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsSearching}" Value="True">
+                                        <Setter TargetName="Dot" Property="Background" Value="{DynamicResource Amber}"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding IsOffline}" Value="True">
+                                        <Setter TargetName="Dot" Property="Background" Value="{DynamicResource TextSubtle}"/>
+                                        <Setter TargetName="Icon" Property="Opacity" Value="0.45"/>
+                                        <Setter TargetName="NetworkIcon" Property="Opacity" Value="0.45"/>
+                                    </DataTrigger>
+                                </DataTemplate.Triggers>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </ScrollViewer>
+            </DockPanel>
+        </Border>
+
+        <Grid x:Name="ContentGrid" Grid.Column="1">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition x:Name="ChannelsColumn" Width="236"/>
                 <ColumnDefinition Width="14"/>
@@ -112,11 +220,19 @@
                         <RowDefinition Height="*"/>
                     </Grid.RowDefinitions>
                     <DockPanel Margin="16,14,12,13">
-                        <Border Style="{StaticResource IconTileCyan}" Width="34" Height="34" CornerRadius="10" TextElement.FontSize="15" VerticalAlignment="Center">
-                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8F2;"/>
-                        </Border>
+                        <Button x:Name="ServerMenuButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE712;" Width="30" Height="30"
+                                MinHeight="30" FontSize="13" Margin="6,0,0,0" VerticalAlignment="Center" ToolTip="Opções do servidor" Visibility="Collapsed"
+                                Click="ServerMenu_Click"/>
+                        <Grid Width="34" Height="34" VerticalAlignment="Center">
+                            <Border x:Name="NetworkTile" Style="{StaticResource IconTileCyan}" Width="34" Height="34" CornerRadius="10" TextElement.FontSize="15">
+                                <TextBlock Style="{StaticResource Icon}" Text="&#xE8F2;"/>
+                            </Border>
+                            <Border x:Name="ServerTile" CornerRadius="10" Visibility="Collapsed">
+                                <TextBlock x:Name="ServerTileText" FontWeight="Bold" FontSize="13" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                        </Grid>
                         <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="Sala da rede" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock x:Name="ServerTitle" Text="Sala da rede" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                             <TextBlock x:Name="RoomInfo" Style="{StaticResource Caption}" Text="Só você online" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
                         </StackPanel>
                     </DockPanel>
@@ -140,7 +256,7 @@
                                                 </Border>
                                                 <TextBlock x:Name="Hash" Text="#" FontSize="18" Width="14" Foreground="{DynamicResource TextSubtle}" VerticalAlignment="Center"
                                                            Margin="0,0,0,2"/>
-                                                <TextBlock x:Name="ChannelName" Text="{Binding Name}" FontSize="14" Margin="8,0,0,0" VerticalAlignment="Center"
+                                                <TextBlock x:Name="ChannelName" Text="{Binding DisplayName}" FontSize="14" Margin="8,0,0,0" VerticalAlignment="Center"
                                                            Foreground="{DynamicResource TextMuted}" TextTrimming="CharacterEllipsis"/>
                                             </DockPanel>
                                         </Border>
@@ -177,7 +293,7 @@
                                                 <DockPanel>
                                                     <TextBlock DockPanel.Dock="Right" Text="{Binding CountText}" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="6,0,0,0"/>
                                                     <TextBlock x:Name="Glyph" Style="{StaticResource Icon}" Text="&#xE767;" FontSize="15" Width="16" Foreground="{DynamicResource TextSubtle}"/>
-                                                    <TextBlock x:Name="ChannelName" Text="{Binding Name}" FontSize="14" Margin="8,0,0,0" VerticalAlignment="Center"
+                                                    <TextBlock x:Name="ChannelName" Text="{Binding DisplayName}" FontSize="14" Margin="8,0,0,0" VerticalAlignment="Center"
                                                                Foreground="{DynamicResource TextMuted}" TextTrimming="CharacterEllipsis"/>
                                                 </DockPanel>
                                             </Border>
@@ -396,7 +512,7 @@
                                 <TextBlock x:Name="OnlineText" Text="1 online"/>
                             </StackPanel>
                         </Border>
-                        <TextBlock Text="Na rede" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        <TextBlock x:Name="PeopleTitle" Text="Na rede" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
                     </DockPanel>
                     <Border Style="{StaticResource DividerLine}" VerticalAlignment="Bottom"/>
 
@@ -453,7 +569,7 @@
                             </ItemsControl>
 
                             <StackPanel x:Name="NoPeople" Margin="8,4,8,10">
-                                <TextBlock Style="{StaticResource Muted}" FontSize="13" LineHeight="19"
+                                <TextBlock x:Name="NoPeopleText" Style="{StaticResource Muted}" FontSize="13" LineHeight="19"
                                            Text="Ninguém da rede apareceu ainda. Quem abrir o ScreenFlow 1.1 ou mais novo na mesma rede do Radmin aparece aqui sozinho."/>
                             </StackPanel>
                         </StackPanel>
@@ -462,7 +578,7 @@
                     <!-- Adicionar pelo IP -->
                     <Border Grid.Row="2" BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Padding="16,12,16,14">
                         <StackPanel>
-                            <TextBlock Style="{StaticResource Caption}" Text="Não está vendo alguém? Adicione pelo IP do Radmin." Margin="0,0,0,8"/>
+                            <TextBlock x:Name="PeerHint" Style="{StaticResource Caption}" Text="Não está vendo alguém? Adicione pelo IP do Radmin." Margin="0,0,0,8"/>
                             <DockPanel>
                                 <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE8FA;" ToolTip="Adicionar" Margin="8,0,0,0"
                                         BorderBrush="{DynamicResource BorderStrong}" Background="{DynamicResource SurfaceRaised}" Click="AddPeer_Click"/>
@@ -474,16 +590,21 @@
             </Border>
         </Grid>
 
-        <!-- Sala desligada (porta ocupada) -->
-        <Border x:Name="ErrorPanel" Style="{StaticResource Card}" Margin="0" Padding="28" VerticalAlignment="Top" Visibility="Collapsed"
+        <!-- Sala desligada (porta ocupada) ou (1.5.0) servidor desconectado ou sem a chave -->
+        <Border x:Name="ErrorPanel" Grid.Column="1" Style="{StaticResource Card}" Margin="0" Padding="28" VerticalAlignment="Top" Visibility="Collapsed"
                 BorderBrush="{DynamicResource AmberSoft}">
             <DockPanel>
                 <Border Style="{StaticResource IconTileAmber}">
                     <TextBlock Style="{StaticResource Icon}" Text="&#xE7BA;"/>
                 </Border>
                 <StackPanel Margin="18,0,0,0">
-                    <TextBlock Style="{StaticResource Heading}" Text="A sala da rede está desligada"/>
-                    <TextBlock x:Name="ErrorText" Style="{StaticResource Muted}" Margin="0,6,0,0"/>
+                    <TextBlock x:Name="ErrorTitle" Style="{StaticResource Heading}" Text="A sala da rede está desligada" TextWrapping="Wrap"/>
+                    <TextBlock x:Name="ErrorText" Style="{StaticResource Muted}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                    <StackPanel x:Name="ErrorActions" Orientation="Horizontal" Margin="0,18,0,0" Visibility="Collapsed">
+                        <Button x:Name="ErrorConnectButton" Style="{StaticResource PrimaryButton}" Content="Conectar" MinWidth="120" Margin="0,0,10,0" Click="ErrorConnect_Click"/>
+                        <Button x:Name="ErrorEditButton" Content="Editar o servidor" Margin="0,0,10,0" Click="ErrorEdit_Click"/>
+                        <Button Style="{StaticResource GhostButton}" Content="Remover da lista" Click="ErrorRemove_Click"/>
+                    </StackPanel>
                 </StackPanel>
             </DockPanel>
         </Border>

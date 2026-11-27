@@ -307,13 +307,41 @@ public sealed class RoomServer
 
     /// <summary>(1.5.0) Por qual adaptador o servidor fala: os do Radmin (padrão), todos, ou um escolhido.</summary>
     private IReadOnlyList<IPAddress> SpaceBroadcasts()
-        => SpaceAdapters(Space?.Adapter).Select(a => a.Broadcast).Distinct().ToArray();
+    {
+        try { return SpaceAdapters(Space?.Adapter).Select(a => a.Broadcast).Distinct().ToArray(); }
+        catch (Exception exception)
+        {
+            Log.Debug($"Redes do servidor: {exception.Message}");
+            return [];
+        }
+    }
+
+    private static readonly object AdaptersGate = new();
+    private static (DateTimeOffset At, IReadOnlyList<NetworkAdapterInfo>? Up) _upAdapters;
+
+    /// <summary>
+    /// Os adaptadores ligados deste PC, lidos no máximo a cada 3 segundos para todos os servidores juntos (a lista do
+    /// Windows demora uns milissegundos, e a barra de servidores pergunta de cada um a cada poucos segundos).
+    /// </summary>
+    private static IReadOnlyList<NetworkAdapterInfo> UpAdapters()
+    {
+        lock (AdaptersGate)
+        {
+            var now = DateTimeOffset.UtcNow;
+            if (_upAdapters.Up is null || now - _upAdapters.At > TimeSpan.FromSeconds(3))
+            {
+                _upAdapters = (now, RadminNetwork.GetIPv4Adapters()
+                    .Where(a => a.IsUp && !IPAddress.IsLoopback(a.Address) && !a.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal))
+                    .ToList());
+            }
+            return _upAdapters.Up;
+        }
+    }
 
     /// <summary>Os adaptadores ligados que o servidor usa (vazio: a rede dele está desligada).</summary>
     internal static IReadOnlyList<NetworkAdapterInfo> SpaceAdapters(string? adapter)
     {
-        var up = RadminNetwork.GetIPv4Adapters()
-            .Where(a => a.IsUp && !IPAddress.IsLoopback(a.Address) && !a.Address.ToString().StartsWith("169.254.", StringComparison.Ordinal));
+        var up = UpAdapters();
         return adapter switch
         {
             null => up.Where(a => a.IsRadmin).ToList(),
@@ -1361,6 +1389,14 @@ public sealed class RoomServer
         else OnBlobFailed(id); // "Tentar de novo" pede para quem está na sala
     }
 
+    /// <summary>(1.5.0) Marca como lidos todos os canais do servidor (menu do servidor).</summary>
+    public void MarkAllRead()
+    {
+        if (Unread == 0) return;
+        foreach (var row in _textRows.Values) row.Unread = 0;
+        UnreadChanged?.Invoke();
+    }
+
     /// <summary>Marca como lido o canal aberto (o chat está na frente).</summary>
     public void MarkRead()
     {
@@ -1639,24 +1675,15 @@ public sealed class RoomServer
 
     internal ServerConnection _demoConnection = ServerConnection.Online;
 
-    private (DateTimeOffset At, bool Up) _adapters;
-
-    /// <summary>Algum adaptador do servidor está ligado (lido no máximo a cada 3 segundos).</summary>
-    private bool AdaptersUp(RoomSpace space)
+    /// <summary>Algum adaptador do servidor está ligado.</summary>
+    private static bool AdaptersUp(RoomSpace space)
     {
-        var now = DateTimeOffset.UtcNow;
-        if (now - _adapters.At > TimeSpan.FromSeconds(3))
+        try { return SpaceAdapters(space.Adapter).Count > 0; }
+        catch (Exception exception)
         {
-            bool up;
-            try { up = SpaceAdapters(space.Adapter).Count > 0; }
-            catch (Exception exception)
-            {
-                Log.Debug($"Adaptadores do servidor: {exception.Message}");
-                up = true;
-            }
-            _adapters = (now, up);
+            Log.Debug($"Adaptadores do servidor: {exception.Message}");
+            return true;
         }
-        return _adapters.Up;
     }
 
     /// <summary>(1.5.0) O servidor mudou de nome: a lista, os canais e os assuntos mostram o nome novo.</summary>
@@ -1791,13 +1818,57 @@ public sealed class RoomServer
         UpdateRow();
     }
 
-    /// <summary>(1.5.0) Um servidor de exemplo para as capturas: só a linha na lista, com não lidas e quem está online.</summary>
-    internal void LoadDemoSpace(int unread, int online, ServerConnection connection)
+    /// <summary>
+    /// (1.5.0) Um servidor de exemplo para as capturas: a linha na lista (não lidas e quem está online) e, com
+    /// <paramref name="rich"/>, canais, gente, voz e conversa do próprio servidor (nada da sala da rede).
+    /// </summary>
+    internal void LoadDemoSpace(int unread, int online, ServerConnection connection, bool rich = false)
     {
         _demo = true;
         _demoConnection = connection;
-        _textRows.Values.First().Unread = unread;
         _demoOnline = online;
+        if (rich && _table is { } table)
+        {
+            var rafa = new Guid("5b7d2e91-4c3a-4e6f-9a1b-8d2c7e5f3a14");
+            var julia = new Guid("e2a4c6f8-1b3d-4f5a-8c7e-9d1b3f5a7c26");
+            var teco = new Guid("7f1e3d5c-9b2a-4c8e-a6f4-2d8b6e4c1a37");
+            var now = DateTimeOffset.UtcNow;
+            var strategy = table.Create(RoomChannelKind.Text, "estratégia", rafa, now, out _);
+            var ranked = table.Create(RoomChannelKind.Voice, "Ranqueada", julia, now, out _);
+            People.Clear();
+            People.Add(RoomPersonRow.Demo(rafa, "Rafa", "Online · na voz: Ranqueada", false, StreamMode.Screen, null, true));
+            People.Add(RoomPersonRow.Demo(julia, "Júlia", "Ao vivo · tela e áudio", true, StreamMode.Screen, "26.83.40.21", false));
+            People.Add(RoomPersonRow.Demo(teco, "Teco", "Online · na voz: Ranqueada", false, StreamMode.Screen, null, true));
+            _demoOnline = People.Count + 1;
+            _demoChannels.Clear();
+            _demoMembers.Clear();
+            if (ranked is not null)
+            {
+                _demoMembers.Add((ranked.Id, new VoiceMemberState(rafa, "Rafa", false, false, false)));
+                _demoMembers.Add((ranked.Id, new VoiceMemberState(teco, "Teco", true, false, false)));
+            }
+            _demoVoice = false;
+            foreach (var row in _textRows.Values)
+            {
+                row.Messages.Clear();
+                row.Unread = 0;
+            }
+            _shown.Clear();
+            var today = DateTimeOffset.Now.Date;
+            var at = (int h, int m) => new DateTimeOffset(today.AddHours(h).AddMinutes(m));
+            AddMessage(new RoomChatMessage(rafa, "Rafa", 101, at(21, 10), "Fechou o time pra hoje: eu, Teco e a Júlia"));
+            AddMessage(new RoomChatMessage(julia, "Júlia", 102, at(21, 12), "Tô transmitindo o aquecimento, quem quiser assistir"));
+            AddMessage(new RoomChatMessage(teco, "Teco", 103, at(21, 13), "Entrei na Ranqueada, bora"));
+            AddMessage(new RoomChatMessage(SelfId, SelfName, 104, at(21, 15), "Chego em 5 minutos!"));
+            if (strategy is not null) AddMessage(new RoomChatMessage(rafa, "Rafa", 105, at(21, 16), "Mapa de hoje: Mirage. Eu fico no bomb B", Channel: strategy.Id));
+            _currentText.IsSelected = false;
+            _currentText = TextRow(null);
+            _currentText.IsSelected = true;
+            if (strategy is not null) TextRow(strategy.Id).Unread = unread;
+            ShowDemoVoice();
+        }
+        else _textRows.Values.First().Unread = unread;
+        UnreadChanged?.Invoke();
         UpdateRow();
     }
 

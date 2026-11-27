@@ -21,6 +21,8 @@ public static class SpaceKeys
     /// <summary>Rodadas do PBKDF2 (a chave sai em alguns décimos de segundo, uma vez só, ao criar o servidor).</summary>
     public const int Iterations = 200_000;
     public const int MaxNetworkNameLength = 64;
+    /// <summary>O Radmin aceita senhas até 64 caracteres; aqui cabe um pouco mais, para não cortar a de ninguém.</summary>
+    public const int MaxPasswordLength = 128;
     private const string SaltPrefix = "ScreenFlow servidor por rede v1|";
 
     /// <summary>
@@ -56,7 +58,9 @@ public static class SpaceKeys
         var name = NormalizeNetworkName(networkName);
         if (name.Length == 0) throw new ArgumentException("Digite o nome da rede do Radmin.", nameof(networkName));
         var salt = Encoding.UTF8.GetBytes(SaltPrefix + name);
-        return Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes((password ?? string.Empty).Trim()), salt, Iterations, HashAlgorithmName.SHA256,
+        var secret = (password ?? string.Empty).Trim();
+        if (secret.Length > MaxPasswordLength) throw new ArgumentException($"A senha pode ter até {MaxPasswordLength} caracteres.", nameof(password));
+        return Rfc2898DeriveBytes.Pbkdf2(Encoding.UTF8.GetBytes(secret), salt, Iterations, HashAlgorithmName.SHA256,
             RoomKeys.SecretBytes);
     }
 
