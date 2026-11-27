@@ -693,7 +693,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         return new RoomPresence(local.Name, AppInfo.DisplayVersion, flags, local.LiveMode, local.Viewers, local.ControlPort,
             local.Live ? local.LiveAddress : null, Interlocked.Increment(ref _presenceSequence), local.Avatar,
             _inVoice && !defaultVoice ? channel : null, _createdChannels,
-            Keys.Active ? _exchange.PublicKey : null);
+            Keys.Active ? _exchange.PublicKey : null, IdentityKey);
     }
 
     private byte[] PresencePacket(bool wantsReply) => RoomPacket.Presence(SelfId, LocalPresence(wantsReply));
@@ -957,6 +957,10 @@ public sealed partial class NetworkRoom : IAsyncDisposable
                 break;
             case RoomPacketType.ChannelTable when wasSealed && IsSpace:
                 OnChannelTable(sender, body, from, now);
+                break;
+            // (1.5.0) Chat privado: em qualquer sala (o conteúdo já vem cifrado só para este PC).
+            case RoomPacketType.Direct or RoomPacketType.DirectAck:
+                OnDirect(type, sender, body, now);
                 break;
         }
     }

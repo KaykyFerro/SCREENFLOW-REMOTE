@@ -46,6 +46,50 @@
             </Setter>
         </Style>
 
+        <!-- (1.5.0) Mensagens diretas, no topo da lista de servidores (a marca e o número de não lidas como num servidor) -->
+        <Style x:Key="DirectRailButton" TargetType="ToggleButton">
+            <Setter Property="Height" Value="56"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Grid Background="Transparent">
+                            <Border x:Name="Marker" Width="4" Height="8" CornerRadius="0,4,4,0" HorizontalAlignment="Left" VerticalAlignment="Center"
+                                    Background="{DynamicResource Text}" Opacity="0"/>
+                            <Grid Width="46" Height="46" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                <Border x:Name="Icon" CornerRadius="23" Background="{DynamicResource SurfaceRaised}" BorderBrush="{DynamicResource Border}" BorderThickness="1">
+                                    <TextBlock x:Name="Glyph" Style="{StaticResource Icon}" Text="&#xE8BD;" FontSize="18" Foreground="{DynamicResource AccentText}"/>
+                                </Border>
+                                <Border x:Name="Badge" Style="{StaticResource CountBadge}" HorizontalAlignment="Right" VerticalAlignment="Top" Margin="0,-4,-7,0" Height="21"
+                                        CornerRadius="10.5" BorderThickness="2.5" BorderBrush="{DynamicResource Surface}">
+                                    <TextBlock Text="{Binding Tag, RelativeSource={RelativeSource TemplatedParent}}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                </Border>
+                            </Grid>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="Tag" Value="{x:Null}">
+                                <Setter TargetName="Badge" Property="Visibility" Value="Collapsed"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Icon" Property="CornerRadius" Value="15"/>
+                                <Setter TargetName="Marker" Property="Height" Value="20"/>
+                                <Setter TargetName="Marker" Property="Opacity" Value="1"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Icon" Property="CornerRadius" Value="15"/>
+                                <Setter TargetName="Icon" Property="Background" Value="{DynamicResource AccentGradient}"/>
+                                <Setter TargetName="Icon" Property="BorderBrush" Value="Transparent"/>
+                                <Setter TargetName="Glyph" Property="Foreground" Value="{DynamicResource OnAccent}"/>
+                                <Setter TargetName="Marker" Property="Height" Value="36"/>
+                                <Setter TargetName="Marker" Property="Opacity" Value="1"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Botão de ícone que fica marcado (mostrar quem está na rede) -->
         <Style x:Key="IconToggle" TargetType="ToggleButton">
             <Setter Property="Foreground" Value="{DynamicResource TextMuted}"/>
@@ -132,8 +176,11 @@
                 <Button x:Name="AddServerButton" DockPanel.Dock="Bottom" Style="{StaticResource ServerAddButton}" Margin="0,6,0,14"
                         ToolTip="Adicionar um servidor (de uma rede do Radmin, por convite ou um novo)" Click="AddServer_Click"/>
                 <Border DockPanel.Dock="Bottom" Height="2" Width="30" CornerRadius="1" Background="{DynamicResource Divider}" Margin="0,4,0,4"/>
+                <ToggleButton x:Name="DirectButton" DockPanel.Dock="Top" Style="{StaticResource DirectRailButton}" Margin="0,10,0,0"
+                              ToolTip="Mensagens diretas: conversas só entre você e outra pessoa, cifradas" Click="DirectButton_Click"/>
+                <Border DockPanel.Dock="Top" Height="2" Width="30" CornerRadius="1" Background="{DynamicResource Divider}" Margin="0,4,0,0"/>
                 <ScrollViewer Style="{StaticResource PageScroll}" VerticalScrollBarVisibility="Hidden">
-                    <ItemsControl x:Name="ServerList" Margin="0,10,0,0" Focusable="False">
+                    <ItemsControl x:Name="ServerList" Margin="0,6,0,0" Focusable="False">
                         <ItemsControl.ItemTemplate>
                             <DataTemplate>
                                 <StackPanel>
@@ -324,6 +371,86 @@
                 </Grid>
             </Border>
 
+            <!-- ───────────── (1.5.0) Mensagens diretas: as conversas, com busca ───────────── -->
+            <Border x:Name="DirectCard" Style="{StaticResource Card}" Margin="0" Padding="0" Visibility="Collapsed">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <DockPanel Margin="16,14,12,13">
+                        <Border Style="{StaticResource IconTileViolet}" Width="34" Height="34" CornerRadius="10" TextElement.FontSize="15">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8BD;"/>
+                        </Border>
+                        <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
+                            <TextBlock Text="Mensagens diretas" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock Style="{StaticResource Caption}" Text="Cifradas só para vocês dois" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                        </StackPanel>
+                    </DockPanel>
+                    <Border Style="{StaticResource DividerLine}" VerticalAlignment="Bottom"/>
+                    <TextBox x:Name="DirectSearch" Grid.Row="1" Margin="12,12,12,4" MinHeight="36" Tag="Procurar uma conversa" TextChanged="DirectSearch_TextChanged"/>
+                    <ScrollViewer Grid.Row="2" Style="{StaticResource PageScroll}">
+                        <StackPanel Margin="8,6,8,12">
+                            <ItemsControl x:Name="DirectList" Focusable="False">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border x:Name="Row" CornerRadius="10" Padding="8,7" Margin="0,1" Background="Transparent" Cursor="Hand"
+                                                Visibility="{Binding IsVisible, Converter={StaticResource BoolToVisibility}}" ToolTip="{Binding StatusText}"
+                                                MouseLeftButtonUp="Conversation_MouseLeftButtonUp" MouseRightButtonUp="Conversation_MouseRightButtonUp">
+                                            <DockPanel>
+                                                <Grid Width="36" Height="36">
+                                                    <controls:AvatarView Colors="{Binding Avatar}" Initial="{Binding Initial}" Photo="{Binding Photo}" TextElement.FontSize="14"/>
+                                                    <Border x:Name="Dot" Width="13" Height="13" CornerRadius="6.5" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                                            Margin="0,0,-2,-2" BorderThickness="2.5" BorderBrush="{DynamicResource Surface}" Background="{DynamicResource TextSubtle}"/>
+                                                </Grid>
+                                                <StackPanel DockPanel.Dock="Right" Margin="6,0,0,0" VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding TimeText}" Style="{StaticResource Caption}" FontSize="11" HorizontalAlignment="Right"/>
+                                                    <Border Style="{StaticResource CountBadge}" HorizontalAlignment="Right" Margin="0,3,0,0"
+                                                            Visibility="{Binding HasUnread, Converter={StaticResource BoolToVisibility}}">
+                                                        <TextBlock Text="{Binding UnreadText}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                </StackPanel>
+                                                <StackPanel Margin="10,0,0,0" VerticalAlignment="Center">
+                                                    <TextBlock x:Name="PersonName" Text="{Binding Name}" FontSize="13.5" TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextMuted}"/>
+                                                    <TextBlock x:Name="Preview" Text="{Binding Preview}" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                                                </StackPanel>
+                                            </DockPanel>
+                                        </Border>
+                                        <DataTemplate.Triggers>
+                                            <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="{DynamicResource SurfaceHover}"/>
+                                                <Setter TargetName="Dot" Property="BorderBrush" Value="{DynamicResource SurfaceHover}"/>
+                                                <Setter TargetName="PersonName" Property="Foreground" Value="{DynamicResource Text}"/>
+                                            </Trigger>
+                                            <DataTrigger Binding="{Binding IsOnline}" Value="True">
+                                                <Setter TargetName="Dot" Property="Background" Value="{DynamicResource Success}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding HasUnread}" Value="True">
+                                                <Setter TargetName="PersonName" Property="Foreground" Value="{DynamicResource Text}"/>
+                                                <Setter TargetName="PersonName" Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding KeyChanged}" Value="True">
+                                                <Setter TargetName="Preview" Property="Text" Value="A chave da pessoa mudou: confira antes"/>
+                                                <Setter TargetName="Preview" Property="Foreground" Value="{DynamicResource Amber}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                                                <Setter TargetName="Dot" Property="BorderBrush" Value="{DynamicResource Surface}"/>
+                                                <Setter TargetName="PersonName" Property="Foreground" Value="{DynamicResource AccentText}"/>
+                                                <Setter TargetName="PersonName" Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock x:Name="NoConversations" Style="{StaticResource Muted}" FontSize="13" LineHeight="19" Margin="8,6,8,0" TextWrapping="Wrap"
+                                       Text="Nenhuma conversa ainda. Para começar, passe o mouse em alguém na lista de quem está no servidor e clique no balão (ou use o botão direito)."/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+
             <!-- ───────────── Conversa do canal (dá para soltar uma imagem aqui para mandar) ───────────── -->
             <Border x:Name="ConversationCard" Grid.Column="2" Style="{StaticResource Card}" Margin="0" Padding="0" AllowDrop="True"
                     PreviewDragOver="Conversation_PreviewDragOver" PreviewDrop="Conversation_PreviewDrop">
@@ -336,6 +463,14 @@
 
                     <DockPanel Margin="20,12,12,11">
                         <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Border x:Name="SafetyPill" Style="{StaticResource Pill}" Margin="0,0,8,0" Cursor="Hand" Visibility="Collapsed"
+                                    ToolTip="Só você e a pessoa leem esta conversa. Clique para ver o código de segurança."
+                                    MouseLeftButtonUp="SafetyPill_MouseLeftButtonUp">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE72E;" FontSize="12" Margin="0,0,7,0"/>
+                                    <TextBlock Text="Cifrada de ponta a ponta"/>
+                                </StackPanel>
+                            </Border>
                             <Border x:Name="ArchivePill" Style="{StaticResource Pill}" Margin="0,0,8,0" Cursor="Hand" Visibility="Collapsed"
                                     MouseLeftButtonUp="ArchivePill_MouseLeftButtonUp">
                                 <StackPanel Orientation="Horizontal">
@@ -346,7 +481,7 @@
                             <ToggleButton x:Name="PeopleToggle" Style="{StaticResource IconToggle}" Content="&#xE716;" ToolTip="Mostrar ou esconder quem está na rede"
                                           Click="PeopleToggle_Click"/>
                         </StackPanel>
-                        <TextBlock Text="#" FontSize="24" Foreground="{DynamicResource TextSubtle}" VerticalAlignment="Center" Margin="2,0,12,3"/>
+                        <TextBlock x:Name="ChannelHash" Text="#" FontSize="24" Foreground="{DynamicResource TextSubtle}" VerticalAlignment="Center" Margin="2,0,12,3"/>
                         <StackPanel VerticalAlignment="Center">
                             <TextBlock x:Name="ChannelTitle" Text="geral" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
                             <TextBlock x:Name="ChannelTopic" Style="{StaticResource Caption}" Margin="0,1,0,0" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
@@ -406,6 +541,13 @@
                                                             Tag="{Binding}" Click="RetryPicture_Click"/>
                                                 </StackPanel>
                                             </Grid>
+                                            <!-- (1.5.0) Mensagem direta sua: esperando, enviada ou entregue -->
+                                            <StackPanel Orientation="Horizontal" Margin="0,0,0,4" ToolTip="{Binding DeliveryHint}"
+                                                        Visibility="{Binding ShowDelivery, Converter={StaticResource BoolToVisibility}}">
+                                                <TextBlock Style="{StaticResource Icon}" Text="{Binding DeliveryGlyph}" FontSize="11" Foreground="{DynamicResource TextSubtle}"
+                                                           Margin="0,0,6,0" VerticalAlignment="Center"/>
+                                                <TextBlock Style="{StaticResource Caption}" FontSize="11.5" Text="{Binding DeliveryText}" VerticalAlignment="Center"/>
+                                            </StackPanel>
                                         </StackPanel>
                                     </Grid>
                                     <DataTemplate.Triggers>
@@ -438,7 +580,7 @@
                     <!-- Canal vazio -->
                     <StackPanel x:Name="NoMessages" Grid.Row="1" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24">
                         <Border Style="{StaticResource IconTileCyan}" HorizontalAlignment="Center" Width="56" Height="56" CornerRadius="16" TextElement.FontSize="24">
-                            <TextBlock Text="#" FontSize="26" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,3"/>
+                            <TextBlock x:Name="EmptyGlyph" Text="#" FontSize="26" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,3"/>
                         </Border>
                         <TextBlock x:Name="EmptyTitle" Text="Ninguém escreveu nada ainda" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,16,0,4"
                                    TextAlignment="Center" TextWrapping="Wrap"/>
@@ -458,6 +600,23 @@
                     <!-- Escrever -->
                     <Border Grid.Row="2" BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Padding="16,12,16,10">
                         <StackPanel>
+                            <!-- (1.5.0) A pessoa da conversa apareceu com outra chave -->
+                            <Border x:Name="KeyBanner" Style="{StaticResource InsetCard}" Padding="14,12" Margin="0,0,0,10" Visibility="Collapsed"
+                                    BorderBrush="{DynamicResource AmberSoft}">
+                                <DockPanel>
+                                    <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE7BA;" FontSize="16" Foreground="{DynamicResource Amber}"
+                                               VerticalAlignment="Top" Margin="0,1,12,0"/>
+                                    <StackPanel>
+                                        <TextBlock x:Name="KeyBannerTitle" FontWeight="SemiBold" TextWrapping="Wrap"/>
+                                        <TextBlock x:Name="KeyBannerText" Style="{StaticResource Caption}" TextWrapping="Wrap" Margin="0,3,0,0" LineHeight="17"/>
+                                        <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                                            <Button Content="Aceitar a chave nova" Style="{StaticResource PrimaryButton}" MinHeight="32" Height="32" Padding="12,0" FontSize="12.5"
+                                                    Margin="0,0,8,0" Click="AcceptKey_Click"/>
+                                            <Button Content="Manter a antiga" MinHeight="32" Height="32" Padding="12,0" FontSize="12.5" Click="KeepKey_Click"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </DockPanel>
+                            </Border>
                             <!-- Imagem anexada, antes de mandar -->
                             <Border x:Name="AttachmentPanel" Style="{StaticResource InsetCard}" Padding="10" Margin="0,0,0,10" Visibility="Collapsed">
                                 <DockPanel>
@@ -531,7 +690,8 @@
                             <ItemsControl x:Name="PeopleList" Focusable="False">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
-                                        <Border x:Name="Row" CornerRadius="12" Padding="8,7" Margin="0,0,0,2" Background="Transparent">
+                                        <Border x:Name="Row" CornerRadius="12" Padding="8,7" Margin="0,0,0,2" Background="Transparent"
+                                                MouseRightButtonUp="Person_MouseRightButtonUp">
                                             <DockPanel>
                                                 <Grid Width="36" Height="36">
                                                     <controls:AvatarView Colors="{Binding Avatar}" Initial="{Binding Initial}" Photo="{Binding Photo}" TextElement.FontSize="14"/>
@@ -539,6 +699,10 @@
                                                     <Border x:Name="StateDot" Width="13" Height="13" CornerRadius="6.5" HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                                             Margin="0,0,-2,-2" BorderThickness="2.5" BorderBrush="{DynamicResource Surface}" Background="{DynamicResource Success}"/>
                                                 </Grid>
+                                                <!-- (1.5.0) Mandar mensagem direta (aparece ao passar o mouse) -->
+                                                <Button x:Name="MessageButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE8BD;" Width="32" Height="32"
+                                                        MinHeight="32" FontSize="13" Margin="6,0,0,0" VerticalAlignment="Center" ToolTip="Mandar mensagem direta"
+                                                        Tag="{Binding}" Click="MessagePerson_Click" Visibility="Collapsed"/>
                                                 <Button x:Name="WatchButton" DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" MinHeight="32" Height="32" Padding="12,0"
                                                         FontSize="12.5" Margin="8,0,0,0" VerticalAlignment="Center" Tag="{Binding}" Click="Watch_Click"
                                                         Visibility="{Binding IsLive, Converter={StaticResource BoolToVisibility}}">
@@ -563,6 +727,13 @@
                                                 <Setter TargetName="StateDot" Property="Background" Value="{DynamicResource Live}"/>
                                                 <Setter TargetName="Status" Property="Foreground" Value="{DynamicResource Pink}"/>
                                             </DataTrigger>
+                                            <MultiDataTrigger>
+                                                <MultiDataTrigger.Conditions>
+                                                    <Condition Binding="{Binding IsMouseOver, ElementName=Row}" Value="True"/>
+                                                    <Condition Binding="{Binding CanMessage}" Value="True"/>
+                                                </MultiDataTrigger.Conditions>
+                                                <Setter TargetName="MessageButton" Property="Visibility" Value="Visible"/>
+                                            </MultiDataTrigger>
                                         </DataTemplate.Triggers>
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
@@ -587,6 +758,36 @@
                         </StackPanel>
                     </Border>
                 </Grid>
+            </Border>
+
+            <!-- ───────────── (1.5.0) Quem é a pessoa da conversa privada ───────────── -->
+            <Border x:Name="DirectProfileCard" Grid.Column="4" Style="{StaticResource Card}" Margin="0" Padding="0" Visibility="Collapsed">
+                <ScrollViewer Style="{StaticResource PageScroll}">
+                    <StackPanel Margin="20,24,20,20">
+                        <Grid Width="72" Height="72" HorizontalAlignment="Center">
+                            <controls:AvatarView x:Name="ProfileAvatar" TextElement.FontSize="26"/>
+                            <Border x:Name="ProfileDot" Width="20" Height="20" CornerRadius="10" HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                                    BorderThickness="3.5" BorderBrush="{DynamicResource Surface}" Background="{DynamicResource TextSubtle}"/>
+                        </Grid>
+                        <TextBlock x:Name="ProfileName" FontSize="17" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,12,0,3" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock x:Name="ProfileStatus" Style="{StaticResource Caption}" HorizontalAlignment="Center" TextAlignment="Center" TextWrapping="Wrap"/>
+                        <Border Style="{StaticResource InsetCard}" Padding="14,12" Margin="0,20,0,0">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE72E;" FontSize="13" Foreground="{DynamicResource Success}" Margin="0,0,8,0"/>
+                                    <TextBlock Text="Código de segurança" FontWeight="SemiBold"/>
+                                </StackPanel>
+                                <TextBlock x:Name="ProfileCode" FontFamily="{DynamicResource FontMono}" FontSize="15" Margin="0,9,0,7" TextWrapping="Wrap"/>
+                                <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" LineHeight="17"
+                                           Text="Confira com a pessoa por voz ou pessoalmente: se o código for igual nos dois PCs, ninguém está no meio da conversa."/>
+                            </StackPanel>
+                        </Border>
+                        <TextBlock Style="{StaticResource Caption}" TextWrapping="Wrap" LineHeight="17" Margin="2,14,2,0"
+                                   Text="As mensagens vão cifradas só para a pessoa, por qualquer servidor em que vocês dois estejam, e ficam guardadas cifradas neste PC."/>
+                        <Button x:Name="ProfileRemove" Style="{StaticResource GhostButton}" Content="Apagar a conversa deste PC" Margin="0,16,0,0" HorizontalAlignment="Center"
+                                Click="RemoveConversation_Click"/>
+                    </StackPanel>
+                </ScrollViewer>
             </Border>
         </Grid>
 

@@ -107,6 +107,7 @@ public sealed class RoomPersonRow(Guid id) : RoomRowBase, IRoomRow
     private StreamMode _mode;
     private string? _watchAddress;
     private bool _viaServer;
+    private bool _canMessage;
     private ImageSource? _photo;
 
     public Guid Id { get; } = id;
@@ -126,11 +127,14 @@ public sealed class RoomPersonRow(Guid id) : RoomRowBase, IRoomRow
     /// <summary>(1.4.1) A transmissão está no servidor ScreenFlow: assistir é pedir ao servidor a transmissão desta pessoa.</summary>
     public bool ViaServer { get => _viaServer; private set => Set(ref _viaServer, value, nameof(ViaServer)); }
     public string ActionText => LiveMode == StreamMode.AudioOnly ? "Ouvir" : "Assistir";
+    /// <summary>(1.5.0) Dá para mandar mensagem direta (a pessoa está num ScreenFlow com chat privado).</summary>
+    public bool CanMessage { get => _canMessage; private set => Set(ref _canMessage, value, nameof(CanMessage)); }
 
     public void Update(RoomPeer peer)
     {
         var presence = peer.Presence;
         Name = presence.Name;
+        CanMessage = presence.IdentityKey is not null;
         IsLive = presence.Live;
         LiveMode = presence.LiveMode;
         InVoice = presence.InAnyVoice;
@@ -149,7 +153,7 @@ public sealed class RoomPersonRow(Guid id) : RoomRowBase, IRoomRow
     }
 
     internal static RoomPersonRow Demo(Guid id, string name, string status, bool live, StreamMode mode, string? address, bool inVoice, ImageSource? photo = null)
-        => new(id) { Name = name, StatusText = status, IsLive = live, LiveMode = mode, WatchAddress = address, InVoice = inVoice, Photo = photo };
+        => new(id) { Name = name, StatusText = status, IsLive = live, LiveMode = mode, WatchAddress = address, InVoice = inVoice, Photo = photo, CanMessage = true };
 }
 
 public readonly record struct VoiceMemberState(Guid Id, string Name, bool Muted, bool Deafened, bool IsMe);
@@ -345,6 +349,8 @@ public sealed class ChatRow : RoomRowBase
     private ImageSource? _photo;
     private ImageSource? _picture;
     private ChatImageState _imageState;
+    private DirectState? _delivery;
+    private bool _showDelivery;
 
     public ChatRow(RoomChatMessage message, bool isMine, bool fromArchive = false)
     {
@@ -428,6 +434,55 @@ public sealed class ChatRow : RoomRowBase
 
     /// <summary>Primeira de um grupo: mostra foto, nome e hora.</summary>
     public bool ShowHeader { get => _showHeader; set => Set(ref _showHeader, value, nameof(ShowHeader)); }
+
+    // ───────────── Mensagens diretas (1.5.0) ─────────────
+
+    /// <summary>A conversa privada da mensagem (null: mensagem de um canal).</summary>
+    public Guid? DirectPeer { get; init; }
+
+    /// <summary>A chave da imagem de uma mensagem privada (a imagem fica guardada e circula cifrada).</summary>
+    public byte[]? ImageKey { get; init; }
+
+    /// <summary>Como está uma mensagem privada sua (null nas dos outros e nas dos canais).</summary>
+    public DirectState? Delivery
+    {
+        get => _delivery;
+        set => Set(ref _delivery, value, nameof(Delivery), nameof(DeliveryText), nameof(DeliveryGlyph), nameof(DeliveryHint));
+    }
+
+    /// <summary>Mostra o estado embaixo da mensagem (as que ainda não chegaram e a última entregue).</summary>
+    public bool ShowDelivery { get => _showDelivery; set => Set(ref _showDelivery, value, nameof(ShowDelivery)); }
+
+    public string DeliveryText => _delivery switch
+    {
+        DirectState.Pending => "Esperando a pessoa aparecer",
+        DirectState.Sent => "Enviada",
+        DirectState.Delivered => "Entregue",
+        _ => string.Empty,
+    };
+
+    public string DeliveryGlyph => _delivery switch
+    {
+        DirectState.Pending => "\uE823",
+        DirectState.Sent => "\uE73E",
+        DirectState.Delivered => "\uE930",
+        _ => string.Empty,
+    };
+
+    public string DeliveryHint => _delivery switch
+    {
+        DirectState.Pending => "A pessoa não está em nenhuma sala ou servidor agora: a mensagem fica guardada e vai sozinha quando ela aparecer.",
+        DirectState.Sent => "Saiu deste PC; falta a outra pessoa confirmar que recebeu.",
+        DirectState.Delivered => "A outra pessoa recebeu.",
+        _ => string.Empty,
+    };
+
+    /// <summary>Os bytes da imagem para mostrar ou salvar (numa mensagem privada, já abertos). Null se ainda não chegou.</summary>
+    public byte[]? ImageData()
+    {
+        if (Image is not { } image || AppServices.Blobs.Get(image.Id) is not { } data) return null;
+        return ImageKey is { } key ? DirectCrypto.OpenBlob(data, key) : data;
+    }
 }
 
 /// <summary>(1.5.0) Como está a conexão de um servidor.</summary>

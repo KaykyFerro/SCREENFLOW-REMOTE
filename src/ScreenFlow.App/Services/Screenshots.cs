@@ -312,6 +312,15 @@ public static class Screenshots
             return Go(window, window.ChatPage, 500);
         });
         AppServices.Room.ShowServer(AppServices.Room.Open);
+        // (1.5.0) Mensagens diretas: a lista de conversas, a conversa aberta (com o estado de entrega) e quem é a pessoa.
+        await Shot("42-mensagens-diretas.png", () =>
+        {
+            var direct = AppServices.Direct;
+            direct.Show(direct.Conversations.FirstOrDefault(c => c.DemoMessages.Count > 1) ?? direct.Conversations.FirstOrDefault());
+            direct.Showing = true;
+            return Go(window, window.ChatPage, 500);
+        });
+        AppServices.Direct.Showing = false;
         await Shot("41-adicionar-servidor.png", () =>
         {
             dialog = ServerDialogs.BuildAdd(window, ServerDialogs.AddMode.Network, out _, ("amigos-do-cs", "senha-da-rede", "Amigos do CS"));

@@ -507,6 +507,8 @@ public sealed class RoomService
         _photos.Remove(id);
         PhotosVersion++;
         foreach (var server in AllServers) server.OnBlobArrived(id);
+        AppServices.Direct.OnBlobArrived(id);
+        AppServices.Direct.OnPhotosChanged();
     }
 
     // ───────────────────────── Juntando todos ─────────────────────────
@@ -558,6 +560,8 @@ public sealed class RoomService
         _hub = new RoomHub(settings.DiscoveryPort);
         _hub.Start();
         _talkKey = new PushToTalkKeyWatcher(held => VoiceServer?.SetTalkKey(held));
+        // (1.5.0) O chat privado abre antes das salas: cada uma anuncia a chave dele.
+        AppServices.Direct.Start(SelfId);
         Open.Start(_hub);
         _store = new SpaceStore();
         foreach (var space in _store.Spaces)
@@ -585,6 +589,7 @@ public sealed class RoomService
         _talkKey = null;
         if (_saveTimer.IsEnabled) SaveSpacesNow();
         foreach (var server in AllServers) await server.StopAsync();
+        AppServices.Direct.Stop();
         _hub?.Dispose();
         _hub = null;
     }
@@ -776,6 +781,7 @@ public sealed class RoomService
         }
         if (_active != Open) ShowServer(Open);
         Open.LoadDemo(inVoice, unread);
+        AppServices.Direct.LoadDemo(Open.People.Take(3).Select(p => (p.Id, p.Name, p.Photo)).ToList());
         _panelSource = PanelServer;
         SyncPanel();
         ProfileChanged?.Invoke();

@@ -32,7 +32,9 @@ namespace ScreenFlow.Core.Room;
 /// <remarks>
 /// 1.5.0: servidores por rede do Radmin. <see cref="PeerList"/> conta quem mais está no servidor (para quem o broadcast
 /// não alcança), <see cref="ChannelTable"/> leva os canais do servidor, <see cref="Direct"/> e <see cref="DirectAck"/> são
-/// o chat privado (cifrado só para a outra pessoa). Só valem dentro de um pacote lacrado.
+/// o chat privado. <see cref="PeerList"/> e <see cref="ChannelTable"/> só valem dentro de um pacote lacrado (com a chave
+/// do servidor); <see cref="Direct"/> e <see cref="DirectAck"/> valem em qualquer sala, porque o conteúdo já vai cifrado só
+/// para a outra pessoa (<see cref="DirectCrypto"/>).
 /// </remarks>
 public enum RoomPacketType : byte
 {
@@ -90,8 +92,11 @@ public sealed record RoomPresence(
     RoomBlobRef? Avatar = null,
     string? VoiceChannel = null,
     ValueList<RoomChannel>? Channels = null,
-    string? ExchangeKey = null)
+    string? ExchangeKey = null,
+    string? IdentityKey = null)
 {
+    // IdentityKey (1.5.0): a chave pública do chat privado deste PC (P-256, 65 bytes em base64), a mesma sempre.
+
     /// <summary>Na voz "Geral" (a única das versões antigas).</summary>
     public bool InVoice => Flags.HasFlag(PresenceFlags.InVoice);
 
@@ -165,6 +170,7 @@ public static partial class RoomPacket
     private const byte VoiceChannelField = 2;
     private const byte CreatedChannelField = 3;
     private const byte ExchangeKeyField = 4;
+    private const byte IdentityKeyField = 5;
 
     // ───────────────────────── Cabeçalho ─────────────────────────
 
@@ -301,6 +307,13 @@ public static partial class RoomPacket
             buffer[offset++] = (byte)exchangeBytes.Length;
             exchangeBytes.CopyTo(buffer, offset); offset += exchangeBytes.Length;
         }
+        // (1.5.0) A chave do chat privado: quem quiser mandar uma mensagem só para este PC cifra com ela.
+        if (presence.IdentityKey is { } identity && TryDecodeKey(identity) is { Length: DirectIdentity.PublicKeyBytes } identityBytes && identityBytes[0] == 0x04)
+        {
+            buffer[offset++] = IdentityKeyField;
+            buffer[offset++] = (byte)identityBytes.Length;
+            identityBytes.CopyTo(buffer, offset); offset += identityBytes.Length;
+        }
         // Um campo por canal criado (cada campo tem no máximo 255 bytes). Os que não cabem no pacote ficam de fora.
         var maxChannels = presence.IsServer ? RoomChannels.MaxPerServer : RoomChannels.MaxPerPerson;
         foreach (var channel in RoomChannels.Normalize(presence.Channels, maxChannels))
@@ -337,6 +350,7 @@ public static partial class RoomPacket
         string? voiceChannel = null;
         List<RoomChannel>? created = null;
         string? exchangeKey = null;
+        string? identityKey = null;
         var maxChannels = flags.HasFlag(PresenceFlags.Server) ? RoomChannels.MaxPerServer : RoomChannels.MaxPerPerson;
         while (offset + 2 <= body.Length)
         {
@@ -360,6 +374,10 @@ public static partial class RoomPacket
             {
                 exchangeKey = Convert.ToBase64String(value);
             }
+            else if (field == IdentityKeyField && length == DirectIdentity.PublicKeyBytes && value[0] == 0x04)
+            {
+                identityKey = Convert.ToBase64String(value);
+            }
             else if (field == CreatedChannelField && length > 1 && (created?.Count ?? 0) < maxChannels
                      && RoomChannels.Create((RoomChannelKind)value[0], Encoding.UTF8.GetString(value[1..])) is { IsDefault: false } channel)
             {
@@ -369,7 +387,7 @@ public static partial class RoomPacket
         }
         presence = new RoomPresence(name, Truncate(version, 24), flags, mode, viewers, port,
             address.Equals(IPAddress.Any) ? null : address, sequence, avatar, voiceChannel,
-            created is null ? null : new ValueList<RoomChannel>(created), exchangeKey);
+            created is null ? null : new ValueList<RoomChannel>(created), exchangeKey, identityKey);
         return true;
     }
 
@@ -642,7 +660,7 @@ public static partial class RoomPacket
         return text[..cut];
     }
 
-    private static string TrimToBytes(string text, int maxBytes)
+    internal static string TrimToBytes(string text, int maxBytes)
     {
         while (text.Length > 0 && Encoding.UTF8.GetByteCount(text) > maxBytes) text = Truncate(text, text.Length - 1);
         return text;

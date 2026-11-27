@@ -38,6 +38,11 @@ public static class AppServices
     /// <summary>Sala da rede: quem está com o ScreenFlow aberto na rede, a voz e o chat. Criada na thread da interface.</summary>
     public static RoomService Room => _room ??= new RoomService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
 
+    private static DirectService? _direct;
+
+    /// <summary>(1.5.0) As mensagens diretas (chat privado, cifrado só para a outra pessoa). Criadas na thread da interface.</summary>
+    public static DirectService Direct => _direct ??= new DirectService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+
     /// <summary>(1.4.1) O que o instalador pediu ao abrir o ScreenFlow (instalar o Tailscale ou o Radmin VPN junto).</summary>
     public static StartupOptions Startup { get; set; } = StartupOptions.None;
 

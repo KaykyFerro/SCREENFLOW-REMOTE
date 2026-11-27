@@ -868,6 +868,8 @@ public static class SelfTest
         var selfB = Guid.NewGuid();
         using var hubA = new RoomHub(SpaceHubA);
         using var hubB = new RoomHub(SpaceHubB);
+        using var identityA = DirectIdentity.Create();
+        using var identityB = DirectIdentity.Create();
         var rooms = new List<NetworkRoom>();
         NetworkRoom Room(Guid self, string name, RoomHub hub, byte[]? key)
         {
@@ -876,6 +878,7 @@ public static class SelfTest
                 BroadcastTargets = () => [],
                 OutputEnabled = false,
                 SpaceChannels = key is null ? null : new SpaceChannelTable(),
+                IdentityKey = (self == selfA ? identityA : identityB).PublicKey,
             };
             if (key is not null) room.UseSpaceKey(key);
             rooms.Add(room);
@@ -973,7 +976,10 @@ public static class SelfTest
             await spaceA.LeaveVoiceAsync();
             await spaceB.LeaveVoiceAsync();
 
-            var ok = metOk && isolatedOk && chatOk && leakOk && tableOk && channelOk && voiceOk && quietOk;
+            // (1.5.0) Mensagem direta de A para B pelo servidor: cifrada só para B, entregue e confirmada, e nada na sala da rede.
+            var directOk = await DirectTestAsync(selfA, selfB, identityA, identityB, spaceA, spaceB, openB, line);
+
+            var ok = metOk && isolatedOk && chatOk && leakOk && tableOk && channelOk && voiceOk && quietOk && directOk;
             line(ok
                 ? $"PASSOU: na mesma porta, A e B se viram no servidor e na sala da rede, as outras chaves ficaram sozinhas, o chat de cada um ficou no seu lugar, o canal #estratégia de A chegou em B e a voz do servidor tocou ({spaceB.Voice?.FramesDecoded ?? 0} quadros em B)."
                 : "FALHOU: os servidores por rede não funcionaram como deveriam.");
@@ -990,6 +996,86 @@ public static class SelfTest
             foreach (var room in rooms) await room.DisposeAsync();
             line("Servidores fechados.");
         }
+    }
+
+    /// <summary>O chat privado de verdade (cifra, envio, confirmação e histórico) entre duas salas do autoteste.</summary>
+    private static async Task<bool> DirectTestAsync(Guid selfA, Guid selfB, DirectIdentity identityA, DirectIdentity identityB,
+        NetworkRoom from, NetworkRoom to, NetworkRoom elsewhere, Action<string> line)
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "ScreenFlow-autoteste-dm-" + Guid.NewGuid().ToString("N"));
+        var gate = new object();
+        try
+        {
+            var key = RandomNumberGenerator.GetBytes(32);
+            var chatA = new DirectChat(selfA, identityA, new DirectStore(Path.Combine(folder, "a"), key), new RoomTransport(from));
+            var chatB = new DirectChat(selfB, identityB, new DirectStore(Path.Combine(folder, "b"), key), new RoomTransport(to));
+            var received = new TaskCompletionSource<DirectRecord>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var leaked = 0;
+            chatB.MessageChanged += (_, record) =>
+            {
+                if (record.State == DirectState.Received) received.TrySetResult(record);
+            };
+            void Wire(NetworkRoom room, DirectChat chat) => room.DirectReceived += packet =>
+            {
+                lock (gate) chat.Receive(packet.Type, packet.Sender, packet.SenderName, packet.IdentityKey, packet.Body, DateTimeOffset.UtcNow,
+                    reply => room.SendDirect(packet.Sender, reply));
+            };
+            Wire(from, chatA);
+            Wire(to, chatB);
+            elsewhere.DirectReceived += _ => Interlocked.Increment(ref leaked);
+            const string text = "Mensagem direta do autoteste 🔒";
+            var announced = from.IdentityKeyOf(selfB);
+            if (announced is null)
+            {
+                line("FALHOU: B não anunciou a chave do chat privado na presença.");
+                return false;
+            }
+            lock (gate)
+            {
+                chatA.Open(selfB, "Autoteste B", announced);
+                chatA.Send(selfB, new DirectPayload(text), DateTimeOffset.UtcNow);
+            }
+            var arrivedOk = await Task.WhenAny(received.Task, Task.Delay(6000)) == received.Task
+                && received.Task.Result is { Author: var author, Text: text } && author == selfA;
+            var deliveredOk = await WaitAsync(() =>
+            {
+                lock (gate)
+                {
+                    chatA.Tick(DateTimeOffset.UtcNow);
+                    return chatA.PendingCount == 0 && chatA.Store.Load(selfB).SingleOrDefault()?.State == DirectState.Delivered;
+                }
+            }, 8);
+            bool storedOk;
+            lock (gate) storedOk = chatB.Store.Find(selfA) is { Unread: 1, IdentityKey: { } pinned } && pinned == identityA.PublicKey
+                && chatB.Store.Load(selfA).Count == 1;
+            await Task.Delay(500);
+            var leakOk = Volatile.Read(ref leaked) == 0;
+            if (!arrivedOk) line("FALHOU: a mensagem direta não chegou em B (ou chegou diferente).");
+            if (!deliveredOk) line("FALHOU: A não recebeu a confirmação de entrega da mensagem direta.");
+            if (!storedOk) line("FALHOU: B não guardou a conversa com a chave de A.");
+            if (!leakOk) line($"FALHOU: a mensagem direta apareceu em outra sala ({leaked} pacote(s)).");
+            var ok = arrivedOk && deliveredOk && storedOk && leakOk;
+            if (ok) line("PASSOU: a mensagem direta foi de A para B pelo servidor, cifrada só para B, voltou a confirmação de entrega e ficou guardada (cifrada) nos dois lados.");
+            return ok;
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Autoteste das mensagens diretas falhou", exception);
+            line($"FALHOU com erro nas mensagens diretas: {exception.GetType().Name}: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch (Exception) { }
+        }
+    }
+
+    /// <summary>O chat privado do autoteste vai só pela sala indicada.</summary>
+    private sealed class RoomTransport(NetworkRoom room) : IDirectTransport
+    {
+        public bool CanReach(Guid peer, string identityKey) => room.IdentityKeyOf(peer) == identityKey;
+
+        public bool Send(Guid peer, string identityKey, byte[] packet) => CanReach(peer, identityKey) && room.SendDirect(peer, packet);
     }
 
     private static async Task<bool> WaitAsync(Func<bool> condition, int seconds)

@@ -76,10 +76,17 @@ public partial class MainWindow : Window
         room.ProfileChanged += UpdateProfile;
         room.ArchiveFailed += OnArchiveFailed;
         UpdateProfile();
-        room.IsChatInFront = () => Host.Content is Pages.ChatPage && IsVisible && IsActive && WindowState != WindowState.Minimized;
+        // (1.5.0) Com as mensagens diretas abertas, os canais do servidor não estão na frente (e o contrário também).
+        room.IsChatInFront = () => ChatInFront() && !AppServices.Direct.Showing;
+        var direct = AppServices.Direct;
+        direct.IsChatInFront = ChatInFront;
+        direct.UnreadChanged += UpdateChatBadge;
+        direct.MessageArrived += OnDirectMessage;
         Activated += (_, _) =>
         {
-            if (Host.Content is Pages.ChatPage) AppServices.Room.MarkRead();
+            if (Host.Content is not Pages.ChatPage) return;
+            if (AppServices.Direct.Showing) AppServices.Direct.MarkRead();
+            else AppServices.Room.MarkRead();
         };
         UpdateVoicePanel();
         UpdateChatBadge();
@@ -787,6 +794,9 @@ public partial class MainWindow : Window
     private static string? VoiceTrayLine()
     {
         var room = AppServices.Room;
+        var direct = AppServices.Direct.Unread;
+        if (!room.InVoice && direct > 0)
+            return direct == 1 ? "1 mensagem direta nova" : $"{direct} mensagens diretas novas";
         if (!room.InVoice)
             return room.Unread switch { 0 => null, 1 => "1 mensagem nova na sala", var n => $"{n} mensagens novas na sala" };
         var others = Math.Max(0, room.VoiceMembers.Count - 1);
@@ -876,9 +886,12 @@ public partial class MainWindow : Window
         VoiceMemberMenu.Open(element, member, this);
     }
 
+    /// <summary>A tela do chat está aberta e na frente de quem usa.</summary>
+    private bool ChatInFront() => Host.Content is Pages.ChatPage && IsVisible && IsActive && WindowState != WindowState.Minimized;
+
     private void UpdateChatBadge()
     {
-        var unread = AppServices.Room.Unread;
+        var unread = AppServices.Room.Unread + AppServices.Direct.Unread;
         ChatBadge.Visibility = unread > 0 ? Visibility.Visible : Visibility.Collapsed;
         ChatCount.Text = unread > 9 ? "9+" : unread.ToString();
         SetNavBadge(NavChat, unread > 0);
@@ -905,8 +918,50 @@ public partial class MainWindow : Window
     /// <summary>Abre o chat num servidor (null: a sala da rede) e num canal de texto (o da mensagem que chegou).</summary>
     public void OpenChannel(Guid? server, string? channel)
     {
+        AppServices.Direct.Showing = false;
         AppServices.Room.OpenChannel(server, channel);
         Navigate(ChatPage);
+    }
+
+    /// <summary>(1.5.0) Abre (ou começa) a conversa privada com alguém que está num servidor.</summary>
+    public void OpenDirect(Guid peer, string name)
+    {
+        if (AppServices.Direct.OpenWith(peer, name, out var problem) is null)
+        {
+            if (problem is not null) Toast(problem, ToastKind.Info);
+            return;
+        }
+        Navigate(ChatPage);
+    }
+
+    /// <summary>(1.5.0) Abre uma conversa privada que já existe (o aviso de mensagem nova).</summary>
+    public void OpenConversation(Guid peer)
+    {
+        AppServices.Direct.Show(peer);
+        ShowFromTray(ChatPage);
+    }
+
+    /// <summary>(1.5.0) Mensagem direta nova sem ninguém ver: som, aviso e bandeja (como as do chat, com o som próprio).</summary>
+    private void OnDirectMessage(DirectArrival arrival)
+    {
+        var now = DateTimeOffset.UtcNow;
+        if (AppServices.Settings.Current.MessageSounds && now - _lastMessageSound > TimeSpan.FromSeconds(2))
+        {
+            _lastMessageSound = now;
+            AppSoundPlayer.Shared.Play(AppSound.DirectMessage);
+        }
+        var peer = arrival.Peer;
+        var preview = Preview(arrival.Preview, 110);
+        if (IsInBackground)
+        {
+            if (now - _lastChatBalloon < TimeSpan.FromSeconds(10)) return;
+            _lastChatBalloon = now;
+            TrayNotify($"{arrival.Name} mandou uma mensagem direta", preview, () => OpenConversation(peer));
+            return;
+        }
+        if (now - _lastChatToast < TimeSpan.FromSeconds(3)) return;
+        _lastChatToast = now;
+        Toast($"{arrival.Name} (mensagem direta): {preview}", ToastKind.Info, "Responder", () => OpenConversation(peer));
     }
 
     // ───────────────────────── Mixer rápido (1.5.0) ─────────────────────────

@@ -29,9 +29,12 @@ public partial class ChatPage : UserControl, IShellPage
     private ObservableCollection<ChatRow>? _messages;
     /// <summary>Mostrar quem está na rede: null segue a largura da janela; o botão de pessoas escolhe.</summary>
     private bool? _peopleWanted;
-    /// <summary>(1.5.0) O que estava escrito (e a imagem anexada) em cada servidor, para não mandar no servidor errado.</summary>
-    private readonly Dictionary<RoomServer, (string Text, PreparedImage? Image)> _drafts = [];
-    private RoomServer? _shownServer;
+    /// <summary>
+    /// (1.5.0) O que estava escrito (e a imagem anexada) em cada servidor e em cada conversa privada, para não mandar no
+    /// lugar errado. A chave é o <see cref="RoomServer"/> ou o id da pessoa da conversa.
+    /// </summary>
+    private readonly Dictionary<object, (string Text, PreparedImage? Image)> _drafts = [];
+    private object? _draftOwner;
 
     public ChatPage(MainWindow shell)
     {
@@ -40,6 +43,14 @@ public partial class ChatPage : UserControl, IShellPage
         var room = AppServices.Room;
         ServerList.ItemsSource = room.Servers;
         BindServer();
+        _draftOwner = ComposerOwner;
+        // (1.5.0) Mensagens diretas.
+        var direct = AppServices.Direct;
+        DirectList.ItemsSource = direct.Conversations;
+        direct.ShowingChanged += OnDirectModeChanged;
+        direct.CurrentChanged += OnDirectCurrentChanged;
+        direct.ConversationsChanged += UpdateDirectList;
+        direct.UnreadChanged += UpdateDirectBadge;
         room.ActiveServerChanged += OnActiveServerChanged;
         room.ServersChanged += OnServersChanged;
         room.CurrentTextChanged += ShowChannel;
@@ -60,7 +71,8 @@ public partial class ChatPage : UserControl, IShellPage
 
     public void OnShown()
     {
-        AppServices.Room.MarkRead();
+        if (DirectMode) AppServices.Direct.MarkRead();
+        else AppServices.Room.MarkRead();
         UpdateAll();
         Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
         {
@@ -75,6 +87,8 @@ public partial class ChatPage : UserControl, IShellPage
         UpdateColumns();
         UpdatePeople();
         UpdateArchive();
+        UpdateDirectList();
+        UpdateDirectBadge();
     }
 
     // ───────────────────────── Servidores (1.5.0) ─────────────────────────
@@ -86,20 +100,42 @@ public partial class ChatPage : UserControl, IShellPage
         TextChannelList.ItemsSource = room.TextChannels;
         VoiceChannelList.ItemsSource = room.VoiceChannels;
         PeopleList.ItemsSource = room.People;
-        _shownServer = room.Active;
     }
 
     /// <summary>Trocou o servidor aberto: as listas e a caixa de escrever passam a ser as dele.</summary>
     private void OnActiveServerChanged()
     {
         var room = AppServices.Room;
-        if (_shownServer is { } previous)
+        BindServer();
+        SwitchComposer();
+        _stickToBottom = true;
+        UpdateAll();
+        if (room.IsAvailable && IsVisible && !AppServices.DemoMode && !DirectMode) Composer.Focus();
+    }
+
+    private void OnServersChanged()
+    {
+        var servers = AppServices.Room.AllServers;
+        foreach (var gone in _drafts.Keys.OfType<RoomServer>().Where(s => !servers.Contains(s)).ToList()) _drafts.Remove(gone);
+        UpdateState();
+    }
+
+    /// <summary>De quem é a caixa de escrever agora: o servidor aberto ou (1.5.0) a pessoa da conversa privada aberta.</summary>
+    private static object? ComposerOwner
+        => AppServices.Direct.Showing ? AppServices.Direct.Current?.Id : AppServices.Room.Active;
+
+    /// <summary>Guarda o que estava escrito para o dono anterior e mostra o rascunho do dono de agora.</summary>
+    private void SwitchComposer()
+    {
+        var owner = ComposerOwner;
+        if (Equals(owner, _draftOwner)) return;
+        if (_draftOwner is { } previous)
         {
             if (Composer.Text.Length > 0 || _attachment is not null) _drafts[previous] = (Composer.Text, _attachment);
             else _drafts.Remove(previous);
         }
-        BindServer();
-        if (_drafts.Remove(room.Active, out var draft))
+        _draftOwner = owner;
+        if (owner is not null && _drafts.Remove(owner, out var draft))
         {
             Composer.Text = draft.Text;
             Composer.CaretIndex = Composer.Text.Length;
@@ -110,16 +146,6 @@ public partial class ChatPage : UserControl, IShellPage
             Composer.Clear();
             SetAttachment(null);
         }
-        _stickToBottom = true;
-        UpdateAll();
-        if (room.IsAvailable && IsVisible && !AppServices.DemoMode) Composer.Focus();
-    }
-
-    private void OnServersChanged()
-    {
-        var servers = AppServices.Room.AllServers;
-        foreach (var gone in _drafts.Keys.Where(s => !servers.Contains(s)).ToList()) _drafts.Remove(gone);
-        UpdateState();
     }
 
     /// <summary>O cabeçalho do servidor aberto e, quando ele não está funcionando, o aviso com o que fazer.</summary>
@@ -133,9 +159,15 @@ public partial class ChatPage : UserControl, IShellPage
         if (!IsInitialized) return;
         var room = AppServices.Room;
         var server = room.Active;
-        var available = room.IsAvailable;
+        var direct = DirectMode;
+        // (1.5.0) As mensagens diretas não dependem do servidor aberto: aparecem mesmo com ele desligado.
+        var available = direct || room.IsAvailable;
         ContentGrid.Visibility = available ? Visibility.Visible : Visibility.Collapsed;
         ErrorPanel.Visibility = available ? Visibility.Collapsed : Visibility.Visible;
+        ChannelsCard.Visibility = direct ? Visibility.Collapsed : Visibility.Visible;
+        DirectCard.Visibility = direct ? Visibility.Visible : Visibility.Collapsed;
+        DirectButton.IsChecked = direct;
+        server.Row.IsSelected = !direct;
         UpdateServerHeader(server);
         if (available) return;
         var port = AppServices.Settings.Current.DiscoveryPort;
@@ -191,7 +223,9 @@ public partial class ChatPage : UserControl, IShellPage
 
     private void Server_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
-        if ((sender as FrameworkElement)?.DataContext is ServerRailRow row) AppServices.Room.ShowServer(row.Server);
+        if ((sender as FrameworkElement)?.DataContext is not ServerRailRow row) return;
+        AppServices.Direct.Showing = false;
+        AppServices.Room.ShowServer(row.Server);
     }
 
     private void Server_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
@@ -304,7 +338,10 @@ public partial class ChatPage : UserControl, IShellPage
         var wide = width >= 1400;
         ChannelsColumn.Width = new GridLength(wide ? 256 : width >= 1040 ? 236 : 216);
         var showPeople = _peopleWanted ?? width >= 1040;
-        PeopleCard.Visibility = showPeople ? Visibility.Visible : Visibility.Collapsed;
+        // (1.5.0) Nas mensagens diretas, no lugar de quem está no servidor fica quem é a pessoa da conversa.
+        var direct = DirectMode;
+        PeopleCard.Visibility = showPeople && !direct ? Visibility.Visible : Visibility.Collapsed;
+        DirectProfileCard.Visibility = showPeople && direct ? Visibility.Visible : Visibility.Collapsed;
         PeopleGap.Width = new GridLength(showPeople ? 14 : 0);
         PeopleColumn.Width = new GridLength(showPeople ? wide ? 290 : 256 : 0);
         PeopleToggle.IsChecked = showPeople;
@@ -353,6 +390,11 @@ public partial class ChatPage : UserControl, IShellPage
         if (room.VoiceChannel is { } channel)
             status += room.Deafened ? $" · na voz: {channel}, sem som" : room.MicrophoneOff ? $" · na voz: {channel}, mudo" : $" · na voz: {channel}";
         SelfStatus.Text = status;
+        if (DirectMode)
+        {
+            UpdateConversationHeader();
+            return;
+        }
         ChannelTopic.Text = room.CurrentText.Topic;
         ChannelTopic.ToolTip = room.CurrentText.Topic;
         ChannelTitle.Text = room.CurrentText.DisplayName;
@@ -364,7 +406,19 @@ public partial class ChatPage : UserControl, IShellPage
     /// <summary>Mostra a conversa do canal de texto aberto.</summary>
     private void ShowChannel()
     {
+        if (DirectMode)
+        {
+            ShowConversation();
+            return;
+        }
         var room = AppServices.Room;
+        ChannelHash.Text = "#";
+        EmptyGlyph.Text = "#";
+        SafetyPill.Visibility = Visibility.Collapsed;
+        KeyBanner.Visibility = Visibility.Collapsed;
+        Composer.IsEnabled = true;
+        AttachButton.IsEnabled = true;
+        PeopleToggle.ToolTip = room.Active.IsSpace ? "Mostrar ou esconder quem está no servidor" : "Mostrar ou esconder quem está na rede";
         if (_messages is not null) _messages.CollectionChanged -= OnMessagesChanged;
         _messages = room.Messages;
         _messages.CollectionChanged += OnMessagesChanged;
@@ -589,6 +643,26 @@ public partial class ChatPage : UserControl, IShellPage
     private void SendMessage()
     {
         if (string.IsNullOrWhiteSpace(Composer.Text) && _attachment is null) return;
+        if (DirectMode)
+        {
+            // (1.5.0) Na conversa privada: vai cifrada só para a pessoa (ou fica esperando ela aparecer).
+            string? problem;
+            try { problem = AppServices.Direct.Send(Composer.Text, _attachment); }
+            catch (Exception exception)
+            {
+                Log.Warn($"Mensagem direta não foi enviada: {exception.Message}");
+                problem = "A mensagem não foi enviada.";
+            }
+            if (problem is not null)
+            {
+                _shell.Toast(problem, ToastKind.Warning);
+                return;
+            }
+            Composer.Clear();
+            SetAttachment(null);
+            _stickToBottom = true;
+            return;
+        }
         bool sent;
         try { sent = AppServices.Room.Send(Composer.Text, _attachment); }
         catch (Exception exception)
@@ -619,6 +693,12 @@ public partial class ChatPage : UserControl, IShellPage
     private void UpdateComposerHint()
     {
         var room = AppServices.Room;
+        if (DirectMode)
+        {
+            ComposerHint.Text = "Enter envia · Shift+Enter pula linha · Ctrl+V cola uma imagem · só a pessoa lê";
+            ComposerHint.SetResourceReference(TextBlock.ForegroundProperty, "TextSubtle");
+            return;
+        }
         var old = room.CurrentText.IsDefaultText ? 0 : room.OldVersionCount;
         ComposerHint.Text = old switch
         {
@@ -722,10 +802,10 @@ public partial class ChatPage : UserControl, IShellPage
     /// <summary>Abre a imagem no visualizador do ScreenFlow e permite passar pelas imagens deste canal.</summary>
     private void OpenPicture(ChatRow row)
     {
-        var images = AppServices.Room.Messages
+        var images = (_messages ?? AppServices.Room.Messages)
             .Where(candidate => candidate.ImageState == ChatImageState.Ready
                 && candidate.Image is { } image
-                && AppServices.Blobs.Get(image.Id) is { Length: > 0 })
+                && AppServices.Blobs.Has(image.Id))
             .ToList();
         var index = images.IndexOf(row);
         if (index < 0)
@@ -739,7 +819,7 @@ public partial class ChatPage : UserControl, IShellPage
 
     private void SavePicture_Click(object sender, RoutedEventArgs e)
     {
-        if (RowOf(sender) is not { Image: { } image } || AppServices.Blobs.Get(image.Id) is not { } data)
+        if (RowOf(sender) is not { Image: not null } row || row.ImageData() is not { } data)
         {
             _shell.Toast("A imagem ainda não chegou.", ToastKind.Warning);
             return;
@@ -762,7 +842,7 @@ public partial class ChatPage : UserControl, IShellPage
 
     private void CopyPicture_Click(object sender, RoutedEventArgs e)
     {
-        if (RowOf(sender) is not { Image: { } image } || ImageTools.Decode(AppServices.Blobs.Get(image.Id)) is not { } bitmap)
+        if (RowOf(sender) is not { Image: not null } row || ImageTools.Decode(row.ImageData()) is not { } bitmap)
         {
             _shell.Toast("A imagem ainda não chegou.", ToastKind.Warning);
             return;
@@ -777,7 +857,9 @@ public partial class ChatPage : UserControl, IShellPage
 
     private void RetryPicture_Click(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.Tag is ChatRow row) AppServices.Room.RetryImage(row);
+        if ((sender as FrameworkElement)?.Tag is not ChatRow row) return;
+        if (row.DirectPeer is not null) AppServices.Direct.RetryImage(row);
+        else AppServices.Room.RetryImage(row);
     }
 
     private void SelfAvatar_MouseLeftButtonUp(object sender, MouseButtonEventArgs e) => _shell.OpenSettings(SettingsTab.General);
@@ -787,6 +869,240 @@ public partial class ChatPage : UserControl, IShellPage
     {
         Composer.Text = caption;
         SetAttachment(image);
+    }
+
+    // ───────────────────────── Mensagens diretas (1.5.0) ─────────────────────────
+
+    private static bool DirectMode => AppServices.Direct.Showing;
+
+    private void DirectButton_Click(object sender, RoutedEventArgs e)
+    {
+        var direct = AppServices.Direct;
+        direct.Showing = true;
+        // Abre a conversa mais recente, como quem volta para onde estava.
+        if (direct.Current is null && direct.Conversations.FirstOrDefault() is { } latest) direct.Show(latest);
+        DirectButton.IsChecked = true;
+    }
+
+    /// <summary>Entrou ou saiu das mensagens diretas: a coluna da esquerda, a conversa e a caixa de escrever mudam juntas.</summary>
+    private void OnDirectModeChanged()
+    {
+        SwitchComposer();
+        _stickToBottom = true;
+        ShowChannel();
+        UpdateAll();
+        // Voltou para o canal: o que chegou nele enquanto as mensagens diretas estavam abertas fica lido.
+        if (!DirectMode && IsVisible) AppServices.Room.MarkRead();
+        if (DirectMode && AppServices.Direct.Current is not null && IsVisible && !AppServices.DemoMode) Composer.Focus();
+    }
+
+    private void OnDirectCurrentChanged()
+    {
+        if (!DirectMode) return;
+        var switched = !Equals(ComposerOwner, _draftOwner);
+        SwitchComposer();
+        if (switched)
+        {
+            _stickToBottom = true;
+            ShowConversation();
+            if (IsVisible && !AppServices.DemoMode) Composer.Focus();
+        }
+        else UpdateConversationHeader();
+    }
+
+    /// <summary>Mostra a conversa privada aberta no meio (ou o convite para escolher uma).</summary>
+    private void ShowConversation()
+    {
+        var direct = AppServices.Direct;
+        if (_messages is not null) _messages.CollectionChanged -= OnMessagesChanged;
+        _messages = direct.Messages;
+        _messages.CollectionChanged += OnMessagesChanged;
+        MessageList.ItemsSource = _messages;
+        UpdateConversationHeader();
+        NoMessages.Visibility = _messages.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+        JumpButton.Visibility = Visibility.Collapsed;
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, ScrollToEnd);
+    }
+
+    /// <summary>O cabeçalho, o aviso de chave trocada e o cartão da pessoa da conversa aberta.</summary>
+    private void UpdateConversationHeader()
+    {
+        if (!IsInitialized) return;
+        var direct = AppServices.Direct;
+        var row = direct.Current;
+        ChannelHash.Text = "@";
+        EmptyGlyph.Text = "@";
+        ArchivePill.Visibility = Visibility.Collapsed;
+        PeopleToggle.ToolTip = "Mostrar ou esconder quem é a pessoa da conversa";
+        ChannelTitle.Text = row?.Name ?? "Mensagens diretas";
+        ChannelTopic.Text = row?.StatusText ?? (direct.Problem ?? "Escolha uma conversa na lista, ou comece uma pelo balão ao lado de alguém do servidor.");
+        ChannelTopic.ToolTip = ChannelTopic.Text;
+        SafetyPill.Visibility = row is { HasKey: true } ? Visibility.Visible : Visibility.Collapsed;
+        Composer.IsEnabled = row is not null && direct.IsAvailable;
+        AttachButton.IsEnabled = Composer.IsEnabled;
+        Composer.Tag = row is null ? "Escolha uma conversa" : $"Mensagem para {row.Name}";
+        EmptyTitle.Text = row is null ? "Mensagens diretas" : $"Começo da conversa com {row.Name}";
+        EmptyText.Text = row is null
+            ? "As conversas privadas aparecem aqui. Elas vão cifradas só para a outra pessoa e ficam guardadas neste PC, cifradas também."
+            : $"Só você e {row.Name} leem esta conversa. Se a pessoa estiver offline, a mensagem fica guardada e vai sozinha quando ela aparecer.";
+
+        var changed = row is { KeyChanged: true };
+        KeyBanner.Visibility = changed ? Visibility.Visible : Visibility.Collapsed;
+        if (changed)
+        {
+            KeyBannerTitle.Text = $"A chave de {row!.Name} mudou";
+            var code = direct.ChangedSafetyCode(row.Id);
+            KeyBannerText.Text = "Acontece quando a pessoa reinstala o ScreenFlow ou usa outro PC, mas também pode ser alguém se passando por ela. "
+                + "Nada do que chega com a chave nova aparece até você aceitar."
+                + (code is null ? string.Empty : $" Antes, confira com a pessoa por voz se o código novo é {code}.");
+        }
+
+        if (row is not null)
+        {
+            ProfileAvatar.Colors = row.Avatar;
+            ProfileAvatar.Initial = row.Initial;
+            ProfileAvatar.Photo = row.Photo;
+            ProfileName.Text = row.Name;
+            ProfileStatus.Text = row.StatusText;
+            ProfileDot.SetResourceReference(Border.BackgroundProperty, row.IsOnline ? "Success" : "TextSubtle");
+            ProfileCode.Text = direct.SafetyCode(row.Id) ?? "Aparece quando a pessoa entrar com o ScreenFlow 1.5.0.";
+        }
+        DirectProfileCard.IsEnabled = row is not null;
+        DirectProfileCard.Opacity = row is null ? 0.5 : 1;
+        UpdateComposerHint();
+    }
+
+    private void UpdateDirectList()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(UpdateDirectList);
+            return;
+        }
+        if (!IsInitialized) return;
+        ApplyDirectSearch();
+    }
+
+    private void UpdateDirectBadge()
+    {
+        if (!IsInitialized) return;
+        var unread = AppServices.Direct.Unread;
+        DirectButton.Tag = unread switch { 0 => null, > 99 => "99+", _ => unread.ToString() };
+    }
+
+    private void DirectSearch_TextChanged(object sender, TextChangedEventArgs e) => ApplyDirectSearch();
+
+    /// <summary>A busca: pelo nome da pessoa ou pelo começo da última mensagem.</summary>
+    private void ApplyDirectSearch()
+    {
+        var query = DirectSearch.Text.Trim();
+        var conversations = AppServices.Direct.Conversations;
+        foreach (var row in conversations)
+            row.IsVisible = query.Length == 0 || row.Name.Contains(query, StringComparison.CurrentCultureIgnoreCase)
+                || row.Preview.Contains(query, StringComparison.CurrentCultureIgnoreCase);
+        var none = !conversations.Any(c => c.IsVisible);
+        NoConversations.Visibility = none ? Visibility.Visible : Visibility.Collapsed;
+        NoConversations.Text = conversations.Count == 0
+            ? AppServices.Direct.Problem ?? "Nenhuma conversa ainda. Para começar, passe o mouse em alguém na lista de quem está no servidor e clique no balão (ou use o botão direito)."
+            : $"Nenhuma conversa com \"{query}\".";
+    }
+
+    private void Conversation_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not DirectConversationRow row) return;
+        AppServices.Direct.Show(row);
+        if (!AppServices.DemoMode) Composer.Focus();
+    }
+
+    private void Conversation_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.DataContext is not DirectConversationRow row) return;
+        e.Handled = true;
+        var direct = AppServices.Direct;
+        var menu = new ContextMenu { PlacementTarget = element };
+        menu.Items.Add(MenuItemFor("Abrir a conversa", "\uE8BD", () => direct.Show(row)));
+        if (direct.SafetyCode(row.Id) is { } code)
+            menu.Items.Add(MenuItemFor("Copiar o código de segurança", "\uE8C8", () => CopyText(code, "Código de segurança copiado.")));
+        menu.Items.Add(new Separator());
+        menu.Items.Add(MenuItemFor("Apagar a conversa deste PC…", "\uE74D", () => RemoveConversation(row), danger: true));
+        menu.IsOpen = true;
+    }
+
+    private void SafetyPill_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        // O código de segurança fica no cartão da pessoa, à direita.
+        _peopleWanted = true;
+        UpdateColumns();
+        if (AppServices.Direct.Current is { } row && AppServices.Direct.SafetyCode(row.Id) is { } code)
+            _shell.Toast($"Código de segurança com {row.Name}: {code}. Confira por voz se o da pessoa é igual.", ToastKind.Info,
+                "Copiar", () => CopyText(code, "Código de segurança copiado."));
+    }
+
+    private void CopyText(string text, string done)
+    {
+        try
+        {
+            Clipboard.SetText(text);
+            _shell.Toast(done, ToastKind.Success);
+        }
+        catch (Exception exception) { _shell.Toast($"Não deu para copiar: {exception.Message}", ToastKind.Warning); }
+    }
+
+    private void AcceptKey_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Direct.Current is not { } row) return;
+        if (!ConfirmDialog.Ask(Window.GetWindow(this), $"Aceitar a chave nova de {row.Name}?",
+                "Faça isso só depois de conferir com a pessoa (por voz ou pessoalmente) que o código de segurança novo é o mesmo no PC dela. A partir daqui, o que chegar com a chave nova aparece na conversa.",
+                "Aceitar"))
+            return;
+        AppServices.Direct.AcceptKey();
+        _shell.Toast($"Chave nova de {row.Name} aceita.", ToastKind.Success);
+    }
+
+    private void KeepKey_Click(object sender, RoutedEventArgs e) => AppServices.Direct.KeepKey();
+
+    private void RemoveConversation_Click(object sender, RoutedEventArgs e)
+    {
+        if (AppServices.Direct.Current is { } row) RemoveConversation(row);
+    }
+
+    private void RemoveConversation(DirectConversationRow row)
+    {
+        if (!ConfirmDialog.Ask(Window.GetWindow(this), $"Apagar a conversa com {row.Name} deste PC?",
+                "As mensagens somem deste PC (as suas que ainda não tinham chegado não vão mais). A outra pessoa continua com a conversa dela.",
+                "Apagar", danger: true))
+            return;
+        AppServices.Direct.Remove(row);
+        _shell.Toast("Conversa apagada deste PC.", ToastKind.Success);
+    }
+
+    private void MessagePerson_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is RoomPersonRow person) OpenDirect(person.Id, person.Name);
+    }
+
+    private void Person_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not FrameworkElement element || element.DataContext is not RoomPersonRow person) return;
+        e.Handled = true;
+        var menu = new ContextMenu { PlacementTarget = element };
+        var message = MenuItemFor(person.CanMessage ? "Mandar mensagem" : "Mandar mensagem (precisa do ScreenFlow 1.5.0)", "\uE8BD",
+            () => OpenDirect(person.Id, person.Name));
+        message.IsEnabled = person.CanMessage;
+        menu.Items.Add(message);
+        if (person.IsLive) menu.Items.Add(MenuItemFor(person.ActionText, "\uE768", () => _shell.WatchPerson(person)));
+        menu.IsOpen = true;
+    }
+
+    /// <summary>Abre (ou começa) a conversa privada com alguém do servidor.</summary>
+    internal void OpenDirect(Guid id, string name)
+    {
+        if (AppServices.Direct.OpenWith(id, name, out var problem) is null)
+        {
+            if (problem is not null) _shell.Toast(problem, ToastKind.Info);
+            return;
+        }
+        if (IsVisible && !AppServices.DemoMode) Composer.Focus();
     }
 
     // ───────────────────────── Pessoas ─────────────────────────

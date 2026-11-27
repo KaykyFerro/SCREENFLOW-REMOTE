@@ -213,6 +213,27 @@ public sealed class AppSettings
     private string? ServerPasswordProtected { get => SecretProtection.Protect(ServerPassword); set => ServerPassword = SecretProtection.Unprotect(value) ?? ServerPassword; }
     [JsonInclude, JsonPropertyName("HostedServerPasswordProtected")]
     private string? HostedServerPasswordProtected { get => SecretProtection.Protect(HostedServerPassword); set => HostedServerPassword = SecretProtection.Unprotect(value) ?? HostedServerPassword; }
+    /// <summary>
+    /// (1.5.0) A chave privada do chat privado deste PC (P-256): é ela que abre as mensagens diretas. Gravada cifrada; se
+    /// não abrir (outro PC ou outra conta do Windows), o PC passa a ter uma chave nova e as pessoas veem o aviso de troca.
+    /// </summary>
+    [JsonIgnore] public byte[]? DirectIdentityKey { get; set; }
+    /// <summary>(1.5.0) A chave que cifra as conversas privadas guardadas neste PC (32 bytes). Gravada cifrada.</summary>
+    [JsonIgnore] public byte[]? DirectHistoryKey { get; set; }
+    [JsonInclude, JsonPropertyName("DirectIdentityProtected")]
+    private string? DirectIdentityProtected { get => ProtectBytes(DirectIdentityKey); set => DirectIdentityKey = UnprotectBytes(value) ?? DirectIdentityKey; }
+    [JsonInclude, JsonPropertyName("DirectHistoryKeyProtected")]
+    private string? DirectHistoryKeyProtected { get => ProtectBytes(DirectHistoryKey); set => DirectHistoryKey = UnprotectBytes(value) ?? DirectHistoryKey; }
+
+    private static string? ProtectBytes(byte[]? bytes) => bytes is { Length: > 0 } ? SecretProtection.Protect(Convert.ToBase64String(bytes)) : null;
+
+    private static byte[]? UnprotectBytes(string? stored)
+    {
+        if (SecretProtection.Unprotect(stored) is not { } text) return null;
+        try { return Convert.FromBase64String(text); }
+        catch (FormatException) { return null; }
+    }
+
     [JsonInclude, JsonPropertyName("Pin"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     private string? LegacyPin { get => null; set => Pin ??= value; }
     [JsonInclude, JsonPropertyName("PrivateRoomCode"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]

@@ -60,6 +60,8 @@ internal static class VoiceMemberMenu
         menu.Items.Add(new MenuItem { Header = panel, Style = (Style)app.FindResource("MenuPanel") });
         menu.Items.Add(new Separator());
 
+        // (1.5.0) Conversa privada com a pessoa (cifrada só para ela).
+        menu.Items.Add(Item("Mandar mensagem", "\uE8BD", () => shell.OpenDirect(member.Id, member.Name)));
         var mute = Item("Silenciar para mim", "", () => room.SetPeerMuted(member.Id, !member.LocallyMuted), member.LocallyMuted);
         menu.Items.Add(mute);
         menu.Items.Add(Item("Volume normal (100%)", "", () => room.SetPeerVolume(member.Id, 1)));

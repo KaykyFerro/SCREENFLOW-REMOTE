@@ -224,6 +224,8 @@ public sealed class RoomServer
             CreatedChannels = IsSpace ? [] : settings.MyChannels,
             SpaceChannels = _table,
             BroadcastTargets = IsSpace ? SpaceBroadcasts : () => NetworkRoom.RadminBroadcasts(includeLan: false),
+            // (1.5.0) A chave do chat privado deste PC: quem quiser mandar uma mensagem direta cifra só para ela.
+            IdentityKey = AppServices.Direct.PublicKey,
         };
         // O volume de cada pessoa que você ajustou continua o mesmo nas próximas vezes.
         foreach (var (key, volume) in settings.PeerVolumes)
@@ -255,6 +257,7 @@ public sealed class RoomServer
             _dispatcher.BeginInvoke(() => _owner.OnBlobArrived(id));
         };
         room.BlobFailed += id => _dispatcher.BeginInvoke(() => OnBlobFailed(id));
+        room.DirectReceived += packet => _dispatcher.BeginInvoke(() => AppServices.Direct.OnDirect(this, packet));
         room.PeerWentLive += peer => _dispatcher.BeginInvoke(() => OnPeerWentLive(peer.Id));
         room.HostsChanged += () => _dispatcher.BeginInvoke(() => HostsChanged?.Invoke());
         room.ServerChanged += () => _dispatcher.BeginInvoke(DispatcherPriority.Background, OnRoomServerChanged);
@@ -1342,6 +1345,17 @@ public sealed class RoomServer
         return _room is { IsRunning: true } room && room.SendChat(text, attached, channel) is not null;
     }
 
+    // ───────────────────────── Mensagens diretas (1.5.0) ─────────────────────────
+
+    /// <summary>A chave do chat privado que a pessoa anuncia neste servidor (null: não está nele, ou está num ScreenFlow antigo).</summary>
+    public string? IdentityKeyOf(Guid peer) => _room is { IsRunning: true } room ? room.IdentityKeyOf(peer) : null;
+
+    /// <summary>Manda um pacote do chat privado para a pessoa por este servidor. false se ela não está nele.</summary>
+    public bool SendDirect(Guid peer, byte[] packet) => _room is { IsRunning: true } room && room.SendDirect(peer, packet);
+
+    /// <summary>Baixa um arquivo (a imagem cifrada de uma mensagem privada) de quem mandou, por este servidor.</summary>
+    public void FetchBlob(RoomBlobRef blob, Guid source) => _room?.FetchBlob(blob, source);
+
     /// <summary>A imagem não veio: pede de novo, a quem mandou e a todo mundo da sala (quem já baixou também tem).</summary>
     public void RetryImage(ChatRow row)
     {
@@ -1458,7 +1472,7 @@ public sealed class RoomServer
     }
 
     /// <summary>Mensagens seguidas da mesma pessoa (até 5 minutos) ficam juntas, sem repetir nome e foto.</summary>
-    private static void Regroup(ObservableCollection<ChatRow> messages, int index)
+    internal static void Regroup(ObservableCollection<ChatRow> messages, int index)
     {
         for (var i = Math.Max(0, index); i <= Math.Min(messages.Count - 1, index + 1); i++)
         {
@@ -1622,6 +1636,8 @@ public sealed class RoomServer
                 FollowRenames(previous.Presence.CreatedChannels, peer.Presence.CreatedChannels);
             _peers[peer.Id] = peer;
             _owner.RememberAvatar(peer.Id, peer.Presence.Avatar?.Id);
+            // (1.5.0) Alguém com quem você conversa no privado: confere a chave e manda o que estava esperando por ela.
+            AppServices.Direct.OnPeerSeen(peer.Id, peer.Presence.Name, peer.Presence.IdentityKey, peer.Presence.Avatar?.Id, appeared: !before.ContainsKey(peer.Id));
         }
         Sync(People, peers.Select(p => (p.Id, p)), id => new RoomPersonRow(id), (row, peer) =>
         {

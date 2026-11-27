@@ -108,6 +108,9 @@ public sealed record RoomInvite(byte[] Secret, Guid Owner, uint Epoch = 0)
             }
             buffer &= (1 << bits) - 1;
         }
+        // O que sobra no fim é só enchimento: num código de verdade é zero e menor que uma letra. Diferente disso é erro
+        // de digitação na última letra (que, sem esta conferência, podia passar despercebido).
+        if (bits >= 5 || buffer != 0) return null;
         return output.ToArray();
     }
 }
