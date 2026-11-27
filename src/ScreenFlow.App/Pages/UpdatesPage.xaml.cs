@@ -96,6 +96,7 @@ public partial class UpdatesPage : UserControl, IShellPage
             SetStatus("Você está na versão mais recente.", Color.FromRgb(0x3D, 0xF0, 0xB0));
 
         ProgressPanel.Visibility = Updates.Installing ? Visibility.Visible : Visibility.Collapsed;
+        CancelInstallButton.Visibility = Updates.CanCancel && Updates.Progress < 1 ? Visibility.Visible : Visibility.Collapsed;
         DownloadBar.Value = Updates.Progress;
         ProgressPercent.Text = $"{Updates.Progress:P0}";
         ProgressText.Text = Updates.Progress >= 1 ? "Download conferido. Abrindo o instalador…" : "Baixando o instalador oficial…";
@@ -184,6 +185,8 @@ public partial class UpdatesPage : UserControl, IShellPage
     }
 
     // ───────────────────────── Ações ─────────────────────────
+
+    private void CancelInstall_Click(object sender, RoutedEventArgs e) => Updates.CancelInstall();
 
     private async void Check_Click(object sender, RoutedEventArgs e)
     {

@@ -94,7 +94,7 @@ public sealed class RadminInstaller : IDisposable
     /// </summary>
     public static string VerifySignature(string path)
     {
-        var result = WinVerifyTrustFile(path);
+        var result = ScreenFlow.Infrastructure.Security.Authenticode.TrustCode(path);
         if (result != 0)
         {
             TryDelete(path);
@@ -215,64 +215,4 @@ public sealed class RadminInstaller : IDisposable
     }
 
     public void Dispose() => _http.Dispose();
-
-    // ───────────────────────── WinVerifyTrust ─────────────────────────
-
-    private static readonly Guid GenericVerifyV2 = new("00AAC56B-CD44-11d0-8CC2-00C04FC295EE");
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct WinTrustFileInfo
-    {
-        public uint Size;
-        public string FilePath;
-        public IntPtr File;
-        public IntPtr KnownSubject;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct WinTrustData
-    {
-        public uint Size;
-        public IntPtr PolicyCallbackData;
-        public IntPtr SipClientData;
-        public uint UiChoice;           // WTD_UI_NONE = 2
-        public uint RevocationChecks;   // WTD_REVOKE_NONE = 0
-        public uint UnionChoice;        // WTD_CHOICE_FILE = 1
-        public IntPtr FileInfo;
-        public uint StateAction;        // WTD_STATEACTION_IGNORE = 0
-        public IntPtr StateData;
-        public IntPtr UrlReference;
-        public uint ProviderFlags;
-        public uint UiContext;
-        public IntPtr SignatureSettings;
-    }
-
-    [DllImport("wintrust.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
-    private static extern int WinVerifyTrust(IntPtr window, [MarshalAs(UnmanagedType.LPStruct)] Guid action, ref WinTrustData data);
-
-    /// <summary>0 quando a assinatura é válida e confiável para o Windows; senão o código do erro (HRESULT).</summary>
-    private static int WinVerifyTrustFile(string path)
-    {
-        var fileInfo = new WinTrustFileInfo { Size = (uint)Marshal.SizeOf<WinTrustFileInfo>(), FilePath = path };
-        var pointer = Marshal.AllocHGlobal(Marshal.SizeOf<WinTrustFileInfo>());
-        try
-        {
-            Marshal.StructureToPtr(fileInfo, pointer, false);
-            var data = new WinTrustData
-            {
-                Size = (uint)Marshal.SizeOf<WinTrustData>(),
-                UiChoice = 2,
-                RevocationChecks = 0,
-                UnionChoice = 1,
-                FileInfo = pointer,
-                StateAction = 0,
-            };
-            return WinVerifyTrust(new IntPtr(-1), GenericVerifyV2, ref data);
-        }
-        finally
-        {
-            Marshal.DestroyStructure<WinTrustFileInfo>(pointer);
-            Marshal.FreeHGlobal(pointer);
-        }
-    }
 }

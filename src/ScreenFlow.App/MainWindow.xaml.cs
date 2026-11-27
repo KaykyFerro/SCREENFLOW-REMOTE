@@ -324,6 +324,8 @@ public partial class MainWindow : Window
         UpdateVoicePanel();
 
         var settings = AppServices.Settings.Current;
+        if (AppServices.Settings.RecoveredCopy is { } copy)
+            Toast($"As configurações não abriram e voltaram ao padrão. O arquivo antigo foi guardado em {copy}.", ToastKind.Warning);
         _ = CheckFirewallAsync();
         if (!settings.AutoConfigured)
         {

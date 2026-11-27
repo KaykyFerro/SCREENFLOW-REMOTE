@@ -21,7 +21,9 @@ public sealed class AppSettings
     public int ControlPort { get; set; } = AppInfo.DefaultControlPort;
     public int DiscoveryPort { get; set; } = AppInfo.DefaultDiscoveryPort;
     public bool FirewallConfigured { get; set; }
-    public bool AllowNonRadminFallback { get; set; }
+    // (1.4.0) "AllowNonRadminFallback" saiu: nunca teve tela nem uso, e o ScreenFlow só conecta pela rede do Radmin VPN.
+    // Configurações antigas que ainda têm a chave abrem normalmente (chaves desconhecidas são ignoradas) e ela some no
+    // próximo salvamento. Outras redes ficam para o servidor opcional planejado em docs/SERVIDOR-LINUX.md.
 
     // Transmissão
     /// <summary>O que transmitir: tela (monitor ou janela), câmera ou só o áudio (festa de música).</summary>
@@ -232,6 +234,32 @@ public sealed class SettingsStore
 
     public AppSettings Current { get; private set; }
     public bool IsFirstRun { get; }
+
+    /// <summary>
+    /// (1.4.0) O arquivo de configurações não abriu (JSON quebrado, por exemplo) e foi copiado para cá antes do app usar
+    /// os padrões, para nada se perder no próximo salvamento. Null quando abriu normalmente.
+    /// </summary>
+    public string? RecoveredCopy { get; private set; }
+
+    /// <summary>Copia o arquivo que não abriu para "settings.invalido-AAAAMMDD-HHMMSS.json", ao lado dele.</summary>
+    private string? PreserveInvalid()
+    {
+        try
+        {
+            if (!File.Exists(_path)) return null;
+            var folder = Path.GetDirectoryName(_path) ?? ".";
+            var name = Path.GetFileNameWithoutExtension(_path);
+            var copy = Path.Combine(folder, $"{name}.invalido-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+            for (var n = 2; File.Exists(copy); n++) copy = Path.Combine(folder, $"{name}.invalido-{DateTime.Now:yyyyMMdd-HHmmss}-{n}.json");
+            File.Copy(_path, copy);
+            return copy;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            Log.Warn($"Não deu para guardar a cópia das configurações inválidas: {exception.Message}");
+            return null;
+        }
+    }
     public string FilePath => _path;
 
     public event Action<AppSettings>? Saved;
@@ -250,7 +278,9 @@ public sealed class SettingsStore
         }
         catch (Exception exception)
         {
-            Log.Warn($"Configurações corrompidas, usando padrão: {exception.Message}");
+            RecoveredCopy = PreserveInvalid();
+            Log.Warn($"Configurações inválidas, usando o padrão: {exception.Message}" +
+                     (RecoveredCopy is null ? string.Empty : $" O arquivo antigo foi guardado em {RecoveredCopy}."));
         }
         var settings = new AppSettings { SettingsVersion = AppSettings.CurrentSettingsVersion };
         settings.Normalize();
