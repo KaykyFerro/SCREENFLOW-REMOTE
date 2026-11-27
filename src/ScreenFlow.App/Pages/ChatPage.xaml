@@ -529,6 +529,16 @@
                                                         <ImageBrush ImageSource="{Binding Picture}" Stretch="UniformToFill"/>
                                                     </Border.Background>
                                                 </Border>
+                                                <!-- (1.5.0) Prévia de um vídeo: o botão de tocar e a duração -->
+                                                <Grid IsHitTestVisible="False" Visibility="{Binding IsVideoPreview, Converter={StaticResource BoolToVisibility}}">
+                                                    <Border Width="54" Height="54" CornerRadius="27" Background="#A6000000" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE768;" FontSize="20" Foreground="White" HorizontalAlignment="Center"
+                                                                   VerticalAlignment="Center" Margin="3,0,0,0"/>
+                                                    </Border>
+                                                    <Border CornerRadius="6" Background="#A6000000" Padding="7,2" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="8">
+                                                        <TextBlock Text="{Binding VideoDuration}" Foreground="White" FontSize="11.5"/>
+                                                    </Border>
+                                                </Grid>
                                                 <StackPanel x:Name="PictureLoading" VerticalAlignment="Center" HorizontalAlignment="Center"
                                                             Visibility="{Binding ImageLoading, Converter={StaticResource BoolToVisibility}}">
                                                     <TextBlock Style="{StaticResource Icon}" Text="&#xEB9F;" FontSize="22" HorizontalAlignment="Center" Foreground="{DynamicResource TextSubtle}"/>
@@ -541,6 +551,79 @@
                                                             Tag="{Binding}" Click="RetryPicture_Click"/>
                                                 </StackPanel>
                                             </Grid>
+                                            <!-- (1.5.0) Arquivo anexado: fica no PC de quem mandou e vem direto de lá, conferido -->
+                                            <ContentControl Content="{Binding Transfer}" HorizontalAlignment="Left" Margin="0,2,0,6" Focusable="False"
+                                                            Visibility="{Binding HasFile, Converter={StaticResource BoolToVisibility}}">
+                                                <ContentControl.ContentTemplate>
+                                                    <DataTemplate>
+                                                        <Border Style="{StaticResource InsetCard}" Padding="12,11" MinWidth="300" MaxWidth="440">
+                                                            <Border.ContextMenu>
+                                                                <ContextMenu>
+                                                                    <MenuItem Header="Mostrar na pasta" Click="FileFolder_Click"
+                                                                              Visibility="{Binding CanShowFolder, Converter={StaticResource BoolToVisibility}}"/>
+                                                                    <MenuItem Header="Parar de compartilhar" Click="FileStopSharing_Click"
+                                                                              Visibility="{Binding CanStopSharing, Converter={StaticResource BoolToVisibility}}"/>
+                                                                    <MenuItem Header="Copiar o nome" Click="FileCopyName_Click"/>
+                                                                    <MenuItem Header="Copiar o SHA-256" Click="FileCopyHash_Click"/>
+                                                                </ContextMenu>
+                                                            </Border.ContextMenu>
+                                                            <StackPanel>
+                                                                <DockPanel>
+                                                                    <Border DockPanel.Dock="Left" Style="{StaticResource IconTile}" Width="42" Height="42" CornerRadius="11" Margin="0,0,12,0">
+                                                                        <TextBlock Style="{StaticResource Icon}" Text="{Binding Glyph}" FontSize="18" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                                    </Border>
+                                                                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0">
+                                                                        <Button Style="{StaticResource IconButton}" Content="&#xE896;" Width="34" Height="34" MinHeight="34" Margin="4,0,0,0"
+                                                                                ToolTip="Baixar (você escolhe a pasta)" Click="FileDownload_Click"
+                                                                                Visibility="{Binding CanDownload, Converter={StaticResource BoolToVisibility}}"/>
+                                                                        <Button Style="{StaticResource IconButton}" Content="&#xE769;" Width="34" Height="34" MinHeight="34" Margin="4,0,0,0"
+                                                                                ToolTip="Pausar (continua depois de onde parou)" Click="FilePause_Click"
+                                                                                Visibility="{Binding CanPause, Converter={StaticResource BoolToVisibility}}"/>
+                                                                        <Button Style="{StaticResource IconButton}" Content="&#xE768;" Width="34" Height="34" MinHeight="34" Margin="4,0,0,0"
+                                                                                ToolTip="Continuar de onde parou" Click="FileResume_Click"
+                                                                                Visibility="{Binding CanResume, Converter={StaticResource BoolToVisibility}}"/>
+                                                                        <Button Style="{StaticResource IconButton}" Content="&#xE8E5;" Width="34" Height="34" MinHeight="34" Margin="4,0,0,0"
+                                                                                ToolTip="Abrir" Click="FileOpen_Click"
+                                                                                Visibility="{Binding CanOpen, Converter={StaticResource BoolToVisibility}}"/>
+                                                                        <Button Style="{StaticResource IconButton}" Content="&#xE838;" Width="34" Height="34" MinHeight="34" Margin="4,0,0,0"
+                                                                                ToolTip="Mostrar na pasta" Click="FileFolder_Click"
+                                                                                Visibility="{Binding CanShowFolder, Converter={StaticResource BoolToVisibility}}"/>
+                                                                        <Button Style="{StaticResource IconButton}" Content="&#xE711;" Width="34" Height="34" MinHeight="34" Margin="4,0,0,0"
+                                                                                ToolTip="Cancelar (apaga o que já baixou)" Click="FileCancel_Click"
+                                                                                Visibility="{Binding CanCancel, Converter={StaticResource BoolToVisibility}}"/>
+                                                                    </StackPanel>
+                                                                    <StackPanel VerticalAlignment="Center">
+                                                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" ToolTip="{Binding Name}"/>
+                                                                        <StackPanel Orientation="Horizontal" Margin="0,2,0,0">
+                                                                            <TextBlock Style="{StaticResource Caption}" Text="{Binding Summary}" TextTrimming="CharacterEllipsis"/>
+                                                                            <StackPanel Orientation="Horizontal" Margin="8,0,0,0" ToolTip="O SHA-256 bateu: chegou igual ao original."
+                                                                                        Visibility="{Binding IsVerified, Converter={StaticResource BoolToVisibility}}">
+                                                                                <TextBlock Style="{StaticResource Icon}" Text="&#xE73E;" FontSize="10.5" Foreground="{DynamicResource Success}"
+                                                                                           VerticalAlignment="Center" Margin="0,1,4,0"/>
+                                                                                <TextBlock Style="{StaticResource Caption}" Text="conferido" Foreground="{DynamicResource Success}"/>
+                                                                            </StackPanel>
+                                                                        </StackPanel>
+                                                                    </StackPanel>
+                                                                </DockPanel>
+                                                                <ProgressBar Value="{Binding Progress, Mode=OneWay}" Maximum="100" Height="4" Margin="0,10,0,0"
+                                                                             Visibility="{Binding ShowProgress, Converter={StaticResource BoolToVisibility}}"/>
+                                                                <TextBlock x:Name="StateLine" Style="{StaticResource Caption}" Text="{Binding StateText}" Margin="0,8,0,0" TextWrapping="Wrap"
+                                                                           Visibility="{Binding HasStateText, Converter={StaticResource BoolToVisibility}}"/>
+                                                                <DockPanel Margin="0,8,0,0" Visibility="{Binding IsDangerous, Converter={StaticResource BoolToVisibility}}">
+                                                                    <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE7BA;" FontSize="12" Foreground="{DynamicResource Amber}"
+                                                                               VerticalAlignment="Top" Margin="0,2,8,0"/>
+                                                                    <TextBlock Style="{StaticResource Caption}" Text="{Binding WarningText}" Foreground="{DynamicResource Amber}" TextWrapping="Wrap"/>
+                                                                </DockPanel>
+                                                            </StackPanel>
+                                                        </Border>
+                                                        <DataTemplate.Triggers>
+                                                            <DataTrigger Binding="{Binding IsWarningState}" Value="True">
+                                                                <Setter TargetName="StateLine" Property="Foreground" Value="{DynamicResource Amber}"/>
+                                                            </DataTrigger>
+                                                        </DataTemplate.Triggers>
+                                                    </DataTemplate>
+                                                </ContentControl.ContentTemplate>
+                                            </ContentControl>
                                             <!-- (1.5.0) Mensagem direta sua: esperando, enviada ou entregue -->
                                             <StackPanel Orientation="Horizontal" Margin="0,0,0,4" ToolTip="{Binding DeliveryHint}"
                                                         Visibility="{Binding ShowDelivery, Converter={StaticResource BoolToVisibility}}">
@@ -634,14 +717,58 @@
                                     </StackPanel>
                                 </DockPanel>
                             </Border>
+                            <!-- (1.5.0) Arquivos anexados, antes de mandar (o SHA-256 e a prévia ficam prontos aqui) -->
+                            <ItemsControl x:Name="PendingFilesList" Margin="0,0,0,2" Focusable="False" Visibility="Collapsed">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <WrapPanel/>
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Style="{StaticResource InsetCard}" Padding="8" Margin="0,0,8,8" Width="252" ToolTip="{Binding Path}">
+                                            <DockPanel>
+                                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE711;" Width="28" Height="28" MinHeight="28"
+                                                        FontSize="10" ToolTip="Tirar" VerticalAlignment="Center" Click="RemovePendingFile_Click"/>
+                                                <Grid DockPanel.Dock="Left" Width="40" Height="40" Margin="0,0,10,0">
+                                                    <Border Style="{StaticResource IconTile}" Width="40" Height="40" CornerRadius="10">
+                                                        <TextBlock Style="{StaticResource Icon}" Text="{Binding Glyph}" FontSize="16" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    </Border>
+                                                    <Border CornerRadius="10" BorderBrush="{DynamicResource Border}" BorderThickness="1" RenderOptions.BitmapScalingMode="HighQuality"
+                                                            Visibility="{Binding HasThumbnail, Converter={StaticResource BoolToVisibility}}">
+                                                        <Border.Background>
+                                                            <ImageBrush ImageSource="{Binding Thumbnail}" Stretch="UniformToFill"/>
+                                                        </Border.Background>
+                                                    </Border>
+                                                </Grid>
+                                                <StackPanel VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding Name}" FontWeight="SemiBold" FontSize="12.5" TextTrimming="CharacterEllipsis"/>
+                                                    <TextBlock x:Name="PendingStatus" Text="{Binding StatusText}" Style="{StaticResource Caption}" FontSize="11.5"
+                                                               TextTrimming="CharacterEllipsis" Margin="0,2,0,0"/>
+                                                    <ProgressBar Value="{Binding Progress, Mode=OneWay}" Maximum="1" Height="3" Margin="0,4,0,0"
+                                                                 Visibility="{Binding IsPreparing, Converter={StaticResource BoolToVisibility}}"/>
+                                                </StackPanel>
+                                            </DockPanel>
+                                        </Border>
+                                        <DataTemplate.Triggers>
+                                            <DataTrigger Binding="{Binding IsDangerous}" Value="True">
+                                                <Setter TargetName="PendingStatus" Property="Foreground" Value="{DynamicResource Amber}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding HasError}" Value="True">
+                                                <Setter TargetName="PendingStatus" Property="Foreground" Value="{DynamicResource Amber}"/>
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
                             <DockPanel>
                                 <Button x:Name="SendButton" DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Width="46" MinHeight="44" Height="44" Padding="0"
                                         Margin="10,0,0,0" VerticalAlignment="Bottom" ToolTip="Enviar (Enter)" Click="Send_Click">
                                     <TextBlock Style="{StaticResource Icon}" Text="&#xE724;" FontSize="16"/>
                                 </Button>
-                                <Button x:Name="AttachButton" DockPanel.Dock="Left" Style="{StaticResource IconButton}" Content="&#xEB9F;" Width="44" Height="44"
+                                <Button x:Name="AttachButton" DockPanel.Dock="Left" Style="{StaticResource IconButton}" Content="&#xE723;" Width="44" Height="44"
                                         Margin="0,0,10,0" VerticalAlignment="Bottom" BorderBrush="{DynamicResource BorderStrong}" Background="{DynamicResource SurfaceRaised}"
-                                        ToolTip="Mandar uma imagem (ou cole com Ctrl+V, ou arraste para cá)" Click="Attach_Click"/>
+                                        ToolTip="Anexar arquivos (fotos, vídeos, qualquer arquivo até 4 GB; ou arraste para cá, ou cole com Ctrl+V)" Click="Attach_Click"/>
                                 <TextBox x:Name="Composer" Tag="Conversar em #geral" MinHeight="44" MaxHeight="132" Padding="14,11" AcceptsReturn="True"
                                          TextWrapping="Wrap" VerticalContentAlignment="Top" MaxLength="500" VerticalScrollBarVisibility="Auto"
                                          PreviewKeyDown="Composer_PreviewKeyDown" TextChanged="Composer_TextChanged"/>
@@ -649,7 +776,7 @@
                             <DockPanel Margin="2,7,2,0">
                                 <TextBlock x:Name="CounterText" DockPanel.Dock="Right" Style="{StaticResource Caption}"/>
                                 <TextBlock x:Name="ComposerHint" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
-                                           Text="Enter envia · Shift+Enter pula linha · Ctrl+V cola uma imagem"/>
+                                           Text="Enter envia · Shift+Enter pula linha · Ctrl+V cola uma imagem · arraste arquivos para cá"/>
                             </DockPanel>
                         </StackPanel>
                     </Border>

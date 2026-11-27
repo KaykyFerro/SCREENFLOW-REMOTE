@@ -172,6 +172,7 @@ public partial class SettingsPage : UserControl, IShellPage
         MediaPortBox.Text = s.MediaPort.ToString();
         ControlPortBox.Text = s.ControlPort.ToString();
         DiscoveryPortBox.Text = s.DiscoveryPort.ToString();
+        FilePortBox.Text = s.FilePort.ToString();
         UploadBox.Text = s.UploadMbps > 0 ? s.UploadMbps.ToString("0", CultureInfo.CurrentCulture) : string.Empty;
         MaxViewersBox.Text = s.MaxViewers.ToString();
         NameBox.Text = s.DeviceName;
@@ -224,7 +225,7 @@ public partial class SettingsPage : UserControl, IShellPage
     {
         if (_loading) return;
         var s = Settings;
-        var portsBefore = (s.MediaPort, s.ControlPort, s.DiscoveryPort);
+        var portsBefore = (s.MediaPort, s.ControlPort, s.DiscoveryPort, s.FilePort);
         var pinText = PinBox.Text.Trim();
         if (pinText.Length is > 0 and < 4)
         {
@@ -269,6 +270,7 @@ public partial class SettingsPage : UserControl, IShellPage
         s.MediaPort = int.TryParse(MediaPortBox.Text, out var mp) ? mp : s.MediaPort;
         s.ControlPort = int.TryParse(ControlPortBox.Text, out var cp) ? cp : s.ControlPort;
         s.DiscoveryPort = int.TryParse(DiscoveryPortBox.Text, out var dp) ? dp : s.DiscoveryPort;
+        s.FilePort = int.TryParse(FilePortBox.Text, out var fp) ? fp : s.FilePort;
         s.UploadMbps = TryNumber(UploadBox.Text, out var up) ? up : 0;
         s.MaxViewers = int.TryParse(MaxViewersBox.Text, out var mv) ? mv : s.MaxViewers;
         var name = NameBox.Text.Trim();
@@ -309,8 +311,9 @@ public partial class SettingsPage : UserControl, IShellPage
         if (!_shell.IsTransmitting || !_shell.TransmitPage.ApplySettingsQualityLive()) _shell.Toast("Configurações salvas.", ToastKind.Success);
         _ = LoadAsync();
 
-        if (portsBefore != (s.MediaPort, s.ControlPort, s.DiscoveryPort))
+        if (portsBefore != (s.MediaPort, s.ControlPort, s.DiscoveryPort, s.FilePort))
         {
+            if (portsBefore.FilePort != s.FilePort) AppServices.Files.Restart();
             await _shell.CheckFirewallAsync();
             if (!s.FirewallConfigured)
                 _shell.Toast("As portas mudaram. Libere as novas portas no firewall para quem assiste conseguir entrar.", ToastKind.Warning, "Liberar portas", () => _ = OpenFirewallAsync());
@@ -1142,9 +1145,9 @@ public partial class SettingsPage : UserControl, IShellPage
     private async Task RefreshFirewallAsync()
     {
         var s = Settings;
-        var ok = AppServices.DemoMode || await Task.Run(() => FirewallManager.RulesExist(s.MediaPort, s.ControlPort, s.DiscoveryPort));
+        var ok = AppServices.DemoMode || await Task.Run(() => FirewallManager.RulesExist(s.MediaPort, s.ControlPort, s.DiscoveryPort, s.FilePort));
         FirewallText.Text = ok
-            ? $"Portas {s.MediaPort}, {s.ControlPort} e {s.DiscoveryPort} liberadas no firewall."
+            ? $"Portas {s.MediaPort}, {s.ControlPort}, {s.DiscoveryPort} e {s.FilePort} (arquivos) liberadas no firewall."
             : "As portas estão fechadas no firewall: quem está na sua rede pode não conseguir assistir.";
         FirewallDot.SetResourceReference(Shape.FillProperty, ok ? "Success" : "Warning");
         FirewallButton.Visibility = ok ? Visibility.Collapsed : Visibility.Visible;

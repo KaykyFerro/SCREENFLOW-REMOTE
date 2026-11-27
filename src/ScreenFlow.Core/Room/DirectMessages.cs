@@ -162,10 +162,14 @@ public sealed record DirectRecord(
     string Text,
     DirectImage? Image = null,
     DirectState State = DirectState.Pending,
-    DateTimeOffset? DeliveredAt = null);
+    DateTimeOffset? DeliveredAt = null,
+    ChatFile? File = null);
 
-/// <summary>O que vai cifrado dentro de uma mensagem privada: o texto e (opcional) uma imagem.</summary>
-public sealed record DirectPayload(string Text, DirectImage? Image = null);
+/// <summary>
+/// O que vai cifrado dentro de uma mensagem privada: o texto e (opcional) uma imagem e (1.5.0) um arquivo (a imagem,
+/// quando vem com o arquivo, é a prévia dele).
+/// </summary>
+public sealed record DirectPayload(string Text, DirectImage? Image = null, ChatFile? File = null);
 
 /// <summary>
 /// (1.5.0) O formato e a cifra do chat privado. A mensagem vai num pacote <see cref="RoomPacketType.Direct"/>, endereçada
@@ -183,6 +187,9 @@ public static class DirectCrypto
     private const int AckBytes = 16 + 8 + NonceBytes + TagBytes;
     private const byte PayloadVersion = 1;
     private const byte ImageField = 1;
+    private const int ImageFieldBytes = 3 + RoomBlob.IdBytes + 8 + 32;
+    /// <summary>O maior conteúdo que cabe num pacote (cabeçalho, envelope, nonce e etiqueta à parte).</summary>
+    private const int MaxPlainBytes = RoomPacket.MaximumSize - RoomPacket.HeaderSize - EnvelopeBytes - NonceBytes - TagBytes;
     private static readonly byte[] MessageLabel = "SFDM1"u8.ToArray();
     private static readonly byte[] AckLabel = "SFDA1"u8.ToArray();
     private static readonly byte[] BlobLabel = "SFDB1"u8.ToArray();
@@ -292,9 +299,18 @@ public static class DirectCrypto
     }
 
     /// <summary>[versão][texto (2 bytes de tamanho + UTF-8)] e depois campos [tipo][tamanho (2 bytes)][valor].</summary>
+    /// <summary>Quantos bytes de texto cabem junto com os anexos de <paramref name="payload"/>.</summary>
+    public static int TextBudget(DirectPayload payload)
+    {
+        var room = MaxPlainBytes - 3;
+        if (payload.Image is not null) room -= ImageFieldBytes;
+        if (payload.File is { IsValid: true } file) room -= 3 + ChatFiles.Encode(file).Length;
+        return Math.Clamp(room, 0, MaxTextBytes);
+    }
+
     internal static byte[] EncodePayload(DirectPayload payload)
     {
-        var text = Encoding.UTF8.GetBytes(RoomPacket.TrimToBytes(RoomPacket.CleanText(payload.Text), MaxTextBytes));
+        var text = Encoding.UTF8.GetBytes(RoomPacket.TrimToBytes(RoomPacket.CleanText(payload.Text), TextBudget(payload)));
         using var stream = new MemoryStream(3 + text.Length + 80);
         stream.WriteByte(PayloadVersion);
         Span<byte> two = stackalloc byte[2];
@@ -314,6 +330,14 @@ public static class DirectCrypto
             stream.Write(two);
             stream.Write(value);
         }
+        if (payload.File is { IsValid: true } file)
+        {
+            var value = ChatFiles.Encode(file);
+            stream.WriteByte(ChatFiles.FileField);
+            BinaryPrimitives.WriteUInt16BigEndian(two, (ushort)value.Length);
+            stream.Write(two);
+            stream.Write(value);
+        }
         return stream.ToArray();
     }
 
@@ -326,6 +350,7 @@ public static class DirectCrypto
         var text = RoomPacket.CleanText(Encoding.UTF8.GetString(plain.Slice(3, length)));
         var offset = 3 + length;
         DirectImage? image = null;
+        ChatFile? file = null;
         while (offset + 3 <= plain.Length)
         {
             var field = plain[offset];
@@ -343,9 +368,10 @@ public static class DirectCrypto
                     BinaryPrimitives.ReadUInt16BigEndian(value[(RoomBlob.IdBytes + 4)..]), BinaryPrimitives.ReadUInt16BigEndian(value[(RoomBlob.IdBytes + 6)..]),
                     value[(RoomBlob.IdBytes + 8)..].ToArray());
             }
+            else if (field == ChatFiles.FileField && ChatFiles.TryDecode(value, out var decoded)) file = decoded;
         }
-        if (text.Length == 0 && image is null) return false;
-        payload = new DirectPayload(text, image);
+        if (text.Length == 0 && image is null && file is null) return false;
+        payload = new DirectPayload(text, image, file);
         return true;
     }
 

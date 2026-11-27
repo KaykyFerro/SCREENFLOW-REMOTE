@@ -1325,7 +1325,7 @@ public sealed class RoomServer
     /// Manda no canal de texto aberto para todo mundo da sala, com uma imagem se quiser (quem recebe baixa a imagem
     /// deste PC). false quando a sala está desligada ou não há nada para mandar.
     /// </summary>
-    public bool Send(string text, PreparedImage? image = null)
+    public bool Send(string text, PreparedImage? image = null, ChatFile? file = null)
     {
         ChatImage? attached = null;
         if (image is not null)
@@ -1337,13 +1337,19 @@ public sealed class RoomServer
         if (_demo)
         {
             var clean = RoomPacket.CleanText(text);
-            if (clean.Length == 0 && attached is null) return false;
+            if (clean.Length == 0 && attached is null && file is null) return false;
             AddMessage(new RoomChatMessage(SelfId, SelfName, (ulong)Random.Shared.NextInt64(), DateTimeOffset.Now,
-                clean.Length == 0 ? RoomPacket.ImagePlaceholder : clean, Image: attached, Channel: channel));
+                clean.Length == 0 ? file?.Placeholder ?? RoomPacket.ImagePlaceholder : clean, Image: attached, Channel: channel, File: file));
             return true;
         }
-        return _room is { IsRunning: true } room && room.SendChat(text, attached, channel) is not null;
+        return _room is { IsRunning: true } room && room.SendChat(text, attached, channel, file) is not null;
     }
+
+    /// <summary>(1.5.0) O IP de onde a pessoa fala com este servidor (para baixar os arquivos dela direto).</summary>
+    public System.Net.IPAddress? AddressOf(Guid peer) => _room is { IsRunning: true } room ? room.AddressOf(peer) : null;
+
+    /// <summary>(1.5.0) O nome de quem fala com este servidor por este IP.</summary>
+    public string? NameAt(System.Net.IPAddress address) => _room is { IsRunning: true } room ? room.NameAt(address) : null;
 
     // ───────────────────────── Mensagens diretas (1.5.0) ─────────────────────────
 
@@ -1832,6 +1838,30 @@ public sealed class RoomServer
         ShowDemoVoice();
         UnreadChanged?.Invoke();
         UpdateRow();
+    }
+
+    /// <summary>
+    /// (1.5.0) Arquivos de exemplo no #campeonato, para as capturas: um vídeo com prévia, um .zip baixando, um programa
+    /// (com o aviso) e um arquivo seu que alguém está baixando. Nada vai para a rede.
+    /// </summary>
+    internal void LoadDemoFiles()
+    {
+        if (!_demo) return;
+        var files = AppServices.Files;
+        var (zip, video, installer, rules) = files.LoadDemo();
+        var ana = new Guid("0d6f3a52-8b1e-4c9a-a7f2-5e3b9c1d2f42");
+        var bruno = new Guid("9a2c7e14-3f5b-4d8a-b6e1-7c4f2a9d3e51");
+        var diego = new Guid("c3a9e275-1b6f-4a8d-9e2c-6f1b8d4a7c73");
+        var today = DateTimeOffset.Now.Date;
+        var at = (int h, int m) => new DateTimeOffset(today.AddHours(h).AddMinutes(m));
+        var preview = DemoData.ChatPicture();
+        var picture = new ChatImage(AppServices.Blobs.Put(preview.Data), preview.Data.Length, preview.Width, preview.Height);
+        AddMessage(new RoomChatMessage(ana, "Ana Lu", 20, at(21, 2), "A gameplay de ontem, inteira", Image: picture, Channel: "campeonato", File: video));
+        AddMessage(new RoomChatMessage(bruno, "Bruno", 21, at(21, 4), "As fotos do encontro", Channel: "campeonato", File: zip));
+        AddMessage(new RoomChatMessage(diego, "Diego", 22, at(21, 5), "o instalador do mod que eu falei", Channel: "campeonato", File: installer));
+        AddMessage(new RoomChatMessage(SelfId, SelfName, 23, at(21, 7), "Regulamento atualizado", Channel: "campeonato", File: rules));
+        files.DemoState(files.ItemFor(zip, bruno, "Bruno", mine: false), Core.Files.FileDownloadState.Downloading, 46, 3.4 * 1024 * 1024);
+        files.ItemFor(rules, SelfId, SelfName, mine: true).UploadText = "Bruno está baixando · 62%";
     }
 
     /// <summary>

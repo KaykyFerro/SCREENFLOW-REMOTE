@@ -82,6 +82,8 @@ public partial class MainWindow : Window
         direct.IsChatInFront = ChatInFront;
         direct.UnreadChanged += UpdateChatBadge;
         direct.MessageArrived += OnDirectMessage;
+        // (1.5.0) Um arquivo do chat terminou de baixar (conferido) ou parou de vez.
+        AppServices.Files.Finished += OnFileFinished;
         Activated += (_, _) =>
         {
             if (Host.Content is not Pages.ChatPage) return;
@@ -402,7 +404,7 @@ public partial class MainWindow : Window
     public async Task CheckFirewallAsync()
     {
         var s = AppServices.Settings.Current;
-        var exists = await Task.Run(() => FirewallManager.RulesExist(s.MediaPort, s.ControlPort, s.DiscoveryPort));
+        var exists = await Task.Run(() => FirewallManager.RulesExist(s.MediaPort, s.ControlPort, s.DiscoveryPort, s.FilePort));
         if (exists)
         {
             if (!s.FirewallConfigured)
@@ -423,7 +425,7 @@ public partial class MainWindow : Window
     public async Task<bool> OpenFirewallAsync()
     {
         var s = AppServices.Settings.Current;
-        var ok = await Task.Run(() => FirewallManager.CreateRules(s.MediaPort, s.ControlPort, s.DiscoveryPort));
+        var ok = await Task.Run(() => FirewallManager.CreateRules(s.MediaPort, s.ControlPort, s.DiscoveryPort, s.FilePort));
         s.FirewallConfigured = ok;
         AppServices.Settings.Save();
         if (ok)
@@ -942,6 +944,14 @@ public partial class MainWindow : Window
     }
 
     /// <summary>(1.5.0) Mensagem direta nova sem ninguém ver: som, aviso e bandeja (como as do chat, com o som próprio).</summary>
+    private void OnFileFinished(FileTransferItem item)
+    {
+        if (item.State == Core.Files.FileDownloadState.Completed)
+            Toast($"\"{item.Name}\" baixado e conferido.", ToastKind.Success, "Mostrar na pasta", () => AppServices.Files.ShowInFolder(item));
+        else if (item.Error is { } problem)
+            Toast($"\"{item.Name}\": {problem}", ToastKind.Warning);
+    }
+
     private void OnDirectMessage(DirectArrival arrival)
     {
         var now = DateTimeOffset.UtcNow;
@@ -993,9 +1003,11 @@ public partial class MainWindow : Window
             _lastMessageSound = now;
             AppSoundPlayer.Shared.Play(AppSound.Message);
         }
-        var preview = row.HasImage
-            ? (row.HasText ? $"📷 {Preview(row.Text, 100)}" : "📷 mandou uma imagem")
-            : Preview(row.Text, 110);
+        var preview = row.Transfer is { } file
+            ? (row.HasText ? $"📎 {Preview(row.Text, 100)}" : $"📎 mandou {file.Name} ({file.File.SizeText})")
+            : row.HasImage
+                ? (row.HasText ? $"📷 {Preview(row.Text, 100)}" : "📷 mandou uma imagem")
+                : Preview(row.Text, 110);
         // (1.5.0) Num servidor por rede, o aviso diz de qual servidor é (e o canal pelo nome que aparece).
         var channelName = RoomChannels.IsDefaultText(row.ChannelName) ? null : $"#{(row.ChannelDisplay is { Length: > 0 } shown ? shown : row.ChannelName)}";
         var where = (channelName, row.ServerName) switch

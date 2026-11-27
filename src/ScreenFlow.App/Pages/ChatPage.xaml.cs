@@ -33,8 +33,10 @@ public partial class ChatPage : UserControl, IShellPage
     /// (1.5.0) O que estava escrito (e a imagem anexada) em cada servidor e em cada conversa privada, para não mandar no
     /// lugar errado. A chave é o <see cref="RoomServer"/> ou o id da pessoa da conversa.
     /// </summary>
-    private readonly Dictionary<object, (string Text, PreparedImage? Image)> _drafts = [];
+    private readonly Dictionary<object, (string Text, PreparedImage? Image, List<PendingFile> Files)> _drafts = [];
     private object? _draftOwner;
+    /// <summary>(1.5.0) Os arquivos anexados na caixa de escrever (cada um vira uma mensagem ao mandar).</summary>
+    private readonly ObservableCollection<PendingFile> _pendingFiles = [];
 
     public ChatPage(MainWindow shell)
     {
@@ -44,6 +46,8 @@ public partial class ChatPage : UserControl, IShellPage
         ServerList.ItemsSource = room.Servers;
         BindServer();
         _draftOwner = ComposerOwner;
+        PendingFilesList.ItemsSource = _pendingFiles;
+        _pendingFiles.CollectionChanged += (_, _) => UpdateComposer();
         // (1.5.0) Mensagens diretas.
         var direct = AppServices.Direct;
         DirectList.ItemsSource = direct.Conversations;
@@ -131,21 +135,24 @@ public partial class ChatPage : UserControl, IShellPage
         if (Equals(owner, _draftOwner)) return;
         if (_draftOwner is { } previous)
         {
-            if (Composer.Text.Length > 0 || _attachment is not null) _drafts[previous] = (Composer.Text, _attachment);
+            if (Composer.Text.Length > 0 || _attachment is not null || _pendingFiles.Count > 0) _drafts[previous] = (Composer.Text, _attachment, _pendingFiles.ToList());
             else _drafts.Remove(previous);
         }
         _draftOwner = owner;
+        _pendingFiles.Clear();
         if (owner is not null && _drafts.Remove(owner, out var draft))
         {
             Composer.Text = draft.Text;
             Composer.CaretIndex = Composer.Text.Length;
             SetAttachment(draft.Image);
+            foreach (var file in draft.Files) _pendingFiles.Add(file);
         }
         else
         {
             Composer.Clear();
             SetAttachment(null);
         }
+        UpdatePendingFiles();
     }
 
     /// <summary>O cabeçalho do servidor aberto e, quando ele não está funcionando, o aviso com o que fazer.</summary>
@@ -626,6 +633,13 @@ public partial class ChatPage : UserControl, IShellPage
         // Ctrl+V com uma imagem (print, imagem copiada do navegador ou arquivo copiado): anexa em vez de colar texto.
         if (e.Key == Key.V && Keyboard.Modifiers == ModifierKeys.Control && !Clipboard.ContainsText())
         {
+            // (1.5.0) Arquivos copiados no Explorer viram anexos; uma imagem copiada (print) continua indo como imagem.
+            if (ClipboardFiles() is { Count: > 0 } copied && !(copied.Count == 1 && ImageTools.LooksLikeImageFile(copied[0]) && Clipboard.ContainsImage()))
+            {
+                AttachFiles(copied);
+                e.Handled = true;
+                return;
+            }
             if (PasteImage()) e.Handled = true;
             return;
         }
@@ -642,42 +656,71 @@ public partial class ChatPage : UserControl, IShellPage
 
     private void SendMessage()
     {
-        if (string.IsNullOrWhiteSpace(Composer.Text) && _attachment is null) return;
+        var files = _pendingFiles.Where(f => f.IsReady).ToList();
+        if (string.IsNullOrWhiteSpace(Composer.Text) && _attachment is null && files.Count == 0)
+        {
+            if (_pendingFiles.Count > 0) _shell.Toast(PendingProblem(), ToastKind.Info);
+            return;
+        }
+        if (_pendingFiles.Any(f => f.IsPreparing))
+        {
+            _shell.Toast("Espere os arquivos ficarem prontos (o ScreenFlow confere cada um antes de mandar).", ToastKind.Info);
+            return;
+        }
+        var text = Composer.Text;
+        // O texto e a imagem colada vão primeiro; depois, um arquivo por mensagem (o texto vai junto com o primeiro).
+        if (_attachment is not null || files.Count == 0)
+        {
+            if (!SendOne(text, _attachment, null)) return;
+            text = string.Empty;
+            Composer.Clear();
+            SetAttachment(null);
+        }
+        foreach (var pending in files)
+        {
+            var file = AppServices.Files.Share(pending, DirectMode ? AppServices.Direct.Current?.Id : null, out var problem);
+            if (file is null)
+            {
+                _shell.Toast(problem ?? "O arquivo não foi enviado.", ToastKind.Warning);
+                break;
+            }
+            if (!SendOne(text, pending.Preview, file)) break;
+            text = string.Empty;
+            Composer.Clear();
+            _pendingFiles.Remove(pending);
+        }
+        // Os que deram problema (mudaram, não abriram) ficam para você tirar.
+        UpdatePendingFiles();
+        _stickToBottom = true;
+    }
+
+    /// <summary>Manda uma mensagem na conversa aberta (servidor ou privada). false e o aviso quando não foi.</summary>
+    private bool SendOne(string text, PreparedImage? image, ChatFile? file)
+    {
         if (DirectMode)
         {
             // (1.5.0) Na conversa privada: vai cifrada só para a pessoa (ou fica esperando ela aparecer).
             string? problem;
-            try { problem = AppServices.Direct.Send(Composer.Text, _attachment); }
+            try { problem = AppServices.Direct.Send(text, image, file); }
             catch (Exception exception)
             {
                 Log.Warn($"Mensagem direta não foi enviada: {exception.Message}");
                 problem = "A mensagem não foi enviada.";
             }
-            if (problem is not null)
-            {
-                _shell.Toast(problem, ToastKind.Warning);
-                return;
-            }
-            Composer.Clear();
-            SetAttachment(null);
-            _stickToBottom = true;
-            return;
+            if (problem is null) return true;
+            _shell.Toast(problem, ToastKind.Warning);
+            return false;
         }
         bool sent;
-        try { sent = AppServices.Room.Send(Composer.Text, _attachment); }
+        try { sent = AppServices.Room.Send(text, image, file); }
         catch (Exception exception)
         {
-            Log.Warn($"Mensagem com imagem não foi enviada: {exception.Message}");
+            Log.Warn($"Mensagem com anexo não foi enviada: {exception.Message}");
             sent = false;
         }
-        if (!sent)
-        {
-            _shell.Toast(AppServices.Room.Error ?? "A mensagem não foi enviada.", ToastKind.Warning);
-            return;
-        }
-        Composer.Clear();
-        SetAttachment(null);
-        _stickToBottom = true;
+        if (sent) return true;
+        _shell.Toast(AppServices.Room.Error ?? "A mensagem não foi enviada.", ToastKind.Warning);
+        return false;
     }
 
     private void Composer_TextChanged(object sender, TextChangedEventArgs e) => UpdateComposer();
@@ -685,7 +728,7 @@ public partial class ChatPage : UserControl, IShellPage
     private void UpdateComposer()
     {
         var length = Composer.Text.Length;
-        SendButton.IsEnabled = !string.IsNullOrWhiteSpace(Composer.Text) || _attachment is not null;
+        SendButton.IsEnabled = !string.IsNullOrWhiteSpace(Composer.Text) || _attachment is not null || _pendingFiles.Any(f => f.IsReady);
         CounterText.Text = length >= 400 ? $"{length}/500" : string.Empty;
     }
 
@@ -695,14 +738,14 @@ public partial class ChatPage : UserControl, IShellPage
         var room = AppServices.Room;
         if (DirectMode)
         {
-            ComposerHint.Text = "Enter envia · Shift+Enter pula linha · Ctrl+V cola uma imagem · só a pessoa lê";
+            ComposerHint.Text = "Enter envia · Shift+Enter pula linha · arraste arquivos para cá · só a pessoa lê";
             ComposerHint.SetResourceReference(TextBlock.ForegroundProperty, "TextSubtle");
             return;
         }
         var old = room.CurrentText.IsDefaultText ? 0 : room.OldVersionCount;
         ComposerHint.Text = old switch
         {
-            0 => "Enter envia · Shift+Enter pula linha · Ctrl+V cola uma imagem",
+            0 => "Enter envia · Shift+Enter pula linha · Ctrl+V cola uma imagem · arraste arquivos para cá",
             1 => "1 pessoa está numa versão antiga do ScreenFlow e só vê o #geral",
             var n => $"{n} pessoas estão numa versão antiga do ScreenFlow e só veem o #geral",
         };
@@ -713,9 +756,67 @@ public partial class ChatPage : UserControl, IShellPage
 
     private void Attach_Click(object sender, RoutedEventArgs e)
     {
-        var dialog = new OpenFileDialog { Title = "Escolha uma imagem para mandar", Filter = ImageTools.FileFilter };
+        // (1.5.0) Qualquer arquivo (vários de uma vez): fotos e vídeos vão com a prévia, tudo no tamanho original.
+        var dialog = new OpenFileDialog
+        {
+            Title = "Escolha os arquivos para mandar",
+            Filter = "Todos os arquivos|*.*|Imagens|*.jpg;*.jpeg;*.jfif;*.png;*.bmp;*.gif;*.webp;*.tif;*.tiff|Vídeos|*.mp4;*.m4v;*.mov;*.avi;*.wmv;*.mkv;*.webm|Áudio|*.mp3;*.wav;*.ogg;*.opus;*.m4a;*.aac;*.flac",
+            Multiselect = true,
+        };
         if (dialog.ShowDialog(Window.GetWindow(this)) != true) return;
-        Attach(() => ImageTools.LoadFile(dialog.FileName, ImageTools.ChatMaxSide));
+        AttachFiles(dialog.FileNames);
+    }
+
+    /// <summary>Anexa arquivos (até 10 por vez): cada um é conferido (SHA-256) e ganha a prévia antes de poder mandar.</summary>
+    private void AttachFiles(IEnumerable<string> paths)
+    {
+        foreach (var path in paths)
+        {
+            if (_pendingFiles.Count >= FileService.MaxFilesPerSend)
+            {
+                _shell.Toast($"Até {FileService.MaxFilesPerSend} arquivos por vez: mande estes e anexe o resto depois.", ToastKind.Info);
+                break;
+            }
+            if (_pendingFiles.Any(f => string.Equals(f.Path, Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase))) continue;
+            if (AppServices.Files.Prepare(path, out var problem) is not { } pending)
+            {
+                _shell.Toast(problem ?? "Não deu para anexar o arquivo.", ToastKind.Warning);
+                continue;
+            }
+            pending.PropertyChanged += (_, args) =>
+            {
+                if (args.PropertyName is nameof(PendingFile.IsReady) or nameof(PendingFile.Error)) UpdateComposer();
+            };
+            _pendingFiles.Add(pending);
+        }
+        UpdatePendingFiles();
+        Composer.Focus();
+    }
+
+    private void UpdatePendingFiles()
+    {
+        PendingFilesList.Visibility = _pendingFiles.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        UpdateComposer();
+    }
+
+    private string PendingProblem() => _pendingFiles.FirstOrDefault(f => f.HasError)?.Error ?? "Espere os arquivos ficarem prontos.";
+
+    private void RemovePendingFile_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not PendingFile pending) return;
+        pending.Cancellation.Cancel();
+        _pendingFiles.Remove(pending);
+        UpdatePendingFiles();
+        Composer.Focus();
+    }
+
+    private static List<string>? ClipboardFiles()
+    {
+        try { return Clipboard.ContainsFileDropList() ? Clipboard.GetFileDropList().Cast<string>().ToList() : null; }
+        catch (System.Runtime.InteropServices.ExternalException)
+        {
+            return null;
+        }
     }
 
     private bool PasteImage()
@@ -768,30 +869,112 @@ public partial class ChatPage : UserControl, IShellPage
         Composer.Focus();
     }
 
-    private static string? DroppedImage(DragEventArgs e)
-        => e.Data.GetDataPresent(DataFormats.FileDrop) && e.Data.GetData(DataFormats.FileDrop) is string[] files
-            ? files.FirstOrDefault(ImageTools.LooksLikeImageFile)
-            : null;
+    private static string[]? DroppedFiles(DragEventArgs e)
+        => e.Data.GetDataPresent(DataFormats.FileDrop) && e.Data.GetData(DataFormats.FileDrop) is string[] { Length: > 0 } files ? files : null;
 
     private void Conversation_PreviewDragOver(object sender, DragEventArgs e)
     {
-        if (DroppedImage(e) is null) return;
+        if (DroppedFiles(e) is null || !Composer.IsEnabled) return;
         e.Effects = DragDropEffects.Copy;
         e.Handled = true;
     }
 
+    /// <summary>(1.5.0) Arquivos arrastados para a conversa viram anexos (vários de uma vez, de qualquer tipo).</summary>
     private void Conversation_PreviewDrop(object sender, DragEventArgs e)
     {
-        if (DroppedImage(e) is not { } file) return;
+        if (DroppedFiles(e) is not { } files || !Composer.IsEnabled) return;
         e.Handled = true;
-        Attach(() => ImageTools.LoadFile(file, ImageTools.ChatMaxSide));
+        AttachFiles(files);
     }
 
     private static ChatRow? RowOf(object sender) => (sender as FrameworkElement)?.DataContext as ChatRow;
 
     private void Picture_MouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
+        if (RowOf(sender) is { IsVideoPreview: true, Transfer: { } video })
+        {
+            PlayVideo(video);
+            return;
+        }
         if (RowOf(sender) is { ImageState: ChatImageState.Ready } row) OpenPicture(row);
+    }
+
+    // ───────────────────────── Arquivos (1.5.0) ─────────────────────────
+
+    private static FileTransferItem? ItemOf(object sender) => (sender as FrameworkElement)?.DataContext as FileTransferItem;
+
+    /// <summary>Assiste o vídeo no ScreenFlow (o seu, ou o que você já baixou); sem baixar ainda, oferece baixar.</summary>
+    private void PlayVideo(FileTransferItem item)
+    {
+        var path = item.IsMine ? item.SharedPath : item.State == Core.Files.FileDownloadState.Completed ? item.SavedPath : null;
+        if (path is not null && File.Exists(path))
+        {
+            new ChatVideoWindow(path, item.Name) { Owner = Window.GetWindow(this) }.Show();
+            return;
+        }
+        if (item.CanDownload)
+        {
+            _shell.Toast("Baixe o vídeo para assistir: escolha onde salvar.", ToastKind.Info);
+            AppServices.Files.Download(item, Window.GetWindow(this));
+        }
+        else if (item.ShowProgress) _shell.Toast("O vídeo ainda está baixando.", ToastKind.Info);
+    }
+
+    private void FileDownload_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is { } item) AppServices.Files.Download(item, Window.GetWindow(this));
+    }
+
+    private void FilePause_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is { } item) AppServices.Files.Pause(item);
+    }
+
+    private void FileResume_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is { } item) AppServices.Files.Resume(item);
+    }
+
+    private void FileCancel_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is not { } item) return;
+        if (!ConfirmDialog.Ask(Window.GetWindow(this), "Parar e apagar o download?", $"O que já baixou de \"{item.Name}\" é apagado. Para baixar de novo, começa do zero.",
+                "Parar e apagar", danger: true)) return;
+        AppServices.Files.Cancel(item);
+    }
+
+    private void FileOpen_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is not { } item) return;
+        if (item.IsVideo && item.SavedPath is { } path && File.Exists(path))
+        {
+            new ChatVideoWindow(path, item.Name) { Owner = Window.GetWindow(this) }.Show();
+            return;
+        }
+        if (AppServices.Files.Open(item) is { } problem) _shell.Toast(problem, ToastKind.Warning);
+    }
+
+    private void FileFolder_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is { } item) AppServices.Files.ShowInFolder(item);
+    }
+
+    private void FileStopSharing_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is not { } item) return;
+        if (!ConfirmDialog.Ask(Window.GetWindow(this), "Parar de compartilhar?", $"Quem ainda não baixou \"{item.Name}\" não vai conseguir mais. O arquivo continua no seu PC.",
+                "Parar de compartilhar", danger: true)) return;
+        AppServices.Files.StopSharing(item);
+    }
+
+    private void FileCopyName_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is { } item) CopyText(item.Name, "Nome copiado.");
+    }
+
+    private void FileCopyHash_Click(object sender, RoutedEventArgs e)
+    {
+        if (ItemOf(sender) is { } item) CopyText(item.File.Hash, "SHA-256 copiado.");
     }
 
     private void OpenPicture_Click(object sender, RoutedEventArgs e)
@@ -869,6 +1052,16 @@ public partial class ChatPage : UserControl, IShellPage
     {
         Composer.Text = caption;
         SetAttachment(image);
+    }
+
+    /// <summary>(1.5.0) Arquivos anexados de exemplo na caixa de escrever (as capturas de tela).</summary>
+    internal void ShowFilesDemo(IReadOnlyList<string> paths, string caption = "")
+    {
+        foreach (var pending in _pendingFiles) pending.Cancellation.Cancel();
+        _pendingFiles.Clear();
+        Composer.Text = caption;
+        if (paths.Count > 0) AttachFiles(paths);
+        UpdatePendingFiles();
     }
 
     // ───────────────────────── Mensagens diretas (1.5.0) ─────────────────────────

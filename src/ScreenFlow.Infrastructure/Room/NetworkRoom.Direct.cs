@@ -25,6 +25,16 @@ public sealed partial class NetworkRoom
     /// <summary>A chave do chat privado que a pessoa anuncia nesta sala (null: não está aqui, ou está numa versão antiga).</summary>
     public string? IdentityKeyOf(Guid peer) => _peers.Find(peer)?.Presence.IdentityKey;
 
+    /// <summary>
+    /// (1.5.0) O IP de onde a pessoa fala com esta sala (para baixar os arquivos dela direto). Null pelo servidor
+    /// ScreenFlow, em que tudo vem do servidor: aí valem os IPs que vêm dentro da mensagem.
+    /// </summary>
+    public System.Net.IPAddress? AddressOf(Guid peer) => _server is null ? _peers.Find(peer)?.EndPoint.Address : null;
+
+    /// <summary>(1.5.0) O nome de quem está na sala com este IP (para "Fulano está baixando"). Null se ninguém.</summary>
+    public string? NameAt(System.Net.IPAddress address)
+        => _server is null ? _peers.All().FirstOrDefault(p => p.EndPoint.Address.Equals(address))?.Presence.Name : null;
+
     /// <summary>Manda um pacote do chat privado para a pessoa (direto, ou pelo servidor). false se ela não está nesta sala.</summary>
     public bool SendDirect(Guid peer, byte[] packet)
     {

@@ -29,6 +29,8 @@ public sealed class AppSettings
     public int MediaPort { get; set; } = AppInfo.DefaultMediaPort;
     public int ControlPort { get; set; } = AppInfo.DefaultControlPort;
     public int DiscoveryPort { get; set; } = AppInfo.DefaultDiscoveryPort;
+    /// <summary>(1.5.0) Porta TCP dos arquivos do chat (cada mensagem leva a porta de quem mandou).</summary>
+    public int FilePort { get; set; } = AppInfo.DefaultFilePort;
     public bool FirewallConfigured { get; set; }
     // (1.4.0) "AllowNonRadminFallback" saiu: nunca teve tela nem uso. Configurações antigas que ainda têm a chave abrem
     // normalmente (chaves desconhecidas são ignoradas) e ela some no próximo salvamento. Na 1.4.1, o Tailscale e o
@@ -220,6 +222,10 @@ public sealed class AppSettings
     [JsonIgnore] public byte[]? DirectIdentityKey { get; set; }
     /// <summary>(1.5.0) A chave que cifra as conversas privadas guardadas neste PC (32 bytes). Gravada cifrada.</summary>
     [JsonIgnore] public byte[]? DirectHistoryKey { get; set; }
+    /// <summary>(1.5.0) A chave que cifra a lista de arquivos mandados (com as chaves dos anexos) e os downloads parados.</summary>
+    [JsonIgnore] public byte[]? FilesKey { get; set; }
+    [JsonInclude, JsonPropertyName("FilesKeyProtected")]
+    private string? FilesKeyProtected { get => ProtectBytes(FilesKey); set => FilesKey = UnprotectBytes(value) ?? FilesKey; }
     [JsonInclude, JsonPropertyName("DirectIdentityProtected")]
     private string? DirectIdentityProtected { get => ProtectBytes(DirectIdentityKey); set => DirectIdentityKey = UnprotectBytes(value) ?? DirectIdentityKey; }
     [JsonInclude, JsonPropertyName("DirectHistoryKeyProtected")]
@@ -260,6 +266,9 @@ public sealed class AppSettings
     /// <summary>A pasta do chat guardado. Null: a pasta do Google Drive achada no PC.</summary>
     public string? ChatArchiveFolder { get; set; }
 
+    /// <summary>(1.5.0) A última pasta onde você salvou um arquivo do chat (a janela de salvar começa nela).</summary>
+    public string? FileSaveFolder { get; set; }
+
     /// <summary>De que versão são estas configurações (para ajustar padrões antigos uma vez só).</summary>
     public int SettingsVersion { get; set; }
 
@@ -287,6 +296,7 @@ public sealed class AppSettings
         MediaPort = ValidPort(MediaPort, AppInfo.DefaultMediaPort);
         ControlPort = ValidPort(ControlPort, AppInfo.DefaultControlPort);
         DiscoveryPort = ValidPort(DiscoveryPort, AppInfo.DefaultDiscoveryPort);
+        FilePort = ValidPort(FilePort, AppInfo.DefaultFilePort);
         if (!Quality.FrameRates.Contains(Fps)) Fps = 60;
         if (!Enum.IsDefined(Mode)) Mode = StreamMode.Screen;
         Resolution = Media.Resolution.FromLabel(Resolution).Label;
@@ -343,6 +353,7 @@ public sealed class AppSettings
             ChatArchiveFolder = ChatArchiveFolder.Trim();
             if (ChatArchiveFolder.Length > 260 || !Path.IsPathFullyQualified(ChatArchiveFolder)) ChatArchiveFolder = null;
         }
+        if (FileSaveFolder is not null && (FileSaveFolder.Length > 260 || !Path.IsPathFullyQualified(FileSaveFolder))) FileSaveFolder = null;
     }
 
     /// <summary>

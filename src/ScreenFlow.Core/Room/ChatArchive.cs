@@ -117,6 +117,10 @@ public sealed class ChatArchive : IDisposable
                 if (message.Caption.Length > 0) line.Append(' ');
                 line.Append("[imagem: ../").Append(ImagesFolder).Append('/').Append(ImageFileName(picture.Id, image)).Append(']');
             }
+            if (message.File is { } attachedFile)
+            {
+                line.Append(' ').Append("[arquivo: ").Append(attachedFile.Name).Append(" · ").Append(attachedFile.SizeText).Append(']');
+            }
             line.AppendLine();
             var day = Path.Combine(Folder, channel, $"{local:yyyy-MM-dd}.txt");
             Directory.CreateDirectory(Path.GetDirectoryName(day)!);
@@ -246,11 +250,13 @@ public sealed class ChatArchive : IDisposable
         [property: JsonPropertyName("img")] string? ImageId = null,
         [property: JsonPropertyName("s")] int ImageSize = 0,
         [property: JsonPropertyName("w")] int ImageWidth = 0,
-        [property: JsonPropertyName("h")] int ImageHeight = 0)
+        [property: JsonPropertyName("h")] int ImageHeight = 0,
+        [property: JsonPropertyName("f")] ChatFile? File = null)
     {
         public static Entry From(RoomChatMessage message) => new(message.AuthorId, message.AuthorName, message.MessageId,
             message.Time.ToUnixTimeMilliseconds(), message.Text, message.InDefaultChannel ? null : message.ChannelName,
-            message.Image?.Id, message.Image?.Size ?? 0, message.Image?.Width ?? 0, message.Image?.Height ?? 0);
+            message.Image?.Id, message.Image?.Size ?? 0, message.Image?.Width ?? 0, message.Image?.Height ?? 0,
+            message.File is { IsValid: true } file ? file : null);
 
         public RoomChatMessage? ToMessage()
         {
@@ -265,7 +271,7 @@ public sealed class ChatArchive : IDisposable
             ChatImage? image = RoomBlob.IsValidId(ImageId) && ImageSize > 0 && ImageWidth > 0 && ImageHeight > 0
                 ? new ChatImage(ImageId!, ImageSize, ImageWidth, ImageHeight)
                 : null;
-            return new RoomChatMessage(Author, name, Id, time, text, Image: image, Channel: channel);
+            return new RoomChatMessage(Author, name, Id, time, text, Image: image, Channel: channel, File: File is { IsValid: true } file ? file : null);
         }
     }
 }

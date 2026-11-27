@@ -439,11 +439,12 @@ public sealed partial class NetworkRoom : IAsyncDisposable
     /// arquivo dela precisa estar em <see cref="BlobSource"/>: quem recebe pede os pedaços). As mensagens dos outros
     /// canais só vão para quem entende canais (1.3.0 ou mais nova). Retorna a mensagem (já no histórico) ou null se vazia.
     /// </summary>
-    public RoomChatMessage? SendChat(string text, ChatImage? image = null, string? channel = null)
+    public RoomChatMessage? SendChat(string text, ChatImage? image = null, string? channel = null, ChatFile? file = null)
     {
         text = RoomPacket.CleanText(text);
-        if (text.Length == 0 && image is null) return null;
-        if (text.Length == 0) text = RoomPacket.ImagePlaceholder;
+        if (file is { IsValid: false }) file = null;
+        if (text.Length == 0 && image is null && file is null) return null;
+        if (text.Length == 0) text = file?.Placeholder ?? RoomPacket.ImagePlaceholder;
         string? channelName = null;
         if (!RoomChannels.IsDefaultText(channel))
         {
@@ -451,7 +452,7 @@ public sealed partial class NetworkRoom : IAsyncDisposable
             if (channelName.Length == 0) return null;
         }
         var message = new RoomChatMessage(SelfId, _local.Name, BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)), DateTimeOffset.UtcNow, text,
-            Image: image, Channel: channelName);
+            Image: image, Channel: channelName, File: file);
         _history.Add(message);
         var packet = RoomPacket.Chat(SelfId, message);
         var peers = _peers.All().Where(p => message.InDefaultChannel || p.Presence.SupportsChannels).ToList();

@@ -298,16 +298,16 @@ public sealed class DirectService : IDirectTransport
     private bool IsShowing(Guid peer) => _showing && _current?.Id == peer && IsChatInFront?.Invoke() == true;
 
     /// <summary>Manda na conversa aberta. Retorna o motivo quando não deu.</summary>
-    public string? Send(string text, PreparedImage? image)
+    public string? Send(string text, PreparedImage? image, ChatFile? file = null)
     {
         if (_current is not { } row) return "Escolha uma conversa.";
         if (_demo)
         {
             var clean = RoomPacket.CleanText(text);
-            if (clean.Length == 0 && image is null) return null;
+            if (clean.Length == 0 && image is null && file is null) return null;
             var record = new DirectRecord((ulong)Random.Shared.NextInt64(1, long.MaxValue), AppServices.Room.SelfId, DateTimeOffset.Now, clean,
                 image is null ? null : new DirectImage(AppServices.Blobs.Put(image.Data), image.Data.Length, image.Width, image.Height, []),
-                DirectState.Delivered, DateTimeOffset.Now);
+                DirectState.Delivered, DateTimeOffset.Now, file);
             AddRow(record, row);
             return null;
         }
@@ -321,7 +321,8 @@ public sealed class DirectService : IDirectTransport
             var id = AppServices.Blobs.Put(sealedBlob);
             attached = new DirectImage(id, sealedBlob.Length, image.Width, image.Height, key);
         }
-        return chat.Send(row.Id, new DirectPayload(text, attached), DateTimeOffset.UtcNow) is null ? "A mensagem está vazia." : null;
+        // (1.5.0) O arquivo vai junto (só a pessoa recebe a chave dele, dentro da mensagem cifrada); a imagem é a prévia.
+        return chat.Send(row.Id, new DirectPayload(text, attached, file), DateTimeOffset.UtcNow) is null ? "A mensagem está vazia." : null;
     }
 
     /// <summary>Aceita a chave nova da pessoa da conversa aberta (depois de conferir o código de segurança com ela).</summary>
@@ -518,7 +519,7 @@ public sealed class DirectService : IDirectTransport
         }
         var name = mine ? AppServices.Room.SelfName : conversation.Name;
         var image = record.Image is { } attached ? new ChatImage(attached.BlobId, attached.Size, attached.Width, attached.Height) : null;
-        var message = new RoomChatMessage(record.Author, name, record.Id, record.Time, record.Text, Image: image);
+        var message = new RoomChatMessage(record.Author, name, record.Id, record.Time, record.Text, Image: image, File: record.File);
         var row = new ChatRow(message, mine)
         {
             Photo = PhotoOf(record.Author),

@@ -176,9 +176,10 @@ public sealed class DirectChat
     public DirectRecord? Send(Guid peer, DirectPayload payload, DateTimeOffset now)
     {
         if (Store.Find(peer) is not { } contact) return null;
-        var text = RoomPacket.TrimToBytes(RoomPacket.CleanText(payload.Text), DirectCrypto.MaxTextBytes);
-        if (text.Length == 0 && payload.Image is null) return null;
-        var record = new DirectRecord(NewId(), Self, now, text, payload.Image);
+        var file = payload.File is { IsValid: true } valid ? valid : null;
+        var text = RoomPacket.TrimToBytes(RoomPacket.CleanText(payload.Text), DirectCrypto.TextBudget(payload with { File = file }));
+        if (text.Length == 0 && payload.Image is null && file is null) return null;
+        var record = new DirectRecord(NewId(), Self, now, text, payload.Image, File: file);
         Store.Append(peer, record);
         contact.LastActivity = now;
         contact.LastPreview = Preview(record);
@@ -250,7 +251,7 @@ public sealed class DirectChat
         reply(RoomPacket.DirectAck(Self, DirectCrypto.SealAck(pair, Self, sender, id)));
         if (!Seen(sender).Add(id)) return DirectReceive.Duplicate;
         if (time > now + MaxFuture || time < now - MaxPast) time = now;
-        var record = new DirectRecord(id, sender, time, payload.Text, payload.Image, DirectState.Received);
+        var record = new DirectRecord(id, sender, time, payload.Text, payload.Image, DirectState.Received, File: payload.File);
         Store.Append(sender, record);
         Rename(contact, senderName);
         if (record.Time >= contact.LastActivity || contact.LastPreview is null)
@@ -285,6 +286,7 @@ public sealed class DirectChat
     {
         var text = record.Text.ReplaceLineEndings(" ");
         if (text.Length > PreviewLength) text = text[..PreviewLength].TrimEnd() + "…";
+        if (record.File is { } file) return text.Length == 0 ? $"📎 {file.Name}" : $"📎 {text}";
         return record.Image is null ? text : text.Length == 0 ? "📷 Imagem" : $"📷 {text}";
     }
 
@@ -302,7 +304,7 @@ public sealed class DirectChat
             return false;
         }
         var record = item.Record;
-        var body = DirectCrypto.SealMessage(pair, Self, peer, record.Id, record.Time, new DirectPayload(record.Text, record.Image));
+        var body = DirectCrypto.SealMessage(pair, Self, peer, record.Id, record.Time, new DirectPayload(record.Text, record.Image, record.File));
         var sent = _transport.Send(peer, key, RoomPacket.Direct(Self, body));
         item.Attempts++;
         item.Next = now + (item.Attempts < FastAttempts ? FastRetry : SlowRetry);

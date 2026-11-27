@@ -134,13 +134,14 @@ public sealed record RoomPresence(
 /// <summary>
 /// Mensagem do chat da rede. <see cref="History"/> marca mensagens antigas repassadas para quem acabou de chegar.
 /// <see cref="Image"/> é a imagem anexada (o texto é a legenda, ou <see cref="RoomPacket.ImagePlaceholder"/> sem legenda,
-/// que é o que as versões antigas mostram).
+/// que é o que as versões antigas mostram). (1.5.0) <see cref="File"/> é um arquivo anexado (a imagem, se tiver, é a
+/// prévia dele; as versões antigas mostram a prévia e o texto <see cref="ChatFile.Placeholder"/>).
 /// </summary>
 public sealed record RoomChatMessage(Guid AuthorId, string AuthorName, ulong MessageId, DateTimeOffset Time, string Text, bool History = false,
-    ChatImage? Image = null, string? Channel = null)
+    ChatImage? Image = null, string? Channel = null, ChatFile? File = null)
 {
-    /// <summary>A legenda da imagem (vazia quando o texto é só o aviso para as versões antigas).</summary>
-    public string Caption => Image is not null && Text == RoomPacket.ImagePlaceholder ? string.Empty : Text;
+    /// <summary>A legenda da imagem ou do arquivo (vazia quando o texto é só o aviso para as versões antigas).</summary>
+    public string Caption => (Image is not null && Text == RoomPacket.ImagePlaceholder) || (File is not null && Text == File.Placeholder) ? string.Empty : Text;
 
     /// <summary>O canal de texto (as mensagens sem canal, das versões antigas, são do "geral").</summary>
     public string ChannelName => Channel is { Length: > 0 } channel ? channel : RoomChannels.DefaultTextName;
@@ -166,6 +167,8 @@ public static partial class RoomPacket
     private const byte HistoryFlag = 1;
     private const byte ImageFlag = 2;
     private const byte ChannelFlag = 4;
+    /// <summary>(1.5.0) Depois do canal vêm campos [tipo][tamanho (2 bytes)][valor] (o arquivo anexado).</summary>
+    private const byte ExtrasFlag = 8;
     private const byte AvatarField = 1;
     private const byte VoiceChannelField = 2;
     private const byte CreatedChannelField = 3;
@@ -427,12 +430,19 @@ public static partial class RoomPacket
         var image = message.Image is { } attached && RoomBlob.TryParseId(attached.Id, out var hash) && IsValidImage(attached) ? (attached, hash) : default;
         var channel = message.InDefaultChannel ? null : RoomChannels.CleanName(RoomChannelKind.Text, message.Channel);
         if (channel is { Length: 0 }) channel = null;
-        buffer[offset++] = (byte)((message.History ? HistoryFlag : 0) | (image.attached is not null ? ImageFlag : 0) | (channel is not null ? ChannelFlag : 0));
+        var extras = EncodeExtras(message);
+        buffer[offset++] = (byte)((message.History ? HistoryFlag : 0) | (image.attached is not null ? ImageFlag : 0) | (channel is not null ? ChannelFlag : 0)
+            | (extras.Length > 0 ? ExtrasFlag : 0));
         offset += WriteShortString(buffer.AsSpan(offset), CleanName(message.AuthorName), MaxNameLength * 4);
         var clean = CleanText(message.Text);
+        if (clean.Length == 0 && message.File is { IsValid: true } file) clean = file.Placeholder;
         if (clean.Length == 0 && image.attached is not null) clean = ImagePlaceholder;
+        // O texto fica com o que sobra depois do resto (um arquivo anexado ocupa até ~370 bytes).
+        var channelBytes = channel is null ? 0 : 1 + Math.Min(255, Math.Min(MaxChannelBytes, Encoding.UTF8.GetByteCount(channel)));
+        var room = MaximumSize - offset - 2 - (image.attached is not null ? RoomBlob.IdBytes + 8 : 0) - channelBytes - extras.Length;
         var text = Encoding.UTF8.GetBytes(clean);
-        if (text.Length > MaxTextBytes) text = Encoding.UTF8.GetBytes(TrimToBytes(clean, MaxTextBytes));
+        if (text.Length > Math.Min(MaxTextBytes, room)) text = Encoding.UTF8.GetBytes(TrimToBytes(clean, Math.Min(MaxTextBytes, room)));
+        if (text.Length == 0) text = "📎"u8.ToArray();
         BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)text.Length); offset += 2;
         text.CopyTo(buffer, offset); offset += text.Length;
         // A imagem vai depois do texto: as versões antigas leem só o texto.
@@ -443,9 +453,42 @@ public static partial class RoomPacket
             BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)picture.Width); offset += 2;
             BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)picture.Height); offset += 2;
         }
-        // O canal vai por último (1.3.0): as versões antigas leem só o texto e a imagem.
+        // O canal vai depois (1.3.0): as versões antigas leem só o texto e a imagem.
         if (channel is not null) offset += WriteShortString(buffer.AsSpan(offset), channel, MaxChannelBytes);
+        // Os anexos novos vão por último (1.5.0): as versões até a 1.4.1 param no canal.
+        extras.CopyTo(buffer, offset);
+        offset += extras.Length;
         return buffer[..offset];
+    }
+
+    /// <summary>Os campos novos (1.5.0) de uma mensagem do chat: [tipo][tamanho (2 bytes)][valor].</summary>
+    private static byte[] EncodeExtras(RoomChatMessage message)
+    {
+        if (message.File is not { IsValid: true } file) return [];
+        var value = ChatFiles.Encode(file);
+        var field = new byte[3 + value.Length];
+        field[0] = ChatFiles.FileField;
+        BinaryPrimitives.WriteUInt16BigEndian(field.AsSpan(1), (ushort)value.Length);
+        value.CopyTo(field, 3);
+        return field;
+    }
+
+    /// <summary>Lê os campos novos; os que esta versão não conhece são pulados.</summary>
+    private static bool TryReadExtras(ReadOnlySpan<byte> data, out ChatFile? file)
+    {
+        file = null;
+        var offset = 0;
+        while (offset < data.Length)
+        {
+            if (offset + 3 > data.Length) return false;
+            var type = data[offset];
+            var size = BinaryPrimitives.ReadUInt16BigEndian(data[(offset + 1)..]);
+            offset += 3;
+            if (offset + size > data.Length) return false;
+            if (type == ChatFiles.FileField && ChatFiles.TryDecode(data.Slice(offset, size), out var decoded)) file = decoded;
+            offset += size;
+        }
+        return true;
     }
 
     private static bool IsValidImage(ChatImage image)
@@ -461,6 +504,7 @@ public static partial class RoomPacket
         var history = (body[32] & HistoryFlag) != 0;
         var hasImage = (body[32] & ImageFlag) != 0;
         var hasChannel = (body[32] & ChannelFlag) != 0;
+        var hasExtras = (body[32] & ExtrasFlag) != 0;
         var offset = 33;
         if (author == Guid.Empty || !TryReadShortString(body, ref offset, out var name)) return false;
         if (offset + 2 > body.Length) return false;
@@ -495,7 +539,9 @@ public static partial class RoomPacket
             if (channel.Length == 0) return false;
             if (RoomChannels.IsDefaultText(channel)) channel = null;
         }
-        message = new RoomChatMessage(author, name, id, time, text, history, image, channel);
+        ChatFile? file = null;
+        if (hasExtras && (!imageComplete || !TryReadExtras(body[offset..], out file))) return false;
+        message = new RoomChatMessage(author, name, id, time, text, history, image, channel, file);
         return true;
     }
 

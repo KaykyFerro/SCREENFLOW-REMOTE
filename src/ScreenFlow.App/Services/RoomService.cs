@@ -443,7 +443,14 @@ public sealed class RoomService
 
     public string? RenameChannel(RoomChannel channel, string newName) => _active.RenameChannel(channel, newName);
 
-    public bool Send(string text, PreparedImage? image = null) => _active.Send(text, image);
+    public bool Send(string text, PreparedImage? image = null, ChatFile? file = null) => _active.Send(text, image, file);
+
+    /// <summary>(1.5.0) Os IPs de onde a pessoa fala com os servidores abertos (o servidor aberto primeiro).</summary>
+    public IReadOnlyList<System.Net.IPAddress> AddressesOf(Guid peer)
+        => new[] { _active }.Concat(AllServers).Select(s => s.AddressOf(peer)).OfType<System.Net.IPAddress>().Distinct().ToList();
+
+    /// <summary>(1.5.0) O nome de quem está numa das salas com este IP.</summary>
+    public string? NameAt(System.Net.IPAddress address) => AllServers.Select(s => s.NameAt(address)).FirstOrDefault(n => n is not null);
 
     public void RetryImage(ChatRow row) => ServerOf(row).RetryImage(row);
 
@@ -562,6 +569,7 @@ public sealed class RoomService
         _talkKey = new PushToTalkKeyWatcher(held => VoiceServer?.SetTalkKey(held));
         // (1.5.0) O chat privado abre antes das salas: cada uma anuncia a chave dele.
         AppServices.Direct.Start(SelfId);
+        AppServices.Files.Start();
         Open.Start(_hub);
         _store = new SpaceStore();
         foreach (var space in _store.Spaces)
@@ -590,6 +598,7 @@ public sealed class RoomService
         if (_saveTimer.IsEnabled) SaveSpacesNow();
         foreach (var server in AllServers) await server.StopAsync();
         AppServices.Direct.Stop();
+        AppServices.Files.Stop();
         _hub?.Dispose();
         _hub = null;
     }

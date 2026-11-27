@@ -366,6 +366,8 @@ public sealed class ChatRow : RoomRowBase
         FromArchive = fromArchive;
         Avatar = AvatarColors.For(message.AuthorId);
         _imageState = Image is null ? ChatImageState.None : ChatImageState.Loading;
+        // (1.5.0) Arquivo anexado: o cartão é o mesmo para todas as mensagens com o mesmo arquivo.
+        if (message.File is { IsValid: true } file) Transfer = AppServices.Files.ItemFor(file, message.AuthorId, message.AuthorName, isMine);
         if (Image is { } image)
         {
             var scale = Math.Min(1, Math.Min(PictureMaxWidth / Math.Max(1, image.Width), PictureMaxHeight / Math.Max(1, image.Height)));
@@ -404,6 +406,14 @@ public sealed class ChatRow : RoomRowBase
 
     public ChatImage? Image { get; }
     public bool HasImage => Image is not null;
+
+    /// <summary>(1.5.0) O cartão do arquivo anexado (null sem arquivo). A imagem, quando tem, é a prévia dele.</summary>
+    public FileTransferItem? Transfer { get; }
+    public bool HasFile => Transfer is not null;
+
+    /// <summary>A prévia é de um vídeo (mostra o botão de tocar e a duração por cima).</summary>
+    public bool IsVideoPreview => HasImage && Transfer is { IsVideo: true };
+    public string VideoDuration => Transfer is { File.Duration: > 0 } item ? FileTransferItem.DurationText(item.File.Duration) : string.Empty;
     public double PictureWidth { get; }
     public double PictureHeight { get; }
     public ImageSource? Picture { get => _picture; set => Set(ref _picture, value, nameof(Picture)); }

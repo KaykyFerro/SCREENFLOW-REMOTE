@@ -211,6 +211,16 @@ public static class Screenshots
             AppServices.Room.SelectText("campeonato");
             return Go(window, window.ChatPage, 500);
         });
+        // (1.5.0) Arquivos no chat: um vídeo com prévia, um .zip baixando, um programa com o aviso, um seu sendo baixado
+        // e dois anexados na caixa de escrever (conferidos, com a prévia da imagem).
+        await Shot("43-arquivos-no-chat.png", async () =>
+        {
+            AppServices.Room.Open.LoadDemoFiles();
+            AppServices.Room.SelectText("campeonato");
+            window.ChatPage.ShowFilesDemo(DemoAttachments(), "Placar da final e o print");
+            await Go(window, window.ChatPage, 1200);
+        });
+        window.ChatPage.ShowFilesDemo([]);
         AppServices.Room.SelectText(null);
         ContextMenu? memberMenu = null;
         await Shot("28-volume-por-pessoa.png", async () =>
@@ -354,6 +364,18 @@ public static class Screenshots
         return failed == 0 && saved > 0;
     }
 
+
+    /// <summary>(1.5.0) Dois arquivos de verdade numa pasta temporária, para a captura dos anexos (uma imagem e uma planilha).</summary>
+    private static IReadOnlyList<string> DemoAttachments()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "ScreenFlow-capturas");
+        Directory.CreateDirectory(folder);
+        var picture = Path.Combine(folder, "print da final.jpg");
+        File.WriteAllBytes(picture, DemoData.ChatPicture().Data);
+        var sheet = Path.Combine(folder, "placar da final.xlsx");
+        File.WriteAllBytes(sheet, System.Security.Cryptography.RandomNumberGenerator.GetBytes(48 * 1024));
+        return [picture, sheet];
+    }
     private static async Task Go(MainWindow window, UserControl page, int wait = 300)
     {
         window.Navigate(page);

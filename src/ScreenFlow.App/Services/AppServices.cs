@@ -43,6 +43,11 @@ public static class AppServices
     /// <summary>(1.5.0) As mensagens diretas (chat privado, cifrado só para a outra pessoa). Criadas na thread da interface.</summary>
     public static DirectService Direct => _direct ??= new DirectService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
 
+    private static FileService? _files;
+
+    /// <summary>(1.5.0) Os arquivos do chat (mandar e baixar direto de um PC para o outro). Criados na thread da interface.</summary>
+    public static FileService Files => _files ??= new FileService(System.Windows.Threading.Dispatcher.CurrentDispatcher);
+
     /// <summary>(1.4.1) O que o instalador pediu ao abrir o ScreenFlow (instalar o Tailscale ou o Radmin VPN junto).</summary>
     public static StartupOptions Startup { get; set; } = StartupOptions.None;
 
@@ -153,8 +158,8 @@ public static class AppServices
         foreach (var adapter in RadminNetwork.GetIPv4Adapters())
             builder.AppendLine($"  {(adapter.IsUp ? "●" : "○")} {adapter.Description}: {adapter.Address}{(adapter.IsRadmin ? " [Radmin]" : "")}");
         var s = Settings.Current;
-        builder.AppendLine($"  Portas: mídia UDP {s.MediaPort}, controle TCP {s.ControlPort}, descoberta UDP {s.DiscoveryPort}");
-        builder.AppendLine($"  Firewall: {(FirewallManager.RulesExist(s.MediaPort, s.ControlPort, s.DiscoveryPort) ? "regras criadas" : "regras NÃO encontradas")}");
+        builder.AppendLine($"  Portas: mídia UDP {s.MediaPort}, controle TCP {s.ControlPort}, descoberta UDP {s.DiscoveryPort}, arquivos TCP {s.FilePort}");
+        builder.AppendLine($"  Firewall: {(FirewallManager.RulesExist(s.MediaPort, s.ControlPort, s.DiscoveryPort, s.FilePort) ? "regras criadas" : "regras NÃO encontradas")}");
         builder.AppendLine($"  Upload medido: {(s.UploadMbps > 0 ? $"{s.UploadMbps:0} Mbps" : "ainda não medido (use 'Testar banda' com alguém conectado)")}");
         builder.AppendLine();
 

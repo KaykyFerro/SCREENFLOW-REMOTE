@@ -796,6 +796,8 @@
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="12"/>
                                 <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="12"/>
+                                <ColumnDefinition Width="*"/>
                             </Grid.ColumnDefinitions>
                             <StackPanel>
                                 <TextBlock Style="{StaticResource Label}" Text="Mídia (UDP)" TextTrimming="CharacterEllipsis"/>
@@ -808,6 +810,10 @@
                             <StackPanel Grid.Column="4">
                                 <TextBlock Style="{StaticResource Label}" Text="Descoberta (UDP)" TextTrimming="CharacterEllipsis"/>
                                 <TextBox x:Name="DiscoveryPortBox" MaxLength="5" FontFamily="{DynamicResource FontMono}"/>
+                            </StackPanel>
+                            <StackPanel Grid.Column="6" ToolTip="Os arquivos do chat vão direto de um PC para o outro por esta porta.">
+                                <TextBlock Style="{StaticResource Label}" Text="Arquivos (TCP)" TextTrimming="CharacterEllipsis"/>
+                                <TextBox x:Name="FilePortBox" MaxLength="5" FontFamily="{DynamicResource FontMono}"/>
                             </StackPanel>
                         </Grid>
                         <Grid Margin="{DynamicResource FieldGap}">
