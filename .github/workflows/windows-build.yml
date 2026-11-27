@@ -34,6 +34,8 @@ jobs:
         run: dotnet test ScreenFlow.sln --configuration Release --no-build --logger "trx;LogFileName=screenflow-tests.trx"
       - name: Publish self-contained Windows x64 app
         run: dotnet publish src/ScreenFlow.App/ScreenFlow.App.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/publish
+      - name: Publish the ScreenFlow server for Windows (console, one file)
+        run: dotnet publish src/ScreenFlow.Server/ScreenFlow.Server.csproj --configuration Release --runtime win-x64 --output artifacts/servidor-win-x64
       # O runner não tem placa de som. O VB-CABLE é uma placa de som virtual: com ela o Windows toca e captura som de
       # verdade, e o autoteste confere o som do PC separado por app. O Windows Server só carrega drivers com assinatura
       # antiga (de antes de 2015) ou certificados pela Microsoft, então vai o driver "win7" do pacote, de 2014. O devcon
@@ -204,5 +206,12 @@ jobs:
           path: |
             artifacts/ScreenFlow-Setup-win-x64.exe
             artifacts/publish/
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload the Windows server
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenFlow-Servidor-win-x64
+          path: artifacts/servidor-win-x64/
           if-no-files-found: error
           retention-days: 14

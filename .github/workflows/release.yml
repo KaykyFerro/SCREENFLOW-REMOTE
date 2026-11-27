@@ -20,6 +20,9 @@ concurrency:
 jobs:
   release:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+      skip: ${{ steps.version.outputs.skip }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       TAG: ${{ github.ref_name }}
@@ -63,6 +66,15 @@ jobs:
       - name: Publish
         if: steps.version.outputs.skip != 'true'
         run: dotnet publish src/ScreenFlow.App/ScreenFlow.App.csproj --configuration Release --runtime win-x64 --self-contained true --output artifacts/publish -p:Version=${{ steps.version.outputs.value }}
+      - name: Publish the server for Windows
+        if: steps.version.outputs.skip != 'true'
+        shell: pwsh
+        run: |
+          dotnet publish src/ScreenFlow.Server/ScreenFlow.Server.csproj --configuration Release --runtime win-x64 --output artifacts/servidor-win-x64 -p:Version=${{ steps.version.outputs.value }}
+          if ($LASTEXITCODE -ne 0) { throw "A publicação do servidor falhou" }
+          Compress-Archive -Path artifacts/servidor-win-x64/* -DestinationPath artifacts/ScreenFlow-Servidor-win-x64.zip -Force
+          $hash = (Get-FileHash artifacts/ScreenFlow-Servidor-win-x64.zip -Algorithm SHA256).Hash.ToLower()
+          "$hash  ScreenFlow-Servidor-win-x64.zip" | Out-File -Encoding ascii artifacts/ScreenFlow-Servidor-win-x64.zip.sha256
       - name: Install Inno Setup
         if: steps.version.outputs.skip != 'true'
         run: choco install innosetup --yes --no-progress
@@ -79,10 +91,38 @@ jobs:
         shell: pwsh
         run: |
           $PSNativeCommandUseErrorActionPreference = $false
-          $files = 'artifacts/ScreenFlow-Setup-win-x64.exe', 'artifacts/ScreenFlow-Setup-win-x64.exe.sha256'
+          $files = 'artifacts/ScreenFlow-Setup-win-x64.exe', 'artifacts/ScreenFlow-Setup-win-x64.exe.sha256', 'artifacts/ScreenFlow-Servidor-win-x64.zip', 'artifacts/ScreenFlow-Servidor-win-x64.zip.sha256'
           if ($env:GITHUB_EVENT_NAME -eq 'release') {
             gh release upload $env:TAG @files --clobber --repo $env:GITHUB_REPOSITORY
           } else {
             gh release create $env:TAG @files --title "ScreenFlow ${{ steps.version.outputs.value }}" --generate-notes --repo $env:GITHUB_REPOSITORY
           }
           if ($LASTEXITCODE -ne 0) { throw "Não foi possível publicar o instalador no release $env:TAG" }
+
+  # O servidor para Linux (x64 e arm64), depois do instalador (que cria o release quando a versão vem por tag).
+  server-linux:
+    needs: release
+    if: needs.release.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Publish and attach the Linux server
+        run: |
+          set -euo pipefail
+          files=()
+          for rid in linux-x64 linux-arm64; do
+            dotnet publish src/ScreenFlow.Server/ScreenFlow.Server.csproj --configuration Release --runtime "$rid" --output "artifacts/$rid/screenflow-servidor" -p:Version=${{ needs.release.outputs.version }}
+            chmod +x "artifacts/$rid/screenflow-servidor/screenflow-servidor" "artifacts/$rid/screenflow-servidor/install-server.sh"
+            tar -czf "artifacts/ScreenFlow-Servidor-$rid.tar.gz" -C "artifacts/$rid" screenflow-servidor
+            (cd artifacts && sha256sum "ScreenFlow-Servidor-$rid.tar.gz" > "ScreenFlow-Servidor-$rid.tar.gz.sha256")
+            files+=("artifacts/ScreenFlow-Servidor-$rid.tar.gz" "artifacts/ScreenFlow-Servidor-$rid.tar.gz.sha256")
+          done
+          gh release upload "$TAG" "${files[@]}" --clobber --repo "$GITHUB_REPOSITORY"

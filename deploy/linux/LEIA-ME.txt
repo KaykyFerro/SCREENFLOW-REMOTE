@@ -1,0 +1,25 @@
+Servidor ScreenFlow para Linux
+==============================
+
+Um PC onde todo mundo se conecta: a tela de quem transmite vai uma vez para o servidor e ele manda para cada pessoa
+que assiste. O chat, a voz e os canais também passam por ele e ficam guardados nele.
+
+Instalar como serviço (liga sozinho quando o PC liga):
+
+    sudo ./install-server.sh --tailscale --nome "Servidor do Kayky" --senha
+
+  --tailscale  instala o Tailscale pelo script oficial (se faltar) e mostra um link para entrar na sua conta
+  --senha      pergunta a senha do servidor (a mesma senha vai no app de cada pessoa)
+
+Rodar sem instalar (para testar):
+
+    ./screenflow-servidor --nome "Servidor do Kayky" --senha "minha senha"
+
+No app de cada pessoa: Configurações › Servidor, coloque o endereço que o servidor mostrou (o 100.x do Tailscale, o
+26.x do Radmin VPN ou o da rede local) e a senha.
+
+Portas: 47810/tcp, 47811/udp e 47812/udp (o install-server.sh libera no ufw ou no firewalld).
+
+Ver o que está acontecendo:  journalctl -u screenflow-servidor -f
+Desinstalar:                 sudo ./install-server.sh --remover
+Ajuda do programa:           ./screenflow-servidor --ajuda
