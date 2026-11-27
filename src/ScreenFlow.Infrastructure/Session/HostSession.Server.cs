@@ -105,7 +105,6 @@ public sealed partial class HostSession
         backoff.Reset();
         _serverName = Core.Room.RoomPacket.CleanName(accepted.ServerName) is { Length: > 0 } clean ? clean : server.Host;
         SetServerState(ServerLinkState.Live, $"No servidor {_serverName}: quem está nele já pode assistir.");
-        ServerChanged?.Invoke();
         await ServeViewerAsync(client, stream, (IPEndPoint)client.Client.RemoteEndPoint!, hello, _serverName, sender, token);
         if (!token.IsCancellationRequested) SetServerState(ServerLinkState.Connecting, "A conexão com o servidor caiu. Tentando de novo…");
         return false;

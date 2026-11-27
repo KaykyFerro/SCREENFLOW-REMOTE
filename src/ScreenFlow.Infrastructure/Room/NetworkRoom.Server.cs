@@ -23,6 +23,9 @@ public sealed partial class NetworkRoom
     private static readonly TimeSpan ProbeInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan KeepAliveProbe = TimeSpan.FromSeconds(10);
     private static readonly TimeSpan ServerSilence = TimeSpan.FromSeconds(8);
+
+    /// <summary>Quantas vezes a prova da senha vai para o mesmo desafio (o UDP pode perder uma; senha errada para aqui).</summary>
+    private const int MaxProofsPerChallenge = 3;
     private volatile ServerLink? _server;
 
     /// <summary>A sala está indo pelo servidor (mesmo que ainda não tenha entrado).</summary>
@@ -134,12 +137,21 @@ public sealed partial class NetworkRoom
     private void Probe(ServerLink server, DateTimeOffset now)
     {
         server.LastProbe = now;
-        // Com o desafio do servidor e a senha, manda a prova (uma vez por desafio: senha errada não vira repetição).
+        // Com o desafio do servidor e a senha, manda a prova: até 3 vezes por desafio (uma pode se perder no caminho), e
+        // não mais que isso (senha errada não vira repetição sem fim).
         byte[]? proof = null;
-        if (!server.Authorized && server.Password is { } password && server.Info is { PasswordRequired: true } info && server.ProvedNonce != info.Nonce)
+        if (!server.Authorized && server.Password is { } password && server.Info is { PasswordRequired: true } info)
         {
-            proof = RoomPacket.ServerProof(password, info.Nonce, SelfId);
-            server.ProvedNonce = info.Nonce;
+            if (server.ProvedNonce != info.Nonce)
+            {
+                server.ProvedNonce = info.Nonce;
+                server.ProofsSent = 0;
+            }
+            if (server.ProofsSent < MaxProofsPerChallenge)
+            {
+                proof = RoomPacket.ServerProof(password, info.Nonce, SelfId);
+                server.ProofsSent++;
+            }
         }
         SendRaw(RoomPacket.ServerProbe(SelfId, AppInfo.DisplayVersion, proof), server.EndPoint);
     }
@@ -202,13 +214,17 @@ public sealed partial class NetworkRoom
         {
             var wasIn = server.Authorized;
             server.Authorized = false;
+            // Estava dentro e o servidor esqueceu este PC (ficou um tempo sem sinal ou trocou de endereço): prova a senha de novo.
+            if (wasIn) server.ProofsSent = 0;
             if (!info.PasswordRequired) server.State = RoomServerState.Connecting; // o servidor esqueceu (reiniciou): a próxima sonda entra
             else if (server.Password is null) server.State = RoomServerState.NeedsPassword;
-            else if (server.ProvedNonce == info.Nonce && previous is not null && !wasIn) server.State = RoomServerState.WrongPassword;
+            else if (server.ProvedNonce == info.Nonce && server.ProofsSent >= MaxProofsPerChallenge && !wasIn) server.State = RoomServerState.WrongPassword;
             else server.State = RoomServerState.Connecting;
-            // Desafio novo (ou o servidor reiniciou): manda a prova já.
-            if (server.Password is not null && server.ProvedNonce != info.Nonce) Probe(server, now);
-            else if (!info.PasswordRequired && now - server.LastProbe > TimeSpan.FromMilliseconds(300)) Probe(server, now);
+            // Desafio novo (ou o servidor reiniciou): manda a prova já. Falta tentar de novo: no máximo a cada 300 ms.
+            var prove = server.Password is not null && info.PasswordRequired;
+            if (prove && server.ProvedNonce != info.Nonce) Probe(server, now);
+            else if ((!info.PasswordRequired || (prove && server.ProofsSent < MaxProofsPerChallenge)) && now - server.LastProbe > TimeSpan.FromMilliseconds(300))
+                Probe(server, now);
         }
         if (state != server.State || previous is null || previous.Members != info.Members || previous.Streams != info.Streams || previous.Name != info.Name)
             ServerChanged?.Invoke();
@@ -224,6 +240,7 @@ public sealed partial class NetworkRoom
         public volatile RoomServerState State = RoomServerState.Connecting;
         public volatile string? Name;
         public volatile string? ProvedNonce;
+        public int ProofsSent;
         public volatile IReadOnlyList<RoomChannel> Channels = [];
         public DateTimeOffset LastHeard = DateTimeOffset.UtcNow;
         public DateTimeOffset LastProbe = DateTimeOffset.MinValue;

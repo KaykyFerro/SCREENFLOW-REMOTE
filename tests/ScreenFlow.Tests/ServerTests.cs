@@ -467,6 +467,43 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RoomKeepsLittleSpaceForWhoHasNotProvedThePassword()
+    {
+        using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var token = cancel.Token;
+        var port = _server.Room.Port;
+        var strangers = Enumerable.Range(0, RoomRelay.MaxPendingPerAddress + 1).Select(i => new FakeRoomClient(port, $"Estranho {i}")).ToList();
+        try
+        {
+            // Do mesmo IP, sem a senha, só alguns ficam esperando: o próximo id inventado nem recebe resposta.
+            for (var i = 0; i < RoomRelay.MaxPendingPerAddress; i++) Assert.False((await strangers[i].ProbeAsync(null, token)).Authorized);
+            Assert.Null(await strangers[^1].ProbeOrNullAsync(TimeSpan.FromSeconds(1), token));
+
+            // Quem prova a senha sai da espera e abre lugar.
+            Assert.True((await strangers[0].ProbeAsync("segredo", token)).Authorized);
+            Assert.False((await strangers[^1].ProbeAsync(null, token)).Authorized);
+        }
+        finally
+        {
+            foreach (var stranger in strangers) stranger.Dispose();
+        }
+    }
+
+    [Fact]
+    public async Task RoomStopsCheckingPasswordsAfterTooManyWrongOnes()
+    {
+        using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var token = cancel.Token;
+        using var guesser = new FakeRoomClient(_server.Room.Port, "Chutador");
+        Assert.True((await guesser.ProbeAsync(null, token)).PasswordRequired);
+        for (var i = 0; i < RoomRelay.MaxWrongPasswordsPerMinute; i++)
+            Assert.False((await guesser.ProbeAsync($"chute {i}", token)).Authorized);
+        // Passou do limite: por um minuto, nem a senha certa entra por este IP.
+        Assert.False((await guesser.ProbeAsync("segredo", token)).Authorized);
+        Assert.Empty(_server.Room.Members);
+    }
+
+    [Fact]
     public async Task RoomAnnouncesTheStreamsOfTheServer()
     {
         using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));
@@ -805,6 +842,12 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
         }
 
         private async Task<RoomServerInfo> ProbeOnceAsync(byte[]? proof, CancellationToken token)
+            => await ProbeOnceAsync(proof, Wait, token) ?? throw new TimeoutException("O servidor não respondeu a sondagem.");
+
+        /// <summary>Uma sondagem sem a senha; null se o servidor não responder dentro de <paramref name="timeout"/>.</summary>
+        public Task<RoomServerInfo?> ProbeOrNullAsync(TimeSpan timeout, CancellationToken token) => ProbeOnceAsync(null, timeout, token);
+
+        private async Task<RoomServerInfo?> ProbeOnceAsync(byte[]? proof, TimeSpan timeout, CancellationToken token)
         {
             // O servidor responde no máximo uma sondagem a cada 150 ms por PC (menos para quem acabou de entrar).
             var wait = _lastProbe + TimeSpan.FromMilliseconds(250) - DateTime.UtcNow;
@@ -812,10 +855,10 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
             var before = Count(p => p.Type == RoomPacketType.ServerInfo);
             _lastProbe = DateTime.UtcNow;
             Send(RoomPacket.ServerProbe(Id, AppInfo.DisplayVersion, proof));
-            var deadline = DateTime.UtcNow + Wait;
+            var deadline = DateTime.UtcNow + timeout;
             while (Count(p => p.Type == RoomPacketType.ServerInfo) <= before)
             {
-                if (DateTime.UtcNow > deadline) throw new TimeoutException("O servidor não respondeu a sondagem.");
+                if (DateTime.UtcNow > deadline) return null;
                 await Task.Delay(20, token);
             }
             var reply = Last(p => p.Type == RoomPacketType.ServerInfo)!;

@@ -26,7 +26,7 @@ public sealed record ServerCommandLine(ServerOptions Options, bool ShowHelp, boo
           --pasta PASTA          Onde guardar o chat, os canais e o log
           --max-transmissoes N   Transmissões ao mesmo tempo (padrão: 16)
           --max-assistindo N     Pessoas assistindo cada transmissão (padrão: 64)
-          --max-pessoas N        Pessoas na sala (padrão: 128)
+          --max-pessoas N        Pessoas na sala (padrão: 128, no máximo {Room.RoomPeerTable.MaxPeers})
           --detalhes             Log com mais detalhes
           --versao               Mostra a versão e sai
           --ajuda                Mostra esta ajuda e sai

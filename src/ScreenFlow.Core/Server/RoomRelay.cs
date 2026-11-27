@@ -24,6 +24,14 @@ public sealed class RoomRelay : IAsyncDisposable
 {
     private static readonly TimeSpan PresenceInterval = TimeSpan.FromSeconds(2);
     private static readonly TimeSpan MemberTimeout = TimeSpan.FromSeconds(15);
+
+    /// <summary>Quem ainda não provou a senha ocupa pouco lugar: no máximo tantos ao todo e tantos por IP.</summary>
+    public const int MaxPending = 32, MaxPendingPerAddress = 4;
+
+    /// <summary>Senhas erradas por IP num minuto: passando disso, as provas desse IP são ignoradas até o minuto acabar.</summary>
+    public const int MaxWrongPasswordsPerMinute = 10;
+
+    private readonly ConcurrentDictionary<IPAddress, (DateTimeOffset Start, int Count)> _wrongPasswords = new();
     private readonly ServerOptions _options;
     private readonly Func<IReadOnlyList<DiscoveryAnnouncement>> _announcements;
     private readonly Func<int> _controlPort;
@@ -153,12 +161,17 @@ public sealed class RoomRelay : IAsyncDisposable
         if (!RoomPacket.TryReadServerProbe(body, out _, out var proof)) return;
         if (Bind(sender, from, now, create: true) is not { } member) return;
         var justAuthorized = false;
-        if (!member.Authorized && proof is not null && _options.HasPassword && RoomPacket.VerifyServerProof(_options.Password!, _nonce, sender, proof))
+        if (!member.Authorized && proof is not null && _options.HasPassword && !TooManyWrongPasswords(from.Address, now))
         {
-            member.Authorized = justAuthorized = true;
-            Log.Info($"Servidor: {from.Address} entrou na sala com a senha.");
-            _announceSoon = true;
-            Changed?.Invoke();
+            if (RoomPacket.VerifyServerProof(_options.Password!, _nonce, sender, proof))
+            {
+                member.Authorized = justAuthorized = true;
+                _wrongPasswords.TryRemove(from.Address, out _);
+                Log.Info($"Servidor: {from.Address} entrou na sala com a senha.");
+                _announceSoon = true;
+                Changed?.Invoke();
+            }
+            else WrongPassword(from.Address, now);
         }
         // Uma resposta a cada 150 ms por PC (a sondagem não vira amplificador), mas quem acabou de entrar sempre ouve.
         if (!justAuthorized && now - member.LastInfo < TimeSpan.FromMilliseconds(150)) return;
@@ -304,9 +317,41 @@ public sealed class RoomRelay : IAsyncDisposable
             member.Rebind(from, now, authorized: !_options.HasPassword);
             return member;
         }
-        if (!create || _members.Count >= _options.MaxMembers) return null;
+        if (!create || !HasRoomFor(from.Address)) return null;
         member = new Member(id, from, now) { Authorized = !_options.HasPassword };
         return _members.TryAdd(id, member) ? member : _members.GetValueOrDefault(id);
+    }
+
+    /// <summary>
+    /// Cabe mais um PC? Quem já entrou conta até o máximo de pessoas. Com senha, quem ainda não provou a senha fica num
+    /// espaço à parte e pequeno (por IP e ao todo), então ids inventados não tomam o lugar de quem tem a senha.
+    /// </summary>
+    private bool HasRoomFor(IPAddress address)
+    {
+        int authorized = 0, pending = 0, pendingHere = 0;
+        foreach (var member in _members.Values)
+        {
+            if (member.Authorized) authorized++;
+            else
+            {
+                pending++;
+                if (member.EndPoint.Address.Equals(address)) pendingHere++;
+            }
+        }
+        if (authorized >= _options.MaxMembers) return false;
+        return !_options.HasPassword || (pending < MaxPending && pendingHere < MaxPendingPerAddress);
+    }
+
+    private bool TooManyWrongPasswords(IPAddress address, DateTimeOffset now)
+        => _wrongPasswords.TryGetValue(address, out var wrong) && wrong.Count >= MaxWrongPasswordsPerMinute && now - wrong.Start < TimeSpan.FromMinutes(1);
+
+    private void WrongPassword(IPAddress address, DateTimeOffset now)
+    {
+        var wrong = _wrongPasswords.AddOrUpdate(address, _ => (now, 1), (_, w) => now - w.Start > TimeSpan.FromMinutes(1) ? (now, 1) : (w.Start, w.Count + 1));
+        if (wrong.Count == MaxWrongPasswordsPerMinute) Log.Warn($"Servidor: senhas erradas demais de {address}; as próximas tentativas esperam um minuto.");
+        if (_wrongPasswords.Count > 1024)
+            foreach (var stale in _wrongPasswords.Where(w => now - w.Value.Start > TimeSpan.FromMinutes(1)).Select(w => w.Key).ToList())
+                _wrongPasswords.TryRemove(stale, out _);
     }
 
     private Member? Authorized(Guid id, IPEndPoint from, DateTimeOffset now)
