@@ -40,13 +40,7 @@ public static class SelfTest
         void Line(string text) => report.AppendLine($"[{clock.Elapsed.TotalSeconds,5:0.0}s] {text}");
         Line($"{AppInfo.Name} {AppInfo.DisplayVersion}: autoteste da festa de música no 127.0.0.1");
 
-        var hostOptions = new HostOptions(
-            "Autoteste", IPAddress.Loopback, IPAddress.Loopback, MediaPort, ControlPort, DiscoveryPort,
-            null, false, 4,
-            new CaptureTarget(CaptureKind.Monitor, string.Empty, "Festa de música", 0, 0, 0), null, Resolution.P720, 30, 0,
-            null, null, [],
-            true, 160, false, 10, 0,
-            StreamMode.AudioOnly, 256, profile => new ToneAudioSource(profile));
+        var hostOptions = PartyOptions(256);
 
         var ok = false;
         HostSession? host = null;
@@ -105,13 +99,93 @@ public static class SelfTest
             Line("Festa encerrada.");
         }
 
+        var followOk = await FollowHostTestAsync(Line);
         var roomOk = await RoomTestAsync(Line);
         var serverOk = await ServerTestAsync(Line);
         var soundOk = await PcSoundTestAsync(Line);
         var cropOk = CaptureCropTest(Line);
-        var all = ok && roomOk && serverOk && soundOk && cropOk;
+        var all = ok && followOk && roomOk && serverOk && soundOk && cropOk;
         Line(all ? "PASSOU: tudo certo." : "FALHOU: veja as linhas acima.");
         return (all, report.ToString());
+    }
+
+    /// <summary>Uma festa de música no 127.0.0.1 com um tom de teste no lugar do som do PC.</summary>
+    private static HostOptions PartyOptions(int musicKbps) => new(
+        "Autoteste", IPAddress.Loopback, IPAddress.Loopback, MediaPort, ControlPort, DiscoveryPort,
+        null, false, 4,
+        new CaptureTarget(CaptureKind.Monitor, string.Empty, "Festa de música", 0, 0, 0), null, Resolution.P720, 30, 0,
+        null, null, [],
+        true, 160, false, 10, 0,
+        StreamMode.AudioOnly, musicKbps, profile => new ToneAudioSource(profile));
+
+    /// <summary>
+    /// (1.5.0) Quem assiste segue o host na troca de modo: a festa se despede avisando a troca, outra começa nas mesmas
+    /// portas e o mesmo player (a mesma sessão, sem sair e entrar) entra sozinho nela.
+    /// </summary>
+    private static async Task<bool> FollowHostTestAsync(Action<string> line)
+    {
+        HostSession? host = null;
+        ViewerSession? viewer = null;
+        try
+        {
+            host = new HostSession(PartyOptions(128));
+            await Task.Run(host.Start);
+            viewer = new ViewerSession(new ViewerOptions("127.0.0.1", ControlPort, "Autoteste viewer", null, 0.8f, [], 1280, 720, 60, AudioOutput: false));
+            var connections = 0;
+            var waited = false;
+            var first = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var back = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var session = viewer;
+            session.StateChanged += (state, message) =>
+            {
+                if (state == ConnectionState.Connected)
+                {
+                    if (Interlocked.Increment(ref connections) == 1) first.TrySetResult();
+                    else back.TrySetResult();
+                }
+                if (state == ConnectionState.Reconnecting && session.WaitingForHost)
+                {
+                    if (!waited) line($"viewer esperando: {message}");
+                    waited = true;
+                }
+                if (state is ConnectionState.Error or ConnectionState.Closed)
+                {
+                    line($"viewer: {state} · {message}");
+                    first.TrySetResult();
+                    back.TrySetResult();
+                }
+            };
+            viewer.Start();
+            await first.Task.WaitAsync(TimeSpan.FromSeconds(15));
+            if (connections != 1)
+            {
+                line("FALHOU: o viewer não entrou na primeira festa.");
+                return false;
+            }
+            host.Farewell = new ByeMessage("Autoteste trocando de modo.", ByeMessage.Switching, ByeMessage.SwitchResumeSeconds, StreamMode.AudioOnly);
+            await host.DisposeAsync();
+            host = null;
+            await Task.Delay(800);
+            host = new HostSession(PartyOptions(256));
+            await Task.Run(host.Start);
+            await back.Task.WaitAsync(TimeSpan.FromSeconds(20));
+            var ok = connections >= 2 && waited && viewer.State == ConnectionState.Connected;
+            line(ok
+                ? "PASSOU: na troca de modo o player esperou e entrou sozinho na transmissão nova (sem sair e entrar)."
+                : $"FALHOU: o player não seguiu a troca (conexões {connections}, esperou {waited}, estado {viewer.State}).");
+            return ok;
+        }
+        catch (Exception exception)
+        {
+            Log.Error("Autoteste da troca de modo falhou", exception);
+            line($"FALHOU (troca de modo) com erro: {exception.GetType().Name}: {exception.Message}");
+            return false;
+        }
+        finally
+        {
+            if (viewer is not null) await viewer.DisposeAsync();
+            if (host is not null) await host.DisposeAsync();
+        }
     }
 
     /// <summary>

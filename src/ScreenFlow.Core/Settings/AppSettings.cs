@@ -122,7 +122,7 @@ public sealed class AppSettings
     public bool SystemMediaControls { get; set; } = true;
 
     // Bandeja
-    /// <summary>Fechar e minimizar levam o app para a bandeja (perto do relógio) em vez de fechar.</summary>
+    /// <summary>Fechar (X) leva o app para a bandeja (perto do relógio) em vez de fechar. Minimizar fica na barra de tarefas (1.5.0).</summary>
     public bool MinimizeToTray { get; set; } = true;
     public bool TrayHintShown { get; set; }
     /// <summary>Quando a transmissão acaba (ou o player fecha) com o ScreenFlow na bandeja, a janela volta sozinha.</summary>

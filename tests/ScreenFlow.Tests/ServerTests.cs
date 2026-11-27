@@ -409,6 +409,61 @@ public sealed class ServerEndToEndTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task ViewersFollowThePublisherWhenItSwitchesModes()
+    {
+        using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var token = cancel.Token;
+        var streamId = Guid.NewGuid();
+        var publisher = await FakePublisher.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", token);
+        await using (var viewer = await FakeViewer.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", "Ana", token))
+        {
+            // Quem transmite troca de modo (1.5.0): a despedida diz que volta, e quem assiste (1.5.0) recebe a mesma
+            // despedida, sabe que é uma troca e fica esperando em vez de encerrar.
+            await publisher.SendAsync(new ByeMessage("Trocando de modo.", ByeMessage.Switching, ByeMessage.SwitchResumeSeconds, StreamMode.AudioOnly), token);
+            var bye = await viewer.WaitForAsync<ByeMessage>(_ => true, token);
+            Assert.True(bye.CanResume);
+            Assert.Equal(ByeMessage.Switching, bye.Code);
+            Assert.Equal(StreamMode.AudioOnly, bye.NextMode);
+            await viewer.WaitForCloseAsync(token);
+        }
+        await publisher.DisposeAsync();
+        // A transmissão continua no servidor, esperando quem transmite voltar.
+        await WaitUntil(() => _server.Streams.Streams is [{ Online: false }], token);
+        var waiting = FakeViewer.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", "Ana", token, acceptPending: true);
+        await Task.Delay(400, token);
+        Assert.False(waiting.IsCompleted);
+        await using var back = await FakePublisher.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", token);
+        await using var viewerAgain = await waiting.WaitAsync(Wait, token);
+        Assert.True(viewerAgain.SawPending);
+    }
+
+    [Fact]
+    public async Task AFinalByeStillEndsTheStreamAndMissingStreamsAreNotFound()
+    {
+        using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var token = cancel.Token;
+        var streamId = Guid.NewGuid();
+        var publisher = await FakePublisher.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", token);
+        await using var viewer = await FakeViewer.ConnectAsync(_server.Streams.ControlPort, streamId, "segredo", "Ana", token);
+        // Uma despedida sem volta (o app fechou): a transmissão sai do servidor e quem assiste recebe um tchau final.
+        await publisher.SendAsync(new ByeMessage("O host encerrou a transmissão."), token);
+        var bye = await viewer.WaitForAsync<ByeMessage>(_ => true, token);
+        Assert.False(bye.CanResume);
+        await WaitUntil(() => _server.Streams.Streams.Count == 0, token);
+        await publisher.DisposeAsync();
+        // Pedir uma transmissão que não está lá responde "não está aqui" (quem espera o host voltar continua esperando).
+        using var client = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
+        await client.ConnectAsync(IPAddress.Loopback, _server.Streams.ControlPort, token);
+        var stream = client.GetStream();
+        using var key = new KeyExchange();
+        await ControlFraming.WriteAsync(stream, new HelloMessage(AppInfo.ProtocolVersion, AppInfo.DisplayVersion, "Ana", [VideoCodec.H264], 1280, 720, 60,
+            40000, key.PublicKey, [.. StreamModes.ViewerFeatures], streamId.ToString("N")), token);
+        var rejected = Assert.IsType<RejectedMessage>(await ControlFraming.ReadAsync(stream, token));
+        Assert.Equal(RejectedMessage.NotFound, rejected.Code);
+        Assert.Contains("não está mais no servidor", rejected.Message);
+    }
+
+    [Fact]
     public async Task RoomGoesThroughTheServerWithPasswordChannelsAndHistory()
     {
         using var cancel = new CancellationTokenSource(TimeSpan.FromSeconds(60));

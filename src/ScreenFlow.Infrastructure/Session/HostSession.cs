@@ -610,7 +610,7 @@ public sealed partial class HostSession : IAsyncDisposable
     {
         if (_viewers.TryGetValue(id, out var viewer))
         {
-            _ = viewer.SendAsync(new ByeMessage("O host removeu você da transmissão."), CancellationToken.None);
+            _ = viewer.SendAsync(new ByeMessage("O host removeu você da transmissão.", ByeMessage.Removed), CancellationToken.None);
             viewer.Kicked.Cancel();
         }
     }
@@ -1198,12 +1198,20 @@ public sealed partial class HostSession : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// (1.5.0) A despedida que vai para quem assiste quando a transmissão acaba. Por padrão diz que o host encerrou e pode
+    /// começar outra: quem assiste com a 1.5.0 espera alguns minutos e entra sozinho na próxima (outro modo, por exemplo).
+    /// Para trocar de modo, use <see cref="ByeMessage.Switching"/>; para fechar o app, uma despedida sem volta.
+    /// </summary>
+    public ByeMessage Farewell { get; set; } = new("O host encerrou a transmissão.", ByeMessage.Ended, ByeMessage.EndedResumeSeconds);
+
     public async ValueTask DisposeAsync()
     {
         if (_cancellation.IsCancellationRequested) return;
+        var farewell = Farewell;
         foreach (var viewer in _viewers.Values)
         {
-            try { await viewer.SendAsync(new ByeMessage("O host encerrou a transmissão."), CancellationToken.None).WaitAsync(TimeSpan.FromMilliseconds(300)); } catch { }
+            try { await viewer.SendAsync(farewell, CancellationToken.None).WaitAsync(TimeSpan.FromMilliseconds(300)); } catch { }
         }
         _cancellation.Cancel();
         _wake.Set();

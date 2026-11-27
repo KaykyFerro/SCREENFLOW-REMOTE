@@ -589,11 +589,11 @@ public partial class MainWindow : Window
 
     private void UpdateThemeButton() => ThemeButton.Content = ThemeManager.Current == AppTheme.Dark ? "" : "";
 
-    private void Minimize_Click(object sender, RoutedEventArgs e)
-    {
-        if (TrayEnabled) HideToTray();
-        else WindowState = WindowState.Minimized;
-    }
+    /// <summary>
+    /// (1.5.0) Minimizar deixa o ScreenFlow minimizado na barra de tarefas, como qualquer programa. Só fechar (X ou
+    /// Alt+F4) leva para a bandeja, quando a opção está ligada.
+    /// </summary>
+    private void Minimize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
 
     private void Maximize_Click(object sender, RoutedEventArgs e) => WindowState = WindowState == WindowState.Maximized ? WindowState.Normal : WindowState.Maximized;
 
@@ -605,13 +605,13 @@ public partial class MainWindow : Window
         Root.Margin = WindowState == WindowState.Maximized ? SystemParameters.WindowResizeBorderThickness : new Thickness(0);
         MaximizeButton.Content = WindowState == WindowState.Maximized ? "" : "";
         MaximizeButton.ToolTip = WindowState == WindowState.Maximized ? "Restaurar" : "Maximizar";
-        // Minimizada pela barra de tarefas (ou Win+↓): vai para a bandeja em vez de ficar na barra.
-        if (WindowState == WindowState.Minimized && TrayEnabled && IsVisible) HideToTray();
+        // Minimizada (botão, barra de tarefas ou Win+↓) fica na barra de tarefas: só fechar vai para a bandeja (1.5.0).
+        if (WindowState != WindowState.Minimized) _restoreState = WindowState;
     }
 
     // ───────────────────────── Bandeja ─────────────────────────
 
-    /// <summary>Fechar e minimizar mandam para a bandeja (configurável), desde que o ícone esteja lá.</summary>
+    /// <summary>Fechar manda para a bandeja (configurável), desde que o ícone esteja lá. Minimizar fica na barra de tarefas.</summary>
     private bool TrayEnabled => _tray is { IsVisible: true } && AppServices.Settings.Current.MinimizeToTray;
 
     private void SetupTray()
@@ -763,7 +763,7 @@ public partial class MainWindow : Window
         menu.Items.Add(new Separator());
 
         menu.Items.Add(TrayItem("Abrir o ScreenFlow", "\uE8A7", () => ShowFromTray()));
-        if (IsTransmitting) menu.Items.Add(TrayItem("Encerrar a transmissão", "\uE71A", () => _ = TransmitPage.StopAsync()));
+        if (IsTransmitting) menu.Items.Add(TrayItem("Encerrar a transmissão", "\uE71A", () => _ = TransmitPage.StopAsync(TransmitPage.StopKind.Ended)));
         else menu.Items.Add(TrayItem("Transmitir…", "\uE714", () => ShowFromTray(TransmitPage)));
         AddVoiceTrayItems(menu);
         menu.Items.Add(new Separator());

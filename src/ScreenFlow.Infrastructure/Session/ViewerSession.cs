@@ -26,6 +26,15 @@ public sealed class ConnectionRejectedException(string code, string message) : E
 }
 
 /// <summary>
+/// (1.5.0) O host se despediu avisando que pode voltar (trocou de modo, ou encerrou e pode começar outra): quem assiste
+/// espera e entra sozinho na próxima transmissão, sem sair e entrar de novo.
+/// </summary>
+public sealed class HostLeftException(ByeMessage farewell) : Exception(farewell.Reason)
+{
+    public ByeMessage Farewell { get; } = farewell;
+}
+
+/// <summary>
 /// Conecta num host pelo IP, faz o handshake, recebe vídeo e áudio por UDP, decodifica e reconecta sozinho
 /// com backoff se a conexão cair. Com um <see cref="Presenter"/>, o vídeo é desenhado direto na GPU.
 /// Quando o host manda a câmera junto com a tela, ela chega numa segunda faixa e sai em <see cref="CameraFrameReady"/>.
@@ -193,6 +202,20 @@ public sealed class ViewerSession : IAsyncDisposable
         StateChanged?.Invoke(state, message);
     }
 
+    /// <summary>De quanto em quanto tempo quem assiste tenta de novo enquanto espera o host voltar (1.5.0).</summary>
+    private static readonly TimeSpan FollowRetry = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>(1.5.0) Esperando o host voltar depois de uma despedida com volta prevista: até quando, e por quê.</summary>
+    private sealed record Follow(DateTimeOffset Until, ByeMessage Farewell);
+
+    private volatile Follow? _following;
+
+    /// <summary>
+    /// (1.5.0) Esperando o host voltar (ele trocou de modo, ou encerrou e pode começar outra transmissão). O player fica
+    /// aberto e entra sozinho na próxima.
+    /// </summary>
+    public bool WaitingForHost => _following is not null;
+
     private async Task RunAsync()
     {
         var token = _cancellation.Token;
@@ -201,12 +224,21 @@ public sealed class ViewerSession : IAsyncDisposable
         {
             try
             {
-                SetState(_backoff.Attempt == 0 ? ConnectionState.Connecting : ConnectionState.Reconnecting,
+                if (_following is { } waiting) SetState(ConnectionState.Reconnecting, FollowText(waiting.Farewell, waiting.Until));
+                else SetState(_backoff.Attempt == 0 ? ConnectionState.Connecting : ConnectionState.Reconnecting,
                     _backoff.Attempt == 0 ? $"Conectando em {_options.Host}…" : $"Reconectando em {_options.Host} (tentativa {_backoff.Attempt})…");
                 await ConnectOnceAsync(token, wrongPin);
                 wrongPin = false;
                 if (token.IsCancellationRequested) break;
                 SetState(ConnectionState.Reconnecting, "A conexão caiu. Reconectando…");
+            }
+            catch (HostLeftException left)
+            {
+                // A despedida diz que o host pode voltar: espera por ele em vez de encerrar.
+                var until = DateTimeOffset.UtcNow + left.Farewell.ResumeWindow;
+                _following = new Follow(until, left.Farewell);
+                Log.Info($"Viewer: {left.Farewell.Reason} Esperando o host voltar por até {left.Farewell.ResumeWindow.TotalSeconds:0} s.");
+                SetState(ConnectionState.Reconnecting, FollowText(left.Farewell, until));
             }
             catch (ConnectionRejectedException rejected) when (rejected.Code == RejectedMessage.WrongPin && PinProvider is not null)
             {
@@ -214,22 +246,65 @@ public sealed class ViewerSession : IAsyncDisposable
                 wrongPin = true;
                 continue; // pede o PIN de novo
             }
+            catch (ConnectionRejectedException rejected) when (_following is { } waiting && StillComing(rejected))
+            {
+                // O servidor ainda não tem a transmissão nova (o host está começando): continua esperando.
+                SetState(ConnectionState.Reconnecting, FollowText(waiting.Farewell, waiting.Until));
+            }
             catch (ConnectionRejectedException rejected)
             {
+                _following = null;
                 SetState(ConnectionState.Error, rejected.Message);
                 return;
             }
             catch (OperationCanceledException) when (token.IsCancellationRequested) { break; }
             catch (Exception exception)
             {
-                Log.Warn($"Falha na conexão: {exception.Message}");
-                SetState(ConnectionState.Reconnecting, FriendlyError(exception));
+                if (_following is { } waiting) Log.Debug($"Esperando o host voltar: {exception.Message}");
+                else Log.Warn($"Falha na conexão: {exception.Message}");
+                SetState(ConnectionState.Reconnecting, _following is { } w ? FollowText(w.Farewell, w.Until) : FriendlyError(exception));
             }
 
+            if (_following is { } following)
+            {
+                if (DateTimeOffset.UtcNow >= following.Until)
+                {
+                    // O host não voltou a tempo: agora sim acabou.
+                    _following = null;
+                    SetState(ConnectionState.Error, following.Farewell.Reason);
+                    return;
+                }
+                try { await Task.Delay(FollowRetry, token); }
+                catch (OperationCanceledException) { break; }
+                continue;
+            }
             try { await Task.Delay(_backoff.Next(), token); }
             catch (OperationCanceledException) { break; }
         }
         SetState(ConnectionState.Closed, "Desconectado.");
+    }
+
+    /// <summary>Recusas que, esperando o host voltar, só querem dizer "ainda não": a transmissão nova não está no servidor.</summary>
+    private bool StillComing(ConnectionRejectedException rejected)
+        => rejected.Code == RejectedMessage.NotFound || (_options.ViaServer && rejected.Code == RejectedMessage.Denied);
+
+    /// <summary>O que o player mostra enquanto espera o host voltar.</summary>
+    private string FollowText(ByeMessage farewell, DateTimeOffset until)
+    {
+        var host = HostName.Length > 0 ? HostName : _options.Host;
+        if (farewell.Code == ByeMessage.Switching)
+        {
+            var next = farewell.NextMode switch
+            {
+                StreamMode.AudioOnly => "a festa de música",
+                StreamMode.Camera => "a câmera",
+                StreamMode.Screen => "a tela",
+                _ => "outra transmissão",
+            };
+            return $"{host} está trocando para {next}. Você entra sozinho, não precisa sair.";
+        }
+        var minutes = Math.Max(1, (int)Math.Ceiling((until - DateTimeOffset.UtcNow).TotalMinutes));
+        return $"{host} encerrou a transmissão. Se começar outra (tela, câmera ou festa de música) em até {minutes} min, você entra sozinho.";
     }
 
     private string FriendlyError(Exception exception) => exception switch
@@ -297,6 +372,8 @@ public sealed class ViewerSession : IAsyncDisposable
         using var connection = new ActiveConnection(this, stream, udp, new IPEndPoint(hostAddress, welcome.MediaPort), cipher, welcome.Stream,
             welcome.Supports(StreamModes.HostFeatureFrameNack));
         _backoff.Reset();
+        if (_following is not null) Log.Info($"Viewer: o host voltou ({welcome.Stream.Mode}); seguindo para a transmissão nova.");
+        _following = null;
         SetConfig(welcome.Stream);
         _connection = connection;
         _hostMediaSeek = welcome.Supports(StreamModes.HostFeatureMediaSeek);
@@ -462,6 +539,8 @@ public sealed class ViewerSession : IAsyncDisposable
                     case UnknownControlMessage unknown:
                         Log.Debug($"Mensagem do host que esta versão não conhece: {unknown.Type}");
                         break;
+                    case ByeMessage bye when bye.CanResume:
+                        throw new HostLeftException(bye);
                     case ByeMessage bye:
                         throw new ConnectionRejectedException("bye", bye.Reason);
                 }

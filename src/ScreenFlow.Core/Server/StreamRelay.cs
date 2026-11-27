@@ -268,8 +268,10 @@ public sealed class StreamRelay : IAsyncDisposable
             {
                 if (relayed.Upstream == upstream)
                 {
-                    if (ended) End(relayed, "O host encerrou a transmissão.");
-                    else relayed.GoOffline(DateTimeOffset.UtcNow);
+                    // (1.5.0) Uma despedida com volta prevista (troca de modo, ou o host pode começar outra) deixa a
+                    // transmissão esperando o host voltar, como numa queda: quem assiste entra sozinho na nova.
+                    if (ended && upstream.Farewell is not { CanResume: true }) End(relayed, upstream.Farewell?.Reason ?? "O host encerrou a transmissão.");
+                    else relayed.GoOffline(DateTimeOffset.UtcNow, upstream.Farewell);
                 }
             }
             upstream.Dispose();
@@ -315,7 +317,8 @@ public sealed class StreamRelay : IAsyncDisposable
                 case BandwidthTestRequestMessage test:
                     _ = MeasureBandwidthAsync(upstream, test, token);
                     break;
-                case ByeMessage:
+                case ByeMessage bye:
+                    upstream.Farewell = bye;
                     return true;
                 case UnknownControlMessage unknown:
                     Log.Debug($"Servidor: mensagem que esta versão não conhece de {relayed.HostName}: {unknown.Type}");
@@ -366,10 +369,12 @@ public sealed class StreamRelay : IAsyncDisposable
         else if (hello.StreamId is null && _streams.Count == 1) relayed = _streams.Values.First();
         if (relayed is null)
         {
-            var message = hello.StreamId is null && _streams.Count > 1
+            var several = hello.StreamId is null && _streams.Count > 1;
+            var message = several
                 ? "Este servidor tem mais de uma transmissão: escolha uma na tela Assistir (precisa do ScreenFlow 1.4.1 ou mais novo)."
                 : "Essa transmissão não está mais no servidor.";
-            await ControlFraming.WriteAsync(net, new RejectedMessage(RejectedMessage.Denied, message), token).ConfigureAwait(false);
+            // (1.5.0) "Não está aqui" tem código próprio: quem espera o host voltar continua esperando.
+            await ControlFraming.WriteAsync(net, new RejectedMessage(several ? RejectedMessage.Denied : RejectedMessage.NotFound, message), token).ConfigureAwait(false);
             return;
         }
         if (relayed.Mode == StreamMode.AudioOnly && !hello.Supports(StreamModes.FeatureAudioOnly))
@@ -703,6 +708,8 @@ public sealed class StreamRelay : IAsyncDisposable
         public SocketAddress Source { get; private set; } = null!;
         public ClockSync Clock { get; } = new();
         public CancellationTokenSource Closed { get; } = new();
+        /// <summary>(1.5.0) A despedida de quem transmite (se mandou uma): diz se a transmissão pode voltar.</summary>
+        public ByeMessage? Farewell { get; set; }
         public double LossRate { get; private set; }
         public long ProbeBytes;
         public long ProbeCount;
@@ -887,14 +894,21 @@ public sealed class StreamRelay : IAsyncDisposable
         /// A conexão de quem transmite caiu. Quem está assistindo é desconectado sem despedida: reconecta sozinho, espera
         /// quem transmite voltar e recomeça do zero (os números dos frames podem recomeçar com a conexão nova).
         /// </summary>
-        public void GoOffline(DateTimeOffset now)
+        public void GoOffline(DateTimeOffset now, ByeMessage? farewell = null)
         {
             lock (_gate)
             {
                 _upstream = null;
                 OfflineSince = now;
             }
-            foreach (var subscriber in Subscribers.Values.Where(s => s.Streaming)) subscriber.Close();
+            foreach (var subscriber in Subscribers.Values.Where(s => s.Streaming))
+            {
+                // (1.5.0) Quem entende a despedida com volta mostra "trocando para a festa…" e espera; os outros só
+                // reconectam (como sempre fizeram numa queda).
+                if (farewell is { CanResume: true } && subscriber.Hello.Supports(StreamModes.FeatureFollowHost))
+                    _ = subscriber.SendAsync(farewell, CancellationToken.None).ContinueWith(_ => subscriber.Close(), TaskScheduler.Default);
+                else subscriber.Close();
+            }
             Signal();
         }
 

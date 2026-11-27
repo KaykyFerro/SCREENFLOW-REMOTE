@@ -18,6 +18,14 @@
                             <TextBlock x:Name="StartText" Text="Iniciar transmissão" FontSize="15"/>
                         </StackPanel>
                     </Button>
+                    <!-- (1.5.0) Troca de modo no ar: quem assiste segue sozinho para a transmissão nova. -->
+                    <Button x:Name="SwitchButton" Style="{StaticResource GhostButton}" MinHeight="46" Margin="0,0,10,0" Click="Switch_Click" Visibility="Collapsed"
+                            ToolTip="Trocar entre tela, câmera e festa de música sem derrubar quem assiste: cada um segue sozinho para a nova">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8AB;" Margin="0,0,10,0"/>
+                            <TextBlock x:Name="SwitchText" Text="Trocar" FontSize="15"/>
+                        </StackPanel>
+                    </Button>
                     <Button x:Name="StopButton" Style="{StaticResource LiveButton}" MinHeight="46" Click="Stop_Click" Visibility="Collapsed">
                         <StackPanel Orientation="Horizontal">
                             <TextBlock Style="{StaticResource Icon}" Text="&#xE71A;" Margin="0,0,10,0"/>

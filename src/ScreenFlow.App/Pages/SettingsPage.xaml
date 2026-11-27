@@ -185,7 +185,7 @@
                         <TextBlock Style="{StaticResource Caption}" Margin="0,0,0,16" TextWrapping="Wrap"
                                    Text="O tema e a cor valem na hora e só neste PC: cada pessoa escolhe os seus."/>
                         <CheckBox x:Name="TrayToggle" Style="{StaticResource Switch}" Margin="0,0,0,14"
-                                  Content="Fechar e minimizar levam o ScreenFlow para a bandeja, perto do relógio (a transmissão, a voz e o chat continuam)"/>
+                                  Content="Fechar (X) leva o ScreenFlow para a bandeja, perto do relógio (a transmissão, a voz e o chat continuam). Minimizar deixa na barra de tarefas"/>
                         <CheckBox x:Name="ReopenToggle" Style="{StaticResource Switch}"
                                   Content="Abrir o ScreenFlow de novo quando a transmissão acabar ou o player fechar (se ele estiver na bandeja)"/>
                     </StackPanel>

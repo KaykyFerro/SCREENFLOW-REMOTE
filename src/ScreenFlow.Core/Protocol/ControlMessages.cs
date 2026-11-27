@@ -109,6 +109,9 @@ public sealed record RejectedMessage(string Code, string Message) : ControlMessa
     public const string NoCodec = "codec";
     public const string Busy = "busy";
     public const string Throttled = "throttled";
+
+    /// <summary>(1.5.0) A transmissão pedida não está no servidor (ainda): quem espera o host voltar continua esperando.</summary>
+    public const string NotFound = "notfound";
 }
 
 public sealed record StreamConfigMessage(
@@ -147,7 +150,46 @@ public sealed record BandwidthTestRequestMessage(int Seconds, int TargetMbps) : 
 
 public sealed record BandwidthTestResultMessage(double ReceivedMbps, double LossRate, int Seconds) : ControlMessage;
 
-public sealed record ByeMessage(string Reason) : ControlMessage;
+/// <summary>
+/// Despedida: a conexão acaba. Desde a 1.5.0 ela diz se é de vez ou se quem assiste pode esperar: o host está trocando de
+/// modo (tela, câmera, festa de música) ou encerrou e pode começar outra transmissão. Quem assiste com a 1.5.0 fica
+/// esperando por até <paramref name="ResumeSeconds"/> e entra sozinho na transmissão nova, sem sair e entrar de novo.
+/// Versões antigas só leem <paramref name="Reason"/> (os outros campos chegam como propriedades desconhecidas e são
+/// ignorados).
+/// </summary>
+/// <param name="Code">(1.5.0) Por que acabou (<see cref="Ended"/>, <see cref="Switching"/>, <see cref="Removed"/>,
+/// <see cref="ServerStopped"/>). Null nas versões antigas: vale como "acabou de vez".</param>
+/// <param name="ResumeSeconds">(1.5.0) Por quanto tempo vale esperar o host voltar. 0: acabou de vez.</param>
+/// <param name="NextMode">(1.5.0) Na troca de modo, o modo novo (para a mensagem "Trocando para a festa de música…").</param>
+public sealed record ByeMessage(string Reason, string? Code = null, int ResumeSeconds = 0, StreamMode? NextMode = null) : ControlMessage
+{
+    /// <summary>O host encerrou a transmissão (pode começar outra).</summary>
+    public const string Ended = "ended";
+
+    /// <summary>O host está trocando de modo: volta em poucos segundos.</summary>
+    public const string Switching = "switch";
+
+    /// <summary>O host tirou esta pessoa da transmissão: nunca espera.</summary>
+    public const string Removed = "removed";
+
+    /// <summary>O servidor ScreenFlow foi desligado.</summary>
+    public const string ServerStopped = "server";
+
+    /// <summary>Quanto tempo, no máximo, quem assiste espera o host voltar (um valor maior que chegue é cortado aqui).</summary>
+    public const int MaxResumeSeconds = 600;
+
+    /// <summary>Quanto o host pede para esperar depois de encerrar (dá tempo de escolher outro modo e começar).</summary>
+    public const int EndedResumeSeconds = 180;
+
+    /// <summary>Quanto o host pede para esperar numa troca de modo.</summary>
+    public const int SwitchResumeSeconds = 45;
+
+    /// <summary>Quem assiste pode esperar o host voltar (e entrar sozinho na próxima transmissão).</summary>
+    public bool CanResume => ResumeSeconds > 0 && Code is not Removed and not ServerStopped;
+
+    /// <summary>A espera pedida, limitada a <see cref="MaxResumeSeconds"/>.</summary>
+    public TimeSpan ResumeWindow => TimeSpan.FromSeconds(Math.Clamp(ResumeSeconds, 0, MaxResumeSeconds));
+}
 
 // ───────────────────────── Controles de quem assiste (1.2.0) ─────────────────────────
 

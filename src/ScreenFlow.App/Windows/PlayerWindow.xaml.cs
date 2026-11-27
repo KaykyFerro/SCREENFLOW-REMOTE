@@ -477,10 +477,13 @@ public partial class PlayerWindow : Window
 
     private void ShowState(ConnectionState state, string message)
     {
+        // (1.5.0) O host encerrou ou está trocando de modo: o player espera e entra sozinho na transmissão nova.
+        var following = !_demo && state == ConnectionState.Reconnecting && Session.WaitingForHost;
         var (title, glyph, background, foreground, busy) = state switch
         {
             ConnectionState.Connecting => ("Conectando…", "", "AccentSoft", "AccentText", true),
             ConnectionState.WaitingApproval => ("Esperando aprovação", "", "VioletSoft", "Violet", true),
+            ConnectionState.Reconnecting when following => ("Esperando a próxima transmissão", "", "VioletSoft", "Violet", true),
             ConnectionState.Reconnecting => ("Reconectando…", "", "AmberSoft", "Amber", true),
             ConnectionState.Error => ("Não deu para assistir", "", "DangerSoft", "Danger", false),
             ConnectionState.Closed => ("A transmissão terminou", "", "SurfaceRaised", "TextMuted", false),
@@ -494,7 +497,7 @@ public partial class PlayerWindow : Window
         StateIcon.SetResourceReference(ForegroundProperty, foreground);
         StateProgress.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
         StateProgress.IsIndeterminate = busy;
-        StateButtons.Visibility = state is ConnectionState.Error or ConnectionState.Closed ? Visibility.Visible : Visibility.Collapsed;
+        StateButtons.Visibility = state is ConnectionState.Error or ConnectionState.Closed || following ? Visibility.Visible : Visibility.Collapsed;
         StateOverlay.Visibility = state == ConnectionState.Connected ? Visibility.Collapsed : Visibility.Visible;
         UpdateLayers();
         if (state == ConnectionState.Connected) _hideControls.Start();

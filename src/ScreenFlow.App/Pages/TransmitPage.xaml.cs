@@ -828,6 +828,7 @@ public partial class TransmitPage : UserControl, IShellPage
             LockWhileLive(true);
             StartButton.Visibility = Visibility.Collapsed;
             StopButton.Visibility = Visibility.Visible;
+            SwitchButton.Visibility = Visibility.Visible;
             SetBadge("Ao vivo", "Pink", "PinkSoft");
             var viaServer = publish is null ? string.Empty : $" Quem está no servidor {_liveServerLabel} {(mode == StreamMode.AudioOnly ? "ouve" : "assiste")} por lá.";
             StateText.Text = (mode == StreamMode.AudioOnly
@@ -858,14 +859,46 @@ public partial class TransmitPage : UserControl, IShellPage
         }
     }
 
-    private async void Stop_Click(object sender, RoutedEventArgs e) => await StopAsync();
+    private async void Stop_Click(object sender, RoutedEventArgs e) => await StopAsync(StopKind.Ended);
 
-    public async Task StopAsync()
+    /// <summary>Como a transmissão acaba, para a despedida que vai para quem assiste.</summary>
+    public enum StopKind
+    {
+        /// <summary>Fechando o app (ou atualizando): acabou de vez.</summary>
+        Final,
+        /// <summary>O botão Encerrar: quem assiste espera alguns minutos e entra sozinho se começar outra.</summary>
+        Ended,
+        /// <summary>Trocando de modo: volta em segundos.</summary>
+        Switching,
+    }
+
+    /// <summary>Quem estava assistindo e pode voltar sem pedir aprovação de novo (endereço → até quando), depois de encerrar ou trocar.</summary>
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTimeOffset> _returning = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Encerra a transmissão. Fechar o app (sem argumento) é de vez; o botão Encerrar e a troca de modo deixam quem assiste esperando.</summary>
+    public Task StopAsync() => StopAsync(StopKind.Final);
+
+    public async Task StopAsync(StopKind kind, StreamMode? next = null)
     {
         var session = _session;
         _session = null;
         foreach (var pending in _approvals.ToList()) pending.Completion.TrySetResult(false);
-        if (session is not null) await session.DisposeAsync();
+        if (session is not null)
+        {
+            if (kind != StopKind.Final)
+            {
+                // Quem já estava dentro volta sem pedir aprovação de novo (vale enquanto ele pode esperar).
+                var until = DateTimeOffset.UtcNow.AddSeconds(kind == StopKind.Switching ? ByeMessage.SwitchResumeSeconds : ByeMessage.EndedResumeSeconds);
+                foreach (var viewer in session.Viewers.Where(v => v.State == ViewerState.Streaming && !v.IsServer)) _returning[viewer.Address] = until;
+            }
+            session.Farewell = kind switch
+            {
+                StopKind.Switching => new ByeMessage($"{Settings.DeviceName} está trocando de modo.", ByeMessage.Switching, ByeMessage.SwitchResumeSeconds, next),
+                StopKind.Ended => new ByeMessage("O host encerrou a transmissão.", ByeMessage.Ended, ByeMessage.EndedResumeSeconds),
+                _ => new ByeMessage("O host encerrou a transmissão."),
+            };
+            await session.DisposeAsync();
+        }
         if (!Dispatcher.CheckAccess()) return;
         StopMedia();
         _remoteAppsTimer.Stop();
@@ -882,17 +915,59 @@ public partial class TransmitPage : UserControl, IShellPage
         LockWhileLive(false);
         StartButton.Visibility = Visibility.Visible;
         StopButton.Visibility = Visibility.Collapsed;
+        SwitchButton.Visibility = Visibility.Collapsed;
         StatViewers.Text = "0";
         StatFps.Text = StatBitrate.Text = StatUpload.Text = "—";
         StatDetails.Text = "Os números aparecem quando alguém entra.";
         AudioState.Text = "Sem som";
         UpdateMutedApps();
         SetBadge("Parado", "TextSubtle", "SurfaceRaised");
-        if (session is not null) StateText.Text = "Transmissão encerrada.";
+        if (session is not null) StateText.Text = kind == StopKind.Switching ? "Trocando de modo…" : "Transmissão encerrada.";
         Telemetry.EndHost();
         UpdateAudioCard();
         _shell.NotifyLiveStateChanged();
-        if (session is not null) _shell.ShowAfterSessionEnded(this);
+        if (session is not null && kind != StopKind.Switching) _shell.ShowAfterSessionEnded(this);
+    }
+
+    // ───────────────────────── Trocar de modo no ar (1.5.0) ─────────────────────────
+
+    /// <summary>O botão Trocar: um menu com os outros modos.</summary>
+    private void Switch_Click(object sender, RoutedEventArgs e)
+    {
+        if (_session is not { } session || _starting) return;
+        var menu = new ContextMenu { PlacementTarget = SwitchButton, Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom };
+        foreach (var mode in new[] { StreamMode.Screen, StreamMode.Camera, StreamMode.AudioOnly })
+        {
+            if (mode == session.Mode) continue;
+            var item = new MenuItem
+            {
+                Header = mode switch
+                {
+                    StreamMode.AudioOnly => "Trocar para a festa de música",
+                    StreamMode.Camera => "Trocar para a câmera",
+                    _ => "Trocar para a tela",
+                },
+            };
+            item.Click += async (_, _) => await SwitchModeAsync(mode);
+            menu.Items.Add(item);
+        }
+        menu.IsOpen = true;
+    }
+
+    /// <summary>
+    /// Troca de modo sem derrubar quem assiste: a transmissão atual se despede avisando a troca, a nova começa com as
+    /// opções já escolhidas para aquele modo, e cada pessoa (1.5.0) entra sozinha nela, sem pedir aprovação de novo.
+    /// </summary>
+    private async Task SwitchModeAsync(StreamMode mode)
+    {
+        if (_session is null || _starting) return;
+        Log.Info($"Trocando a transmissão para {mode} no ar.");
+        await StopAsync(StopKind.Switching, mode);
+        (mode switch { StreamMode.Camera => ModeCamera, StreamMode.AudioOnly => ModeParty, _ => ModeScreen }).IsChecked = true;
+        ApplyMode(mode);
+        if (mode == StreamMode.Camera) await LoadCamerasAsync();
+        await StartAsync();
+        if (_session is null) _shell.Toast("Não deu para começar no outro modo. Quem estava assistindo espera alguns segundos; confira as opções e clique em Iniciar.", ToastKind.Warning);
     }
 
     // ───────────────────────── O que está tocando (controles de mídia do Windows) ─────────────────────────
@@ -1144,6 +1219,14 @@ public partial class TransmitPage : UserControl, IShellPage
 
     private Task<bool> RequestApprovalAsync(ApprovalRequest request, CancellationToken token)
     {
+        // (1.5.0) Quem estava assistindo antes de encerrar ou trocar de modo volta sem pedir de novo.
+        var now = DateTimeOffset.UtcNow;
+        foreach (var expired in _returning.Where(r => r.Value < now).Select(r => r.Key).ToList()) _returning.TryRemove(expired, out _);
+        if (_returning.ContainsKey(request.Address))
+        {
+            Log.Info($"{request.Name} ({request.Address}) voltou depois da troca: entrou sem pedir aprovação de novo.");
+            return Task.FromResult(true);
+        }
         var pending = new PendingApproval(request.Id, request.Name, request.Address);
         token.Register(() => pending.Completion.TrySetResult(false));
         Dispatcher.BeginInvoke(() =>
