@@ -15,8 +15,10 @@ namespace ScreenFlow.Infrastructure.Session;
 
 public enum ConnectionState { Idle, Connecting, WaitingApproval, Connected, Reconnecting, Error, Closed }
 
+/// <param name="StreamId">Pelo servidor ScreenFlow (1.4.1): qual transmissão do servidor assistir (o id de quem transmite).</param>
+/// <param name="ViaServer">Está assistindo pelo servidor: <paramref name="Pin"/> é a senha do servidor.</param>
 public sealed record ViewerOptions(string Host, int ControlPort, string DeviceName, string? Pin, float Volume, VideoCodec[] Decoders, int MaxWidth, int MaxHeight, int MaxFps,
-    bool AudioOutput = true);
+    bool AudioOutput = true, string? StreamId = null, bool ViaServer = false);
 
 public sealed class ConnectionRejectedException(string code, string message) : Exception(message)
 {
@@ -232,22 +234,28 @@ public sealed class ViewerSession : IAsyncDisposable
 
     private string FriendlyError(Exception exception) => exception switch
     {
-        SocketException { SocketErrorCode: SocketError.ConnectionRefused } => $"O ScreenFlow não está transmitindo em {_options.Host}. Tentando de novo…",
+        SocketException { SocketErrorCode: SocketError.ConnectionRefused } => _options.ViaServer
+            ? $"O servidor {_options.Host} não respondeu (o programa do servidor está aberto?). Tentando de novo…"
+            : $"O ScreenFlow não está transmitindo em {_options.Host}. Tentando de novo…",
+        SocketException { SocketErrorCode: SocketError.HostNotFound or SocketError.NoData } => $"Não achei {_options.Host}. Confira o endereço. Tentando de novo…",
         SocketException { SocketErrorCode: SocketError.TimedOut or SocketError.HostUnreachable or SocketError.NetworkUnreachable } or TimeoutException
-            => $"Não deu para alcançar {_options.Host}. Confira se os dois estão na mesma rede do Radmin VPN. Tentando de novo…",
+            => $"Não deu para alcançar {_options.Host}. Confira se os dois estão na mesma rede (Tailscale, Radmin VPN ou a rede local). Tentando de novo…",
         _ => $"Conexão perdida ({exception.Message}). Tentando de novo…",
     };
 
     private async Task ConnectOnceAsync(CancellationToken token, bool askPinAgain)
     {
-        if (!RadminAddress.TryParseHost(_options.Host, out var hostAddress))
-            throw new ConnectionRejectedException("address", "Digite um IP válido, por exemplo 26.12.34.56.");
+        // Um IP (26.x do Radmin, 100.x do Tailscale, da rede local) ou, para o servidor, também o nome dele (MagicDNS).
+        if (!LocalNetworks.TrySplitHostPort(_options.Host, _options.ControlPort, out var hostText, out var controlPort))
+            throw new ConnectionRejectedException("address", "Digite um IP válido, por exemplo 26.12.34.56 ou 100.101.102.103.");
+        var hostAddress = await LocalNetworks.ResolveAsync(hostText, token)
+                          ?? throw new SocketException((int)SocketError.HostNotFound);
 
         using var client = new TcpClient(AddressFamily.InterNetwork) { NoDelay = true };
         using (var connectTimeout = CancellationTokenSource.CreateLinkedTokenSource(token))
         {
             connectTimeout.CancelAfter(TimeSpan.FromSeconds(5));
-            try { await client.ConnectAsync(hostAddress, _options.ControlPort, connectTimeout.Token); }
+            try { await client.ConnectAsync(hostAddress, controlPort, connectTimeout.Token); }
             catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new TimeoutException(); }
         }
         var stream = client.GetStream();
@@ -257,7 +265,7 @@ public sealed class ViewerSession : IAsyncDisposable
 
         using var exchange = new KeyExchange();
         await ControlFraming.WriteAsync(stream, new HelloMessage(AppInfo.ProtocolVersion, AppInfo.DisplayVersion, _options.DeviceName,
-            _options.Decoders, _options.MaxWidth, _options.MaxHeight, _options.MaxFps, udpPort, exchange.PublicKey, [.. StreamModes.ViewerFeatures]), token);
+            _options.Decoders, _options.MaxWidth, _options.MaxHeight, _options.MaxFps, udpPort, exchange.PublicKey, [.. StreamModes.ViewerFeatures], _options.StreamId), token);
 
         if (await ControlFraming.ReadAsync(stream, token) is var first && first is RejectedMessage early)
             throw new ConnectionRejectedException(early.Code, early.Message);
@@ -267,7 +275,8 @@ public sealed class ViewerSession : IAsyncDisposable
         if (challenge.PinRequired && (string.IsNullOrEmpty(_pin) || askPinAgain))
         {
             _pin = PinProvider is null ? null : await PinProvider(askPinAgain);
-            if (string.IsNullOrEmpty(_pin)) throw new ConnectionRejectedException(RejectedMessage.WrongPin + "-missing", "Este host pede PIN.");
+            if (string.IsNullOrEmpty(_pin))
+                throw new ConnectionRejectedException(RejectedMessage.WrongPin + "-missing", _options.ViaServer ? "Este servidor pede senha." : "Este host pede PIN.");
         }
 
         var secret = exchange.DeriveSharedSecret(challenge.PublicKey);

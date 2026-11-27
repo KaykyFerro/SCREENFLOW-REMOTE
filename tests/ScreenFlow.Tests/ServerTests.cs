@@ -133,6 +133,48 @@ public class ServerPacketTests
     }
 
     [Fact]
+    public void RenamedTextChannelsKeepTheirConversation()
+    {
+        var folder = Path.Combine(Path.GetTempPath(), "screenflow-canais-" + Guid.NewGuid().ToString("N"));
+        var file = Path.Combine(folder, "canais.json");
+        try
+        {
+            var store = new ChannelStore(file);
+            var jogos = new RoomChannel(RoomChannelKind.Text, "jogos");
+            var games = new RoomChannel(RoomChannelKind.Text, "games");
+            var partidas = new RoomChannel(RoomChannelKind.Text, "partidas");
+            Assert.Null(store.Apply(RoomChannelOperation.Create, jogos));
+            Assert.Null(store.Apply(RoomChannelOperation.Rename, jogos, games));
+            Assert.Equal("games", store.CurrentTextName("jogos"));
+            Assert.Equal("games", store.CurrentTextName("Jogos"));
+            // Renomear de novo leva junto a conversa do primeiro nome.
+            Assert.Null(store.Apply(RoomChannelOperation.Rename, games, partidas));
+            Assert.Equal("partidas", store.CurrentTextName("jogos"));
+            Assert.Equal("partidas", store.CurrentTextName("games"));
+            Assert.Null(store.CurrentTextName(null));
+            Assert.Equal("geral", store.CurrentTextName("geral"));
+            Assert.Equal("outro", store.CurrentTextName("outro"));
+
+            // Guardado no disco; um canal novo com um nome antigo começa sem a conversa de lá.
+            var again = new ChannelStore(file);
+            Assert.Equal("partidas", again.CurrentTextName("jogos"));
+            Assert.Null(again.Apply(RoomChannelOperation.Create, games));
+            Assert.Equal("games", again.CurrentTextName("games"));
+            Assert.Equal("partidas", again.CurrentTextName("jogos"));
+
+            // O app confere antes de mandar: as mesmas regras do servidor.
+            Assert.NotNull(ChannelStore.Problem(again.All, RoomChannelOperation.Create, partidas));
+            Assert.NotNull(ChannelStore.Problem(again.All, RoomChannelOperation.Rename, partidas, games));
+            Assert.Null(ChannelStore.Problem(again.All, RoomChannelOperation.Rename, partidas, new RoomChannel(RoomChannelKind.Text, "ranked")));
+            Assert.NotNull(ChannelStore.Problem(again.All, RoomChannelOperation.Delete, new RoomChannel(RoomChannelKind.Voice, "Nada")));
+        }
+        finally
+        {
+            try { Directory.Delete(folder, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void RelayCacheServesAndRecoversByParity()
     {
         var frame = RandomNumberGenerator.GetBytes(Packetizer.DefaultPayloadSize * 9 + 77);

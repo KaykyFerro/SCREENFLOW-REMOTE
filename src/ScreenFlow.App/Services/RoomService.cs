@@ -6,10 +6,12 @@ using System.Net;
 using System.Runtime.InteropServices;
 using System.Windows.Media;
 using System.Windows.Threading;
+using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Network;
 using ScreenFlow.Core.Room;
+using ScreenFlow.Core.Server;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Network;
 using ScreenFlow.Infrastructure.Room;
@@ -160,6 +162,9 @@ public sealed class RoomService
     /// <summary>Transmissões anunciadas na rede nos últimos segundos (de qualquer versão).</summary>
     public IReadOnlyList<DiscoveredHost> Hosts => _room?.Hosts ?? [];
 
+    /// <summary>(1.4.1) Os endereços de quem está na sala direta (vazio pelo servidor). Pode ser lido de qualquer thread.</summary>
+    public IReadOnlyList<IPAddress> PeerAddresses => _room?.PeerAddresses ?? [];
+
     // ───────────────────────── Ciclo de vida ─────────────────────────
 
     public void Start()
@@ -208,10 +213,18 @@ public sealed class RoomService
         room.BlobFailed += id => _dispatcher.BeginInvoke(() => OnBlobFailed(id));
         room.PeerWentLive += peer => _dispatcher.BeginInvoke(() => OnPeerWentLive(peer.Id));
         room.HostsChanged += () => _dispatcher.BeginInvoke(() => HostsChanged?.Invoke());
+        room.ServerChanged += () => _dispatcher.BeginInvoke(DispatcherPriority.Background, OnRoomServerChanged);
         _room = room;
         room.Start();
         foreach (var text in settings.RoomPeers)
             if (IPAddress.TryParse(text, out var address)) room.AddManualPeer(address);
+        // Servidor ScreenFlow (1.4.1): a sala vai pelo servidor configurado, e volta para a sala direta sem ele.
+        AppServices.Server.Changed += ApplyServer;
+        ApplyServer();
+        // Tailscale (1.4.1): sem servidor, a presença vai direto para os PCs da rede do Tailscale.
+        _tailscaleTimer.Tick += (_, _) => FindTailscalePeers();
+        _tailscaleTimer.Start();
+        FindTailscalePeers();
         AppServices.Settings.Saved += OnSettingsSaved;
         // O id deste PC na sala precisa continuar o mesmo nas próximas vezes.
         try { AppServices.Settings.Save(); } catch (Exception exception) { Log.Warn($"Configurações não salvas: {exception.Message}"); }
@@ -223,7 +236,9 @@ public sealed class RoomService
     public async Task StopAsync()
     {
         AppServices.Settings.Saved -= OnSettingsSaved;
+        AppServices.Server.Changed -= ApplyServer;
         _speakingTimer.Stop();
+        _tailscaleTimer.Stop();
         _talkKey?.Dispose();
         _talkKey = null;
         var room = _room;
@@ -670,6 +685,107 @@ public sealed class RoomService
     /// <summary>Alguém com o convite pediu para entrar na sala privada (só o dono recebe).</summary>
     public event Action<string>? PendingMember;
 
+    // ───────────────────────── Servidor ScreenFlow (1.4.1) ─────────────────────────
+
+    /// <summary>A sala está indo pelo servidor ScreenFlow (mesmo que ainda esteja entrando nele).</summary>
+    public bool ViaServer => !_demo && _room?.ViaServer == true;
+
+    /// <summary>Como está a sala no servidor (null: sala direta da rede).</summary>
+    public RoomServerStatus? ServerStatus => _demo ? null : _room?.ServerStatus;
+
+    /// <summary>A sala entrou, saiu ou mudou de estado no servidor, ou os canais dele mudaram. Na thread da interface.</summary>
+    public event Action? ServerChanged;
+
+    private IReadOnlyList<RoomChannel> _serverChannels = [];
+
+    /// <summary>Canais de texto renomeados (a chave do nome antigo → o nome novo): o que ainda chega no nome antigo vai para o novo.</summary>
+    private readonly Dictionary<string, string> _renamed = [];
+
+    /// <summary>O canal de texto em que a mensagem aparece (seguindo os canais renomeados).</summary>
+    private string ChannelOf(RoomChatMessage message)
+    {
+        var name = message.ChannelName;
+        for (var hop = 0; hop < 8 && _renamed.TryGetValue(RoomChannels.Key(name), out var next); hop++) name = next;
+        return name;
+    }
+
+    private void ApplyServer()
+    {
+        if (_room is not { } room) return;
+        var target = AppServices.Server.Target;
+        var was = room.ViaServer;
+        room.UseServer(target?.RoomEndPoint, target?.Password);
+        if (was != room.ViaServer)
+        {
+            _serverChannels = room.ServerChannels;
+            RebuildChannels();
+            Refresh();
+            FindTailscalePeers();
+        }
+        ServerChanged?.Invoke();
+    }
+
+    // ───────────────────────── Tailscale direto entre PCs (1.4.1) ─────────────────────────
+
+    /// <summary>No máximo tantos PCs do Tailscale recebem a presença direto.</summary>
+    private const int MaxTailscalePeers = 64;
+
+    private readonly DispatcherTimer _tailscaleTimer = new() { Interval = TimeSpan.FromSeconds(30) };
+    private readonly HashSet<IPAddress> _tailscalePeers = [];
+    private bool _readingTailscale;
+
+    /// <summary>
+    /// O Tailscale não repassa broadcast: sem servidor, a sala manda a presença direto para cada PC com Windows ligado na
+    /// rede do Tailscale (a lista vem do próprio Tailscale, a cada 30 segundos). Pelo servidor, não precisa.
+    /// </summary>
+    private async void FindTailscalePeers()
+    {
+        if (_readingTailscale || _demo || _room is not { } room) return;
+        if (room.ViaServer || AppServices.FindTailscale() is null)
+        {
+            ForgetTailscalePeers(room);
+            return;
+        }
+        _readingTailscale = true;
+        try
+        {
+            var status = await AppServices.Tailscale.RefreshAsync();
+            if (!ReferenceEquals(_room, room) || room.ViaServer) return;
+            var online = status is { Running: true }
+                ? status.Peers.Where(p => p.Online && (p.Os.Length == 0 || p.Os.Equals("windows", StringComparison.OrdinalIgnoreCase)))
+                    .Select(p => p.Address).Distinct().Take(MaxTailscalePeers).ToHashSet()
+                : [];
+            foreach (var gone in _tailscalePeers.Where(a => !online.Contains(a)).ToList()) Forget(room, gone);
+            foreach (var address in online)
+                if (_tailscalePeers.Add(address)) room.AddManualPeer(address);
+        }
+        catch (Exception exception) { Log.Debug($"PCs do Tailscale: {exception.Message}"); }
+        finally { _readingTailscale = false; }
+    }
+
+    private void ForgetTailscalePeers(NetworkRoom room)
+    {
+        foreach (var address in _tailscalePeers.ToList()) Forget(room, address);
+    }
+
+    /// <summary>Tira um PC do Tailscale da lista direta (menos os que a pessoa adicionou pelo IP).</summary>
+    private void Forget(NetworkRoom room, IPAddress address)
+    {
+        _tailscalePeers.Remove(address);
+        if (!AppServices.Settings.Current.RoomPeers.Contains(address.ToString(), StringComparer.OrdinalIgnoreCase)) room.RemoveManualPeer(address);
+    }
+
+    private void OnRoomServerChanged()
+    {
+        if (_room is not { } room) return;
+        var channels = room.ServerChannels;
+        if (room.ViaServer) FollowRenames(_serverChannels, channels);
+        _serverChannels = channels;
+        RebuildChannels();
+        ServerChanged?.Invoke();
+        Changed?.Invoke();
+    }
+
     // ───────────────────────── Canais ─────────────────────────
 
     /// <summary>
@@ -682,9 +798,18 @@ public sealed class RoomService
         var existing = kind == RoomChannelKind.Text
             ? TextChannels.Select(c => c.Channel).FirstOrDefault(c => c.Same(channel))
             : VoiceChannels.Select(c => c.Channel).FirstOrDefault(c => c.Same(channel));
-        if (existing is not null)
+        if (existing is not null && (!ViaServer || existing.IsDefault || _serverChannels.Any(c => c.Same(existing))))
         {
             if (kind == RoomChannelKind.Text) SelectText(existing.Name);
+            return null;
+        }
+        _renamed.Remove(channel.Key);
+        if (ViaServer)
+        {
+            // No servidor, o canal é do servidor: fica guardado nele e aparece para todo mundo, mesmo com você fora.
+            if (ServerChannelProblem(RoomChannelOperation.Create, channel) is { } problem) return problem;
+            if (kind == RoomChannelKind.Text) SelectText(channel.Name);
+            Changed?.Invoke();
             return null;
         }
         var settings = AppServices.Settings.Current;
@@ -699,8 +824,121 @@ public sealed class RoomService
         return null;
     }
 
-    /// <summary>Apaga um canal seu. Quem já conversou nele continua vendo a conversa até fechar o ScreenFlow.</summary>
-    public void DeleteChannel(RoomChannel channel)
+    /// <summary>
+    /// Apaga um canal seu (no servidor, qualquer canal do servidor). Quem já conversou nele continua vendo a conversa até
+    /// fechar o ScreenFlow. Retorna o motivo quando não deu.
+    /// </summary>
+    public string? DeleteChannel(RoomChannel channel)
+    {
+        if (ViaServer)
+        {
+            if (ServerChannelProblem(RoomChannelOperation.Delete, channel) is { } problem) return problem;
+            return null;
+        }
+        DeleteMine(channel);
+        return null;
+    }
+
+    /// <summary>
+    /// Renomeia um canal seu (no servidor, qualquer canal do servidor). A conversa do canal de texto vai junto para o nome
+    /// novo, e quem está no canal de voz continua nele. Retorna o motivo quando não deu.
+    /// </summary>
+    public string? RenameChannel(RoomChannel channel, string newName)
+    {
+        if (channel.IsDefault) return "O #geral e a voz Geral não mudam de nome.";
+        if (RoomChannels.Create(channel.Kind, newName) is not { } renamed) return "Escolha um nome com letras ou números.";
+        if (renamed.Same(channel))
+        {
+            if (renamed.Name == channel.Name) return null;
+        }
+        else if (renamed.IsDefault || (channel.Kind == RoomChannelKind.Text ? TextChannels.Any(c => c.Channel.Same(renamed)) : VoiceChannels.Any(c => c.Channel.Same(renamed))))
+            return "Já existe um canal com esse nome.";
+        if (ViaServer)
+        {
+            if (ServerChannelProblem(RoomChannelOperation.Rename, channel, renamed) is { } problem) return problem;
+            return null;
+        }
+        var settings = AppServices.Settings.Current;
+        var index = settings.MyChannels.FindIndex(c => c.Same(channel));
+        if (index < 0) return "Só quem criou o canal pode mudar o nome dele.";
+        settings.MyChannels[index] = renamed;
+        AppServices.Settings.Save();
+        if (_room is { } room) room.CreatedChannels = settings.MyChannels;
+        ApplyRename(channel, renamed);
+        RebuildChannels();
+        Changed?.Invoke();
+        return null;
+    }
+
+    /// <summary>Confere (com as regras do servidor) e manda a mudança do canal. Null quando foi.</summary>
+    private string? ServerChannelProblem(RoomChannelOperation operation, RoomChannel channel, RoomChannel? renamed = null)
+    {
+        if (_room is not { } room || room.ServerStatus is not { State: RoomServerState.Connected })
+            return "A sala ainda não entrou no servidor. Espere conectar para mexer nos canais.";
+        if (ChannelStore.Problem(_serverChannels, operation, channel, renamed) is { } problem) return problem;
+        return room.ChangeServerChannel(operation, channel.Kind, channel.Name, renamed?.Name) ? null : "A sala ainda não entrou no servidor.";
+    }
+
+    /// <summary>
+    /// Quando os canais de alguém (ou do servidor) mudam, um canal que some junto com um que aparece, do mesmo tipo, é um
+    /// canal renomeado: a conversa e quem está na voz vão para o nome novo.
+    /// </summary>
+    private void FollowRenames(IReadOnlyList<RoomChannel> before, IReadOnlyList<RoomChannel> after)
+    {
+        foreach (var kind in new[] { RoomChannelKind.Text, RoomChannelKind.Voice })
+        {
+            var gone = before.Where(c => c.Kind == kind && !after.Any(a => a.Same(c))).ToList();
+            var added = after.Where(c => c.Kind == kind && !before.Any(b => b.Same(c))).ToList();
+            if (gone.Count == 1 && added.Count == 1) ApplyRename(gone[0], added[0]);
+            // Um canal novo com o nome antigo de outro é outro canal: a conversa nova fica nele.
+            else foreach (var channel in added) _renamed.Remove(channel.Key);
+        }
+    }
+
+    private void ApplyRename(RoomChannel old, RoomChannel renamed)
+    {
+        if (old.Kind == RoomChannelKind.Text)
+        {
+            _renamed.Remove(renamed.Key);
+            if (old.Key != renamed.Key) _renamed[old.Key] = renamed.Name;
+            if (!_textRows.TryGetValue(old.Key, out var from)) return;
+            var to = TextRow(renamed.Name);
+            if (to == from) return;
+            // A conversa vai para o canal novo, na ordem de horário.
+            foreach (var message in from.Messages.ToList())
+            {
+                var index = 0;
+                while (index < to.Messages.Count && to.Messages[index].Time <= message.Time) index++;
+                message.ChannelName = renamed.Name;
+                to.Messages.Insert(index, message);
+            }
+            while (to.Messages.Count > ChannelCapacity) to.Messages.RemoveAt(0);
+            to.Unread += from.Unread;
+            from.Messages.Clear();
+            from.Unread = 0;
+            for (var i = 0; i < to.Messages.Count; i += 2) Regroup(to.Messages, i);
+            if (_currentText == from) SelectText(renamed.Name);
+            var settings = AppServices.Settings.Current;
+            if (!_demo && settings.LastTextChannel is { } last && RoomChannels.SameName(last, old.Name))
+            {
+                settings.LastTextChannel = renamed.Name;
+                AppServices.Settings.Save();
+            }
+            UnreadChanged?.Invoke();
+        }
+        else
+        {
+            if (_room is { InVoice: true } room && room.VoiceChannel is { } current && RoomChannels.SameName(current, old.Name)) room.MoveVoice(renamed.Name);
+            var settings = AppServices.Settings.Current;
+            if (!_demo && settings.LastVoiceChannel is { } last && RoomChannels.SameName(last, old.Name))
+            {
+                settings.LastVoiceChannel = renamed.Name;
+                AppServices.Settings.Save();
+            }
+        }
+    }
+
+    private void DeleteMine(RoomChannel channel)
     {
         var settings = AppServices.Settings.Current;
         if (settings.MyChannels.RemoveAll(c => c.Same(channel)) == 0) return;
@@ -757,7 +995,10 @@ public sealed class RoomService
     /// </summary>
     private void RebuildChannels()
     {
-        var mine = AppServices.Settings.Current.MyChannels;
+        // Pelo servidor (1.4.1), os canais são os do servidor: os de cada pessoa só valem na sala direta da rede.
+        var server = ViaServer;
+        IReadOnlyList<RoomChannel> mine = server ? [] : AppServices.Settings.Current.MyChannels;
+        var onServer = server ? _serverChannels : [];
         var owners = new Dictionary<(RoomChannelKind, string), string>();
         var created = new List<RoomChannel>();
         foreach (var channel in mine)
@@ -765,13 +1006,14 @@ public sealed class RoomService
             created.Add(channel);
             owners.TryAdd((channel.Kind, channel.Key), SelfName);
         }
-        IEnumerable<(RoomChannel Channel, string Owner)> announced = _demo
-            ? _demoChannels
-            : _peers.Values.SelectMany(peer => peer.Presence.CreatedChannels.Select(channel => (channel, peer.Presence.Name)));
+        IEnumerable<(RoomChannel Channel, string? Owner)> announced = _demo
+            ? _demoChannels.Select(c => (c.Channel, (string?)c.Owner))
+            : server ? onServer.Select(channel => (channel, (string?)null))
+            : _peers.Values.SelectMany(peer => peer.Presence.CreatedChannels.Select(channel => (channel, (string?)peer.Presence.Name)));
         foreach (var (channel, owner) in announced)
         {
             created.Add(channel);
-            owners.TryAdd((channel.Kind, channel.Key), owner);
+            if (owner is not null) owners.TryAdd((channel.Kind, channel.Key), owner);
         }
         foreach (var row in _textRows.Values)
             if (row.Messages.Count > 0 || row == _currentText) created.Add(row.Channel);
@@ -782,6 +1024,8 @@ public sealed class RoomService
         Sync(TextChannels, text.Select(c => (c.Key, c)).ToList(), row => row.Key, (_, channel) => TextRow(channel.Name), (row, channel) =>
         {
             row.IsMine = mine.Any(c => c.Same(channel));
+            row.ServerRoom = server;
+            row.OnServer = onServer.Any(c => c.Same(channel));
             row.Owner = owners.GetValueOrDefault((RoomChannelKind.Text, channel.Key));
         });
         var listed = text.Select(c => c.Key).ToHashSet();
@@ -796,6 +1040,7 @@ public sealed class RoomService
         Sync(VoiceChannels, voice.Select(c => (c.Key, c)).ToList(), row => row.Key, (_, channel) => VoiceRow(channel), (row, channel) =>
         {
             row.IsMine = mine.Any(c => c.Same(channel));
+            row.OnServer = onServer.Any(c => c.Same(channel));
             row.Owner = owners.GetValueOrDefault((RoomChannelKind.Voice, channel.Key));
         });
         var voiceKeys = voice.Select(c => c.Key).ToHashSet();
@@ -938,7 +1183,7 @@ public sealed class RoomService
         if (row is null) return;
         _archive?.Add(message, message.Image is { } image ? AppServices.Blobs.Get(image.Id) : null);
         if (row.IsMine || message.History) return;
-        var channel = TextRow(message.ChannelName);
+        var channel = TextRow(row.ChannelName);
         if (!IsShowing(channel))
         {
             channel.Unread++;
@@ -950,8 +1195,9 @@ public sealed class RoomService
     private ChatRow? AddMessage(RoomChatMessage message, bool fromArchive = false)
     {
         if (!_shown.Add((message.AuthorId, message.MessageId))) return null;
-        var channel = TextRow(message.ChannelName);
-        var row = new ChatRow(message, message.AuthorId == SelfId, fromArchive) { Photo = PhotoOf(message.AuthorId) };
+        var name = ChannelOf(message);
+        var channel = TextRow(name);
+        var row = new ChatRow(message, message.AuthorId == SelfId, fromArchive) { Photo = PhotoOf(message.AuthorId), ChannelName = name };
         var messages = channel.Messages;
         var index = messages.Count;
         while (index > 0 && messages[index - 1].Time > row.Time) index--;
@@ -1100,9 +1346,13 @@ public sealed class RoomService
     {
         if (_room is not { } room) return;
         var peers = room.Peers;
+        var before = new Dictionary<Guid, RoomPeer>(_peers);
         _peers.Clear();
         foreach (var peer in peers)
         {
+            // Na sala direta, quem criou o canal muda o nome dele: a conversa e a voz vão junto.
+            if (!room.ViaServer && before.TryGetValue(peer.Id, out var previous) && !ReferenceEquals(previous.Presence.CreatedChannels, peer.Presence.CreatedChannels))
+                FollowRenames(previous.Presence.CreatedChannels, peer.Presence.CreatedChannels);
             _peers[peer.Id] = peer;
             var avatar = peer.Presence.Avatar?.Id;
             if (!_avatars.TryGetValue(peer.Id, out var known) || known != avatar) _photosVersion++;
@@ -1224,6 +1474,7 @@ public sealed class RoomService
         _demoChannels.Clear();
         _demoChannels.Add((new RoomChannel(RoomChannelKind.Voice, "Valorant"), "Diego"));
         _demoChannels.Add((new RoomChannel(RoomChannelKind.Text, "campeonato"), "Ana Lu"));
+        _demoChannels.Add((new RoomChannel(RoomChannelKind.Text, "música"), "Diego"));
         _demoMembers.Clear();
         _demoMembers.Add((RoomChannels.DefaultVoiceName, new VoiceMemberState(bruno, "Bruno", false, false, false)));
         _demoMembers.Add((RoomChannels.DefaultVoiceName, new VoiceMemberState(carla, "Carla-PC", true, false, false)));
@@ -1383,6 +1634,7 @@ public sealed class RoomPersonRow(Guid id) : RoomRowBase, IRoomRow
     private bool _muted;
     private StreamMode _mode;
     private string? _watchAddress;
+    private bool _viaServer;
     private ImageSource? _photo;
 
     public Guid Id { get; } = id;
@@ -1397,6 +1649,10 @@ public sealed class RoomPersonRow(Guid id) : RoomRowBase, IRoomRow
     public bool Muted { get => _muted; private set => Set(ref _muted, value, nameof(Muted)); }
     public StreamMode LiveMode { get => _mode; private set => Set(ref _mode, value, nameof(LiveMode), nameof(ActionText)); }
     public string? WatchAddress { get => _watchAddress; private set => Set(ref _watchAddress, value, nameof(WatchAddress)); }
+    /// <summary>A porta de controle de quem transmite (a do servidor, quando a transmissão vai por ele).</summary>
+    public int WatchPort { get; private set; } = AppInfo.DefaultControlPort;
+    /// <summary>(1.4.1) A transmissão está no servidor ScreenFlow: assistir é pedir ao servidor a transmissão desta pessoa.</summary>
+    public bool ViaServer { get => _viaServer; private set => Set(ref _viaServer, value, nameof(ViaServer)); }
     public string ActionText => LiveMode == StreamMode.AudioOnly ? "Ouvir" : "Assistir";
 
     public void Update(RoomPeer peer)
@@ -1408,9 +1664,11 @@ public sealed class RoomPersonRow(Guid id) : RoomRowBase, IRoomRow
         InVoice = presence.InAnyVoice;
         Muted = presence.Muted;
         WatchAddress = presence.Live ? peer.WatchAddress.ToString() : null;
+        WatchPort = presence.ControlPort;
+        ViaServer = presence.LiveViaServer;
         var status = presence.Live
             ? (presence.LiveMode == StreamMode.AudioOnly ? "Ao vivo · festa de música" : $"Ao vivo · {presence.LiveSummary}")
-              + (presence.Flags.HasFlag(PresenceFlags.PinRequired) ? " · com PIN" : string.Empty)
+              + (presence.LiveViaServer ? " · pelo servidor" : presence.Flags.HasFlag(PresenceFlags.PinRequired) ? " · com PIN" : string.Empty)
             : presence.Watching ? "Assistindo uma transmissão" : "Online";
         if (presence.CurrentVoiceChannel is { } channel)
             status += presence.Deafened ? $" · na voz: {channel}, sem som" : presence.Muted ? $" · na voz: {channel}, mudo" : $" · na voz: {channel}";
@@ -1478,6 +1736,8 @@ public sealed class TextChannelRow(RoomChannel channel) : RoomRowBase
     private int _unread;
     private bool _selected;
     private bool _mine;
+    private bool _serverRoom;
+    private bool _onServer;
     private string? _owner;
 
     public RoomChannel Channel { get; } = channel;
@@ -1493,17 +1753,26 @@ public sealed class TextChannelRow(RoomChannel channel) : RoomRowBase
     public bool HasUnread => _unread > 0;
     public string UnreadText => _unread > 99 ? "99+" : _unread.ToString(CultureInfo.InvariantCulture);
     public bool IsSelected { get => _selected; set => Set(ref _selected, value, nameof(IsSelected)); }
-    public bool IsMine { get => _mine; set => Set(ref _mine, value, nameof(IsMine), nameof(Topic)); }
+    public bool IsMine { get => _mine; set => Set(ref _mine, value, nameof(IsMine), nameof(Topic), nameof(CanEdit)); }
+    /// <summary>(1.4.1) A sala está no servidor ScreenFlow.</summary>
+    public bool ServerRoom { get => _serverRoom; set => Set(ref _serverRoom, value, nameof(ServerRoom), nameof(Topic)); }
+    /// <summary>(1.4.1) É um canal do servidor (qualquer pessoa nele muda o nome ou apaga).</summary>
+    public bool OnServer { get => _onServer; set => Set(ref _onServer, value, nameof(OnServer), nameof(Topic), nameof(CanEdit)); }
     public string? Owner { get => _owner; set => Set(ref _owner, value, nameof(Owner), nameof(Topic)); }
+
+    /// <summary>Dá para mudar o nome e apagar: um canal seu, ou qualquer canal do servidor (o #geral nunca).</summary>
+    public bool CanEdit => !Channel.IsDefault && (IsMine || OnServer);
 
     /// <summary>O assunto do canal, embaixo do nome na conversa.</summary>
     public string Topic => Key switch
     {
-        "geral" => "Conversa de todo mundo da rede. Quem ainda está numa versão antiga do ScreenFlow também vê este canal.",
-        "musica" => "Pedidos, indicações e a festa de música.",
-        "prints-e-clipes" => "Prints, clipes e imagens: cole com Ctrl+V ou arraste para cá.",
-        _ => IsMine ? "Canal criado por você. Aparece para todo mundo da sala enquanto você estiver nela."
+        "geral" => ServerRoom
+            ? "Conversa de todo mundo do servidor. Fica guardada nele, e quem ainda está numa versão antiga do ScreenFlow também vê este canal."
+            : "Conversa de todo mundo da rede. Quem ainda está numa versão antiga do ScreenFlow também vê este canal.",
+        _ => OnServer ? "Canal do servidor: fica guardado nele, e qualquer pessoa no servidor pode mudar o nome ou apagar (botão direito no canal)."
+            : IsMine ? "Canal criado por você. Aparece para todo mundo da sala enquanto você estiver nela (botão direito no canal para mudar o nome ou apagar)."
             : Owner is { } owner ? $"Canal criado por {owner}."
+            : ServerRoom ? "Este canal não está mais no servidor. A conversa fica aqui até você fechar o ScreenFlow."
             : "Canal criado por alguém da sala.",
     };
 }
@@ -1513,6 +1782,7 @@ public sealed class VoiceChannelRow : RoomRowBase
 {
     private bool _current;
     private bool _mine;
+    private bool _onServer;
     private string? _owner;
 
     public VoiceChannelRow(RoomChannel channel)
@@ -1531,8 +1801,13 @@ public sealed class VoiceChannelRow : RoomRowBase
 
     /// <summary>Você está neste canal.</summary>
     public bool IsCurrent { get => _current; set => Set(ref _current, value, nameof(IsCurrent), nameof(Hint)); }
-    public bool IsMine { get => _mine; set => Set(ref _mine, value, nameof(IsMine), nameof(Hint)); }
+    public bool IsMine { get => _mine; set => Set(ref _mine, value, nameof(IsMine), nameof(Hint), nameof(CanEdit)); }
+    /// <summary>(1.4.1) É um canal do servidor (qualquer pessoa nele muda o nome ou apaga).</summary>
+    public bool OnServer { get => _onServer; set => Set(ref _onServer, value, nameof(OnServer), nameof(Hint), nameof(CanEdit)); }
     public string? Owner { get => _owner; set => Set(ref _owner, value, nameof(Owner), nameof(Hint)); }
+
+    /// <summary>Dá para mudar o nome e apagar: um canal seu, ou qualquer canal do servidor (a Geral nunca).</summary>
+    public bool CanEdit => !Channel.IsDefault && (IsMine || OnServer);
 
     /// <summary>A dica ao passar o mouse: o que o clique faz.</summary>
     public string Hint
@@ -1545,7 +1820,8 @@ public sealed class VoiceChannelRow : RoomRowBase
                 1 => $"Entrar no canal {Name} (1 pessoa)",
                 var n => $"Entrar no canal {Name} ({n} pessoas)",
             };
-            return Channel.IsDefault ? action : IsMine ? $"{action} · criado por você" : Owner is { } owner ? $"{action} · criado por {owner}" : action;
+            return Channel.IsDefault ? action : OnServer ? $"{action} · canal do servidor" : IsMine ? $"{action} · criado por você"
+                : Owner is { } owner ? $"{action} · criado por {owner}" : action;
         }
     }
 
@@ -1602,7 +1878,7 @@ public sealed class ChatRow : RoomRowBase
     public bool HasText => Text.Length > 0;
     public DateTimeOffset Time { get; }
     /// <summary>O canal de texto da mensagem ("geral" nas das versões antigas).</summary>
-    public string ChannelName { get; }
+    public string ChannelName { get; internal set; }
     public bool IsMine { get; }
     /// <summary>Veio da pasta do chat guardado (a imagem, se faltar, é buscada lá).</summary>
     public bool FromArchive { get; }

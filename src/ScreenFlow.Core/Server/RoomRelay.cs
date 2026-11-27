@@ -251,6 +251,8 @@ public sealed class RoomRelay : IAsyncDisposable
                     AuthorId = member.Id,
                     AuthorName = member.Name.Length > 0 ? member.Name : message.AuthorName,
                     Time = (message.Time - now).Duration() > TimeSpan.FromMinutes(2) ? now : message.Time,
+                    // Quem ainda não viu que o canal mudou de nome manda no nome antigo: guarda no nome de agora.
+                    Channel = _channels.CurrentTextName(message.Channel),
                 };
                 if (_history.Add(clean) >= 0) _archive?.Add(clean);
                 break;
@@ -280,7 +282,7 @@ public sealed class RoomRelay : IAsyncDisposable
     private void SendHistory(Member member)
     {
         foreach (var message in _history.Recent(80))
-            Send(RoomPacket.Chat(ServerId, message with { History = true }), member);
+            Send(RoomPacket.Chat(ServerId, message with { History = true, Channel = _channels.CurrentTextName(message.Channel) }), member);
     }
 
     // ───────────────────────── Quem está na sala ─────────────────────────

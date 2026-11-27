@@ -166,7 +166,7 @@
                         <StackPanel>
                         <StackPanel x:Name="AccessPanel">
                             <TextBlock Style="{StaticResource Heading}" Text="Quem pode entrar" Margin="0,0,0,16"/>
-                            <TextBlock Style="{StaticResource Caption}" Text="Seu IP do Radmin"/>
+                            <TextBlock x:Name="IpCaption" Style="{StaticResource Caption}" Text="Seu IP do Radmin"/>
                             <DockPanel Margin="0,2,0,0">
                                 <Button x:Name="CopyButton" DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE8C8;" ToolTip="Copiar o IP" Click="Copy_Click" VerticalAlignment="Center"/>
                                 <TextBlock x:Name="IpText" FontFamily="{DynamicResource FontDisplay}" FontSize="30" FontWeight="Bold" Foreground="{DynamicResource AccentText}" Text="—"
@@ -189,11 +189,22 @@
 
                             <TextBlock Style="{StaticResource Label}" Text="Rede usada" Margin="0,18,0,7"/>
                             <ComboBox x:Name="AdapterCombo" SelectionChanged="Adapter_SelectionChanged"/>
+
+                            <!-- (1.4.1) Uma cópia só vai para o servidor ScreenFlow, e quem está nele assiste por lá. -->
+                            <Border x:Name="ServerPanel" Style="{StaticResource InsetCard}" Margin="0,16,0,0" Padding="14,12" Visibility="Collapsed">
+                                <StackPanel>
+                                    <CheckBox x:Name="ViaServerToggle" Style="{StaticResource Switch}" Content="Transmitir também pelo servidor"
+                                              Checked="ViaServer_Changed" Unchecked="ViaServer_Changed"
+                                              ToolTip="Uma cópia só da tela vai para o servidor, e ele manda para cada pessoa que assiste por lá. Economiza o seu upload."/>
+                                    <TextBlock x:Name="ServerHint" Style="{StaticResource Caption}" Margin="0,6,0,0" TextWrapping="Wrap"/>
+                                </StackPanel>
+                            </Border>
+
                             <CheckBox x:Name="ApproveToggle" Style="{StaticResource Switch}" Content="Aprovar cada pessoa antes de entrar" Margin="0,18,0,16"/>
                             <TextBlock Style="{StaticResource Label}" Text="PIN (opcional)"/>
                             <TextBox x:Name="PinBox" Tag="Sem PIN" MaxLength="32" ToolTip="Deixe vazio para não pedir PIN. Mínimo de 4 caracteres."/>
-                            <TextBlock Style="{StaticResource Caption}" Margin="0,8,0,0"
-                                       Text="Qualquer pessoa na mesma rede Radmin alcança o seu IP. Use PIN ou aprovação para controlar quem entra."/>
+                            <TextBlock x:Name="AccessHint" Style="{StaticResource Caption}" Margin="0,8,0,0" TextWrapping="Wrap"
+                                       Text="Qualquer pessoa na mesma rede (Radmin VPN ou Tailscale) alcança o seu IP. Use PIN ou aprovação para controlar quem entra."/>
                         </StackPanel>
                         <!-- Fica fora do AccessPanel: dá para trocar com a transmissão no ar. -->
                         <CheckBox x:Name="ViewerControlsToggle" Style="{StaticResource Switch}" Content="Quem assiste pode mexer nos controles" Margin="0,18,0,0"
@@ -412,24 +423,38 @@
                                 <TextBlock x:Name="ViewerCount" DockPanel.Dock="Right" Style="{StaticResource Caption}" VerticalAlignment="Center"/>
                                 <TextBlock Style="{StaticResource Heading}" Text="Quem está assistindo"/>
                             </DockPanel>
-                            <TextBlock x:Name="NoViewers" Style="{StaticResource Muted}" Margin="0,6,0,0"
-                                       Text="Ninguém ainda. Quem estiver na sua rede Radmin vê você na tela Assistir, ou entra digitando o seu IP."/>
+                            <!-- (1.4.1) Como está a transmissão pelo servidor -->
+                            <Border x:Name="ServerLive" Style="{StaticResource InsetCard}" Margin="0,12,0,0" Padding="12,10" Visibility="Collapsed">
+                                <DockPanel>
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE753;" FontSize="16" Foreground="{DynamicResource AccentText}"
+                                               VerticalAlignment="Top" Margin="0,1,10,0"/>
+                                    <TextBlock x:Name="ServerLiveText" Style="{StaticResource Body}" FontSize="13" TextWrapping="Wrap" VerticalAlignment="Center"/>
+                                </DockPanel>
+                            </Border>
+                            <TextBlock x:Name="NoViewers" Style="{StaticResource Muted}" Margin="0,6,0,0" TextWrapping="Wrap"
+                                       Text="Ninguém ainda. Quem estiver na sua rede (Radmin VPN ou Tailscale) vê você na tela Assistir, ou entra digitando o seu IP."/>
                             <ItemsControl x:Name="ViewerList" Margin="0,14,0,0">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate>
                                         <Border Style="{StaticResource InsetCard}" Margin="0,0,0,8">
                                             <DockPanel>
-                                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE711;" ToolTip="Remover da transmissão" Click="Kick_Click" Tag="{Binding Id}"/>
+                                                <Button DockPanel.Dock="Right" Style="{StaticResource IconButton}" Content="&#xE711;" ToolTip="Remover da transmissão" Click="Kick_Click" Tag="{Binding Id}"
+                                                        Visibility="{Binding CanKick, Converter={StaticResource BoolToVisibility}}"/>
                                                 <Button DockPanel.Dock="Right" Content="{Binding TestText}" IsEnabled="{Binding CanTest}" MinHeight="34" Padding="12,0" Margin="8,0,6,0"
-                                                        FontSize="12.5" Click="Bandwidth_Click" Tag="{Binding Id}" ToolTip="Mede a banda até esta pessoa por 3 segundos"/>
+                                                        FontSize="12.5" Click="Bandwidth_Click" Tag="{Binding Id}" ToolTip="{Binding TestTip}"/>
                                                 <Border Width="38" Height="38" CornerRadius="19" Background="{DynamicResource BrandGradient}" VerticalAlignment="Center">
-                                                    <TextBlock Text="{Binding Initial}" FontWeight="Bold" Foreground="{DynamicResource OnAccent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                    <Grid>
+                                                        <TextBlock Text="{Binding Initial}" FontWeight="Bold" Foreground="{DynamicResource OnAccent}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                                                   Visibility="{Binding IsPerson, Converter={StaticResource BoolToVisibility}}"/>
+                                                        <TextBlock Style="{StaticResource Icon}" Text="&#xE753;" Foreground="{DynamicResource OnAccent}"
+                                                                   Visibility="{Binding IsServer, Converter={StaticResource BoolToVisibility}}"/>
+                                                    </Grid>
                                                 </Border>
                                                 <StackPanel Margin="12,0,0,0" VerticalAlignment="Center">
                                                     <TextBlock FontWeight="SemiBold">
                                                         <Run Text="{Binding Name, Mode=OneWay}"/><Run Text="  " /><Run Text="{Binding Address, Mode=OneWay}" Foreground="{DynamicResource TextSubtle}" FontWeight="Normal" FontSize="12.5"/>
                                                     </TextBlock>
-                                                    <TextBlock Text="{Binding Details}" Style="{StaticResource Caption}" Margin="0,2,0,0"/>
+                                                    <TextBlock Text="{Binding Details}" Style="{StaticResource Caption}" Margin="0,2,0,0" TextWrapping="Wrap"/>
                                                 </StackPanel>
                                             </DockPanel>
                                         </Border>

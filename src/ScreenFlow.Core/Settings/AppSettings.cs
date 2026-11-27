@@ -8,9 +8,17 @@ namespace ScreenFlow.Core.Settings;
 
 public enum AppTheme { Dark, Light }
 
+/// <summary>
+/// (1.4.1) Como este PC usa um servidor ScreenFlow: nenhum (a sala é direta entre os PCs da rede), entrar num servidor
+/// de outro PC, ou ser o servidor (ele roda dentro do app, e o próprio app entra nele).
+/// </summary>
+public enum ServerRole { None, Join, Host }
+
 public sealed class AppSettings
 {
     public AppTheme Theme { get; set; } = AppTheme.Dark;
+    /// <summary>(1.4.1) A cor do tema (id de <see cref="ColorThemes"/>), só deste PC. Null: a menta de sempre.</summary>
+    public string? ColorTheme { get; set; }
     /// <summary>Seu nome: aparece no chat, na voz e para quem assiste (no começo é o nome do PC).</summary>
     public string DeviceName { get; set; } = Environment.MachineName;
     /// <summary>A sua foto do perfil (id do arquivo guardado na pasta de imagens). Null: aparece a inicial do nome.</summary>
@@ -156,6 +164,30 @@ public sealed class AppSettings
     /// <summary>Quem você bloqueou: nada dessas pessoas chega até você (ids da sala).</summary>
     public List<string> BlockedPeers { get; set; } = [];
 
+    // Servidor ScreenFlow (1.4.1)
+    /// <summary>
+    /// Entrar num servidor ScreenFlow (ou ser um): a sala (chat, voz e canais) passa por ele, e as transmissões também
+    /// (quem está no servidor assiste por ele). <see cref="ServerRole.None"/>: a sala direta entre os PCs da rede.
+    /// </summary>
+    public ServerRole ServerRole { get; set; }
+    /// <summary>
+    /// Endereço do servidor para entrar: o IP (do Tailscale, do Radmin VPN ou da rede local) ou o nome do PC no
+    /// Tailscale. Com ":porta" no fim quando o servidor usa outras portas (a do servidor e as duas seguintes).
+    /// </summary>
+    public string? ServerAddress { get; set; }
+    /// <summary>A senha do servidor em que você entra (se ele tiver uma). No lugar do PIN de quem transmite.</summary>
+    public string? ServerPassword { get; set; }
+    /// <summary>No servidor, a sua transmissão vai para ele e quem está nele assiste por ele (desligado: direto, como antes).</summary>
+    public bool TransmitViaServer { get; set; } = true;
+    /// <summary>O nome do servidor quando este PC é o servidor (vazio: o nome do PC).</summary>
+    public string? HostedServerName { get; set; }
+    /// <summary>A senha do servidor quando este PC é o servidor (vazio: sem senha, entra quem alcançar o PC).</summary>
+    public string? HostedServerPassword { get; set; }
+
+    /// <summary>O endereço do servidor configurado, separado em nome e porta (null sem endereço válido).</summary>
+    public (string Host, int Port)? ServerEndpoint()
+        => Network.LocalNetworks.TrySplitHostPort(ServerAddress, AppInfo.DefaultServerControlPort, out var host, out var port) ? (host, port) : null;
+
     // Chat guardado numa pasta (1.3.0)
     /// <summary>
     /// Guarda as mensagens do chat (e as imagens) numa pasta, por exemplo a do Google Drive para computador: o Drive
@@ -233,6 +265,13 @@ public sealed class AppSettings
             .Where(p => Guid.TryParseExact(p.Key, "N", out _) && double.IsFinite(p.Value) && Math.Abs(p.Value - 1) > 0.001)
             .Take(256)
             .ToDictionary(p => p.Key, p => Math.Clamp(p.Value, 0, 2));
+        if (!Enum.IsDefined(ServerRole)) ServerRole = ServerRole.None;
+        ServerAddress = string.IsNullOrWhiteSpace(ServerAddress) || ServerAddress.Trim().Length > 255 ? null : ServerAddress.Trim();
+        ServerPassword = CleanPassword(ServerPassword);
+        HostedServerPassword = CleanPassword(HostedServerPassword);
+        HostedServerName = RoomPacket.CleanName(HostedServerName) is { Length: > 0 } serverName ? serverName : null;
+        ColorTheme = ColorThemes.Find(ColorTheme)?.Id;
+        if (ColorTheme == ColorThemes.Default.Id) ColorTheme = null;
         if (string.IsNullOrWhiteSpace(ChatArchiveFolder)) ChatArchiveFolder = null;
         else
         {
@@ -252,6 +291,10 @@ public sealed class AppSettings
         SettingsVersion = CurrentSettingsVersion;
         return true;
     }
+
+    /// <summary>Senha vazia é sem senha; uma senha longa demais (colada errado) também não vale.</summary>
+    private static string? CleanPassword(string? password)
+        => string.IsNullOrEmpty(password) || password.Length > Server.ServerCommandLine.MaxPasswordLength ? null : password;
 
     private static List<string> ValidIds(List<string>? ids, int max)
         => (ids ?? []).Where(id => Guid.TryParseExact(id, "N", out var guid) && guid != Guid.Empty).Distinct(StringComparer.OrdinalIgnoreCase).Take(max).ToList();

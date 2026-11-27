@@ -20,7 +20,22 @@ using ScreenFlow.Infrastructure.Session;
 
 namespace ScreenFlow.App.Pages;
 
-/// <summary>Assistir: transmissões encontradas na rede Radmin, conexão pelo IP e o resumo do que você está assistindo.</summary>
+/// <summary>
+/// Um pedido para assistir: direto num PC (<see cref="StreamId"/> null) ou, pelo servidor ScreenFlow (1.4.1), a
+/// transmissão de alguém nele (o id da pessoa na sala) com a senha do servidor.
+/// </summary>
+public sealed record WatchRequest(string Host, int Port, string? StreamId = null, string? ServerPassword = null, string? Name = null, StreamMode? Mode = null)
+{
+    public bool ViaServer => StreamId is not null;
+
+    /// <summary>Identifica a transmissão (o mesmo PC pode ter várias pelo servidor).</summary>
+    public string Key => StreamId is null ? $"{Host}:{Port}" : $"{Host}:{Port}/{StreamId}";
+
+    /// <summary>Como aparece nos textos: o nome de quem transmite (pelo servidor) ou o endereço.</summary>
+    public string Label => Name is { Length: > 0 } name ? name : Host;
+}
+
+/// <summary>Assistir: transmissões encontradas na rede (e no servidor), conexão pelo endereço e o resumo do que você está assistindo.</summary>
 public partial class WatchPage : UserControl, IShellPage
 {
     private readonly MainWindow _shell;
@@ -30,6 +45,7 @@ public partial class WatchPage : UserControl, IShellPage
     private PlayerWindow? _player;
     private UniformGrid? _sessionGrid;
     private string? _currentHost;
+    private string? _currentKey;
     private bool _connecting;
     private bool _pulsing;
 
@@ -111,18 +127,18 @@ public partial class WatchPage : UserControl, IShellPage
         IReadOnlyList<DiscoveryAnnouncement> found = AppServices.DemoMode
             ? DemoData.Sessions
             : (AppServices.Room.IsAvailable ? AppServices.Room.Hosts : _discovery?.Hosts ?? []).Select(h => h.Announcement).ToList();
-        foreach (var gone in _sessions.Where(s => found.All(f => f.Address != s.Address)).ToList()) _sessions.Remove(gone);
+        foreach (var gone in _sessions.Where(s => found.All(f => f.Key != s.Key)).ToList()) _sessions.Remove(gone);
         foreach (var announcement in found)
         {
-            var card = _sessions.FirstOrDefault(s => s.Address == announcement.Address);
+            var card = _sessions.FirstOrDefault(s => s.Key == announcement.Key);
             if (card is null)
             {
-                card = new SessionCard(announcement.Address);
+                card = new SessionCard(announcement.Key, announcement.Address);
                 var index = 0;
                 while (index < _sessions.Count && string.Compare(_sessions[index].Name, announcement.HostName, StringComparison.CurrentCultureIgnoreCase) < 0) index++;
                 _sessions.Insert(index, card);
             }
-            card.Update(announcement, _player is not null && _currentHost == announcement.Address);
+            card.Update(announcement, _player is not null && _currentKey == RequestFor(announcement).Key);
         }
 
         var any = _sessions.Count > 0;
@@ -161,46 +177,67 @@ public partial class WatchPage : UserControl, IShellPage
 
     // ───────────────────────── Conectar ─────────────────────────
 
-    /// <summary>Usado pela Visão geral e pelo chat da rede: conecta direto num IP.</summary>
-    public void ConnectTo(string host, StreamMode? expectedMode = null)
+    /// <summary>Usado pela Visão geral e pelo chat da rede: conecta direto num PC (IP, ou nome do Tailscale).</summary>
+    public void ConnectTo(string host, StreamMode? expectedMode = null, int? port = null)
     {
         HostBox.Text = host.Trim();
-        _ = ConnectAsync(host, expectedMode);
+        _ = ConnectTextAsync(host, expectedMode, port);
     }
 
-    private void Connect_Click(object sender, RoutedEventArgs e) => _ = ConnectAsync(HostBox.Text);
+    /// <summary>(1.4.1) A transmissão de alguém pelo servidor ScreenFlow em uso.</summary>
+    public void ConnectToServer(Services.ServerTarget server, Guid person, string name, StreamMode? expectedMode = null)
+        => _ = ConnectAsync(new WatchRequest(server.Address.ToString(), server.ControlPort, person.ToString("N"), server.Password, name, expectedMode));
+
+    private void Connect_Click(object sender, RoutedEventArgs e) => _ = ConnectTextAsync(HostBox.Text);
 
     private void HostBox_KeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key != Key.Enter) return;
         e.Handled = true;
-        _ = ConnectAsync(HostBox.Text);
+        _ = ConnectTextAsync(HostBox.Text);
     }
 
     private void Join_Click(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.Tag is not SessionCard card) return;
-        HostBox.Text = card.Address;
-        _ = ConnectAsync(card.Address, card.Mode);
+        if ((sender as FrameworkElement)?.Tag is not SessionCard { Announcement: { } announcement } card) return;
+        var request = RequestFor(announcement);
+        if (!request.ViaServer) HostBox.Text = card.Address;
+        _ = ConnectAsync(request);
     }
 
-    private async Task ConnectAsync(string text, StreamMode? expectedMode = null)
+    /// <summary>
+    /// Como conectar numa transmissão anunciada: as do servidor vão pelo servidor (o endereço já é o dele, e a senha é a
+    /// do servidor em uso); as outras, direto no PC de quem transmite.
+    /// </summary>
+    private WatchRequest RequestFor(DiscoveryAnnouncement announcement)
+        => announcement.Stream is { Length: > 0 } stream
+            ? new WatchRequest(announcement.Address, announcement.ControlPort, stream, AppServices.Server.Target?.Password, announcement.HostName, announcement.Mode)
+            : new WatchRequest(announcement.Address, Settings.ControlPort, Mode: announcement.Mode);
+
+    /// <summary>O que foi digitado: um IP ou o nome de um PC (Tailscale), com ":porta" se não for a de sempre.</summary>
+    private Task ConnectTextAsync(string text, StreamMode? expectedMode = null, int? port = null)
     {
-        if (!RadminAddress.TryParseHost(text.Trim(), out var address))
+        if (!LocalNetworks.TrySplitHostPort(text, port ?? Settings.ControlPort, out var host, out var parsedPort))
         {
-            ShowState("Digite um IP válido, por exemplo 26.12.34.56.", "Danger", canCancel: false);
+            ShowState("Digite o IP de quem transmite (por exemplo 26.12.34.56 ou 100.64.1.2) ou o nome do PC no Tailscale.", "Danger", canCancel: false);
             HostBox.Focus();
-            return;
+            return Task.CompletedTask;
         }
-        var host = address.ToString();
+        return ConnectAsync(new WatchRequest(host, parsedPort, Mode: expectedMode));
+    }
+
+    private async Task ConnectAsync(WatchRequest request)
+    {
+        var host = request.Host;
+        var expectedMode = request.Mode;
         if (_player is not null)
         {
-            if (_currentHost == host)
+            if (_currentKey == request.Key)
             {
                 _player.BringToFront();
                 return;
             }
-            if (!ConfirmDialog.Ask(Window.GetWindow(this), "Trocar de transmissão?", $"Você está assistindo {_currentHost}. Sair e entrar em {host}?", "Trocar"))
+            if (!ConfirmDialog.Ask(Window.GetWindow(this), "Trocar de transmissão?", $"Você está assistindo {_currentHost}. Sair e entrar em {request.Label}?", "Trocar"))
                 return;
             await _player.ShutdownAsync();
         }
@@ -209,10 +246,13 @@ public partial class WatchPage : UserControl, IShellPage
         ConnectButton.IsEnabled = false;
         try
         {
-            Settings.RememberHost(host);
-            AppServices.Settings.Save();
-            RefreshRecent();
-            ShowState($"Conectando em {host}…", "Warning", canCancel: false);
+            if (!request.ViaServer)
+            {
+                Settings.RememberHost(request.Port == Settings.ControlPort ? host : $"{host}:{request.Port}");
+                AppServices.Settings.Save();
+                RefreshRecent();
+            }
+            ShowState(request.ViaServer ? $"Conectando em {request.Label} pelo servidor…" : $"Conectando em {host}…", "Warning", canCancel: false);
 
             var hardware = await AppServices.Hardware;
             var decoders = await Task.Run(HardwareDetector.SupportedDecoders);
@@ -227,11 +267,14 @@ public partial class WatchPage : UserControl, IShellPage
                 _shell.Toast(missing, ToastKind.Warning);
             }
 
-            var options = new ViewerOptions(host, Settings.ControlPort, Settings.DeviceName, null, (float)Settings.Volume, decoders,
-                Math.Max(1280, hardware.MonitorWidth), Math.Max(720, hardware.MonitorHeight), Math.Max(60, hardware.MonitorRefreshHz));
+            var options = new ViewerOptions(host, request.Port, Settings.DeviceName, request.ServerPassword, (float)Settings.Volume, decoders,
+                Math.Max(1280, hardware.MonitorWidth), Math.Max(720, hardware.MonitorHeight), Math.Max(60, hardware.MonitorRefreshHz),
+                StreamId: request.StreamId, ViaServer: request.ViaServer);
             var session = new ViewerSession(options);
-            var player = new PlayerWindow(session, host, expectedMode);
-            session.PinProvider = wrong => Dispatcher.InvokeAsync(() => PinDialog.Ask(player.IsVisible ? player : Window.GetWindow(this), host, wrong)).Task;
+            var player = new PlayerWindow(session, request.Label, expectedMode);
+            session.PinProvider = request.ViaServer
+                ? wrong => Dispatcher.InvokeAsync(() => AskServerPassword(player, wrong)).Task
+                : wrong => Dispatcher.InvokeAsync(() => PinDialog.Ask(player.IsVisible ? player : Window.GetWindow(this), host, wrong)).Task;
             session.StateChanged += (state, message) => Dispatcher.BeginInvoke(() => OnStateChanged(player, state, message));
             session.StatisticsUpdated += stats => Dispatcher.BeginInvoke(() =>
             {
@@ -240,7 +283,8 @@ public partial class WatchPage : UserControl, IShellPage
             player.Closed += (_, _) => OnPlayerClosed(player);
 
             _player = player;
-            _currentHost = host;
+            _currentHost = request.Label;
+            _currentKey = request.Key;
             player.Show();
             session.Start();
             UpdateNowCard();
@@ -280,11 +324,25 @@ public partial class WatchPage : UserControl, IShellPage
         UpdateNowCard();
     }
 
+    /// <summary>A senha do servidor (pedida quando faltou ou estava errada). Fica salva para as próximas vezes.</summary>
+    private string? AskServerPassword(PlayerWindow player, bool wrong)
+    {
+        var target = AppServices.Server.Target;
+        var password = PinDialog.Ask(player.IsVisible ? player : Window.GetWindow(this), target?.Label ?? "ScreenFlow", wrong, server: true);
+        if (password is not null && target is { ThisPc: false } && Settings.ServerRole == ServerRole.Join && Settings.ServerPassword != password)
+        {
+            Settings.ServerPassword = password;
+            AppServices.Settings.Save();
+        }
+        return password;
+    }
+
     private void OnPlayerClosed(PlayerWindow player)
     {
         if (_player != player) return;
         _player = null;
         _currentHost = null;
+        _currentKey = null;
         Telemetry.EndViewer();
         StatePanel.Visibility = Visibility.Collapsed;
         UpdateNowCard();
@@ -324,7 +382,7 @@ public partial class WatchPage : UserControl, IShellPage
             chip.Click += (_, _) =>
             {
                 HostBox.Text = host;
-                _ = ConnectAsync(host);
+                _ = ConnectTextAsync(host);
             };
             RecentPanel.Children.Add(chip);
         }
@@ -382,17 +440,26 @@ public partial class WatchPage : UserControl, IShellPage
         NowStat3.Text = stats is null ? "—" : $"{stats.RoundTripMs:0} ms";
     }
 
-    /// <summary>Cartão de uma transmissão encontrada na rede.</summary>
-    public sealed class SessionCard(string address) : INotifyPropertyChanged
+    /// <summary>Cartão de uma transmissão encontrada na rede (ou no servidor).</summary>
+    public sealed class SessionCard(string key, string address) : INotifyPropertyChanged
     {
         private string _name = address;
+        private bool _viaServer;
         private StreamMode _mode;
         private int _viewers;
         private bool _pin;
         private bool _camera;
         private bool _current;
 
+        public string Key { get; } = key;
         public string Address { get; } = address;
+        public DiscoveryAnnouncement? Announcement { get; private set; }
+        /// <summary>(1.4.1) A transmissão está no servidor ScreenFlow.</summary>
+        public bool ViaServer { get => _viaServer; private set => Set(ref _viaServer, value, nameof(ViaServer), nameof(PlaceText), nameof(PinLabel)); }
+        /// <summary>Onde está: o servidor (pelo nome dele) ou o endereço do PC.</summary>
+        public string PlaceText => _viaServer ? $"pelo servidor {Announcement?.Via ?? Address}" : Address;
+        /// <summary>O que protege a transmissão: a senha do servidor ou o PIN de quem transmite.</summary>
+        public string PinLabel => _viaServer ? "Senha" : "PIN";
         public string Name { get => _name; private set => Set(ref _name, value, nameof(Name)); }
         public StreamMode Mode { get => _mode; private set => Set(ref _mode, value, nameof(Mode), nameof(IsScreen), nameof(IsCamera), nameof(IsParty), nameof(ModeLabel), nameof(ActionText)); }
         public bool PinRequired { get => _pin; private set => Set(ref _pin, value, nameof(PinRequired)); }
@@ -405,6 +472,8 @@ public partial class WatchPage : UserControl, IShellPage
 
         public void Update(DiscoveryAnnouncement announcement, bool current)
         {
+            Announcement = announcement;
+            ViaServer = announcement.Stream is { Length: > 0 };
             Name = announcement.HostName;
             Mode = announcement.Mode;
             Set(ref _camera, announcement.CameraOverlay, nameof(ModeLabel));

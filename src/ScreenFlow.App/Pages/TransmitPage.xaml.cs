@@ -35,6 +35,8 @@ public partial class TransmitPage : UserControl, IShellPage
     private bool _fillingPartyApps;
     private HostSession? _session;
     private System.Net.IPAddress? _liveAddress;
+    private string? _liveServerLabel;
+    private bool _loadingServer;
     private IReadOnlyList<DisplayMonitor> _monitors = [];
     private bool _loaded;
     private bool _starting;
@@ -97,12 +99,17 @@ public partial class TransmitPage : UserControl, IShellPage
             else UpdateRadminPanel();
         };
         AppServices.RadminSetup.Changed += UpdateRadminPanel;
+        // (1.4.1) O servidor em uso mudou (achou o endereço, este PC virou o servidor): o cartão do servidor acompanha.
+        AppServices.Server.Changed += UpdateServerPanel;
     }
 
     public bool IsRunning => _session is not null;
 
-    /// <summary>Pessoas assistindo agora.</summary>
-    public int Viewers => _viewerRows.Count;
+    /// <summary>Pessoas assistindo agora: as diretas e as que assistem pelo servidor.</summary>
+    public int Viewers => _viewerRows.Sum(r => r.People);
+
+    /// <summary>(1.4.1) A transmissão já está no servidor ScreenFlow: quem está nele assiste por lá.</summary>
+    public bool LiveViaServer => _session?.ServerState == ServerLinkState.Live;
 
     /// <summary>O que está indo para quem assiste agora ("tela, câmera e áudio"). Vazio quando parado.</summary>
     public string LiveSummary => _session?.Summary ?? string.Empty;
@@ -149,6 +156,9 @@ public partial class TransmitPage : UserControl, IShellPage
         ApproveToggle.IsChecked = Settings.ApproveEachViewer;
         ViewerControlsToggle.IsChecked = Settings.ViewerControls;
         PinBox.Text = Settings.Pin ?? string.Empty;
+        _loadingServer = true;
+        ViaServerToggle.IsChecked = Settings.TransmitViaServer;
+        _loadingServer = false;
         (Settings.Mode switch
         {
             StreamMode.Camera => ModeCamera,
@@ -472,12 +482,18 @@ public partial class TransmitPage : UserControl, IShellPage
     {
         IReadOnlyList<NetworkAdapterInfo> adapters = AppServices.DemoMode ? [DemoData.Radmin] : RadminNetwork.GetIPv4Adapters().Where(a => a.IsUp).ToList();
         var radmin = adapters.FirstOrDefault(a => a.IsRadmin && Core.Network.RadminAddress.IsRadmin(a.Address));
+        var tailscale = adapters.FirstOrDefault(a => a.IsTailscale);
         var previous = AdapterCombo.Value<NetworkAdapterInfo>();
-        AdapterCombo.Fill(adapters.Select(a => new Choice<NetworkAdapterInfo>(a, a.IsRadmin ? $"Radmin VPN · {a.Address}" : $"{a.Name} · {a.Address}")));
-        AdapterCombo.SelectValue(adapters.FirstOrDefault(a => a.Address.Equals(previous?.Address)) ?? radmin ?? adapters.FirstOrDefault()!);
-        RadminMissing.Visibility = radmin is null ? Visibility.Visible : Visibility.Collapsed;
+        // (1.4.1) A rede que chega no servidor em uso vem primeiro; depois o Radmin VPN, o Tailscale e a rede local.
+        var toServer = AppServices.Server.Target is { ThisPc: false } server && Core.Network.LocalNetworks.RouteTo(server.Address) is { } route
+            ? adapters.FirstOrDefault(a => a.Address.Equals(route))
+            : null;
+        AdapterCombo.Fill(adapters.Select(a => new Choice<NetworkAdapterInfo>(a, a.Label)));
+        AdapterCombo.SelectValue(adapters.FirstOrDefault(a => a.Address.Equals(previous?.Address)) ?? toServer ?? radmin ?? tailscale ?? adapters.FirstOrDefault()!);
+        RadminMissing.Visibility = radmin is null && tailscale is null && AppServices.Server.Target is null ? Visibility.Visible : Visibility.Collapsed;
         UpdateIp();
         UpdateRadminPanel();
+        UpdateServerPanel();
     }
 
     /// <summary>Sem o Radmin: instalar pelo app (com o andamento aqui) ou, já instalado, abrir para entrar numa rede.</summary>
@@ -491,8 +507,8 @@ public partial class TransmitPage : UserControl, IShellPage
         var setup = AppServices.RadminSetup;
         var installed = _shell.RadminInstalled;
         RadminMissingText.Text = setup.Busy || (setup.Status is not null && !installed) ? setup.Status
-            : installed ? "O Radmin VPN está instalado, mas sem rede ativa. Abra o Radmin, entre na mesma rede que os outros e clique em Tentar de novo."
-            : "O Radmin VPN não está instalado. O ScreenFlow baixa do site oficial e instala para você (o Windows vai pedir permissão).";
+            : installed ? "Nenhuma VPN conectada. O Radmin VPN está instalado, mas sem rede ativa: abra o Radmin, entre na mesma rede que os outros e clique em Tentar de novo. Quem usa o Tailscale: ligue o Tailscale."
+            : "Nenhuma VPN conectada (nem o Radmin VPN nem o Tailscale). O ScreenFlow baixa o Radmin VPN do site oficial e instala para você (o Windows vai pedir permissão). Quem usa o Tailscale: ligue o Tailscale e clique em Tentar de novo.";
         RadminProgress.Visibility = setup.Progress is null ? Visibility.Collapsed : Visibility.Visible;
         RadminProgress.Value = setup.Progress ?? 0;
         RadminActionButton.Content = installed && !setup.Busy ? "Abrir o Radmin VPN" : "Instalar o Radmin VPN";
@@ -504,10 +520,14 @@ public partial class TransmitPage : UserControl, IShellPage
         if (AdapterCombo.Value<NetworkAdapterInfo>() is { } adapter)
         {
             IpText.Text = adapter.Address.ToString();
-            IpHint.Text = adapter.IsRadmin ? "Passe este IP para quem vai assistir." : "Este IP não é do Radmin: só funciona para quem está na mesma rede local.";
+            IpCaption.Text = adapter.IsTailscale ? "Seu IP do Tailscale" : adapter.IsRadmin ? "Seu IP do Radmin" : "Seu IP";
+            IpHint.Text = adapter.IsTailscale || adapter.IsRadmin
+                ? "Passe este IP para quem vai assistir."
+                : "Este IP não é do Radmin VPN nem do Tailscale: só funciona para quem está na mesma rede local.";
         }
         else
         {
+            IpCaption.Text = "Seu IP";
             IpText.Text = "—";
             IpHint.Text = "Nenhuma rede ativa encontrada.";
         }
@@ -523,6 +543,85 @@ public partial class TransmitPage : UserControl, IShellPage
             return;
         }
         if (await AppServices.RadminSetup.InstallAsync(_shell)) RefreshNetwork();
+    }
+
+    // ───────────────────────── Pelo servidor ScreenFlow (1.4.1) ─────────────────────────
+
+    /// <summary>O cartão "Transmitir também pelo servidor": só aparece com um servidor escolhido em Configurações › Servidor.</summary>
+    private void UpdateServerPanel()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            Dispatcher.BeginInvoke(UpdateServerPanel);
+            return;
+        }
+        var service = AppServices.Server;
+        var role = Settings.ServerRole;
+        var show = role != ServerRole.None && !AppServices.DemoMode;
+        ServerPanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        var on = show && ViaServerToggle.IsChecked == true;
+        AccessHint.Text = on
+            ? "Qualquer pessoa na mesma rede (Radmin VPN ou Tailscale) alcança o seu IP. O PIN e a aprovação valem para quem entra direto no seu IP; pelo servidor, vale a senha do servidor."
+            : "Qualquer pessoa na mesma rede (Radmin VPN ou Tailscale) alcança o seu IP. Use PIN ou aprovação para controlar quem entra.";
+        if (!show) return;
+        var target = service.Target;
+        var label = target?.Label ?? (role == ServerRole.Host ? "este PC" : Settings.ServerAddress ?? "do ScreenFlow");
+        ServerHint.Text = !on
+            ? $"Desligado: só quem entra direto no seu IP assiste. Quem está no servidor {label} não vê esta transmissão."
+            : target is null && service.Problem is { } problem
+                ? problem
+                : $"Uma cópia só vai para o servidor {label}, e quem está nele assiste por lá (economiza o seu upload). Quem entra pelo servidor usa a senha dele, sem PIN nem aprovação.";
+    }
+
+    private void ViaServer_Changed(object sender, RoutedEventArgs e)
+    {
+        if (!IsInitialized) return;
+        if (!_loadingServer && Settings.TransmitViaServer != (ViaServerToggle.IsChecked == true))
+        {
+            Settings.TransmitViaServer = ViaServerToggle.IsChecked == true;
+            AppServices.Settings.Save();
+        }
+        UpdateServerPanel();
+    }
+
+    /// <summary>Para onde vai a cópia da transmissão (null: só direto). O endereço é resolvido de novo a cada conexão.</summary>
+    private ServerPublish? ServerToPublish(out string? problem)
+    {
+        problem = null;
+        if (AppServices.DemoMode || Settings.ServerRole == ServerRole.None || ViaServerToggle.IsChecked != true) return null;
+        var id = AppServices.Room.SelfId != Guid.Empty ? AppServices.Room.SelfId
+            : Guid.TryParseExact(Settings.InstanceId, "N", out var instance) ? instance : Guid.NewGuid();
+        if (AppServices.Server.Target is { } target) return new ServerPublish(target.Host, target.ControlPort, target.Password, id);
+        if (Settings.ServerRole == ServerRole.Host)
+            return new ServerPublish(System.Net.IPAddress.Loopback.ToString(), AppInfo.DefaultServerControlPort, Settings.HostedServerPassword, id);
+        if (Settings.ServerEndpoint() is { } endpoint) return new ServerPublish(endpoint.Host, endpoint.Port, Settings.ServerPassword, id);
+        problem = "Coloque o endereço do servidor em Configurações › Servidor, ou desligue “Transmitir também pelo servidor”.";
+        return null;
+    }
+
+    /// <summary>A linha "No servidor X: 3 pessoas assistindo" na lista de quem assiste.</summary>
+    private void UpdateServerLive()
+    {
+        var session = _session;
+        var on = session?.Options.Server is not null;
+        ServerLive.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        if (!on) return;
+        ServerLiveText.Text = session!.ServerStatus is { Length: > 0 } status ? status : $"Conectando ao servidor {_liveServerLabel}…";
+        ServerLiveText.SetResourceReference(TextBlock.ForegroundProperty, session.ServerState switch
+        {
+            ServerLinkState.NeedsPassword or ServerLinkState.Refused => "Danger",
+            ServerLinkState.Live => "Text",
+            _ => "Amber",
+        });
+    }
+
+    private void OnSessionServerChanged()
+    {
+        if (_session is null) return;
+        UpdateServerLive();
+        RefreshViewers();
+        // A sala fica sabendo se a transmissão já está no servidor (quem está nele assiste por lá).
+        _shell.NotifyLiveStateChanged();
     }
 
     private void RefreshSources()
@@ -608,7 +707,13 @@ public partial class TransmitPage : UserControl, IShellPage
         if (_session is not null || _starting) return;
         if (AdapterCombo.Value<NetworkAdapterInfo>() is not { } adapter)
         {
-            ShowError("Nenhuma rede ativa. Conecte o Radmin VPN e tente de novo.");
+            ShowError("Nenhuma rede ativa. Conecte o Radmin VPN ou o Tailscale e tente de novo.");
+            return;
+        }
+        var publish = ServerToPublish(out var serverProblem);
+        if (serverProblem is not null)
+        {
+            ShowError(serverProblem);
             return;
         }
         var mode = SelectedMode;
@@ -698,7 +803,10 @@ public partial class TransmitPage : UserControl, IShellPage
                 mode == StreamMode.AudioOnly || Settings.AudioEnabled, Settings.AudioBitrateKbps, Settings.AdaptiveQuality, Settings.FecGroupSize, Settings.UploadMbps,
                 mode, Settings.MusicBitrateKbps, OverlayCamera: overlay,
                 AudioSeparation: AudioOptions(mode),
-                Area: mode == StreamMode.Screen ? Settings.CaptureAreaNow() : null);
+                Area: mode == StreamMode.Screen ? Settings.CaptureAreaNow() : null,
+                Server: publish,
+                // O Tailscale não repassa broadcast: o anúncio da transmissão vai direto para quem está na sala.
+                AnnounceTo: AppServices.DemoMode ? null : () => AppServices.Room.PeerAddresses);
 
             var session = new HostSession(options) { ApprovalHandler = RequestApprovalAsync };
             session.StatusChanged += message => Dispatcher.BeginInvoke(() => StateText.Text = message);
@@ -706,8 +814,10 @@ public partial class TransmitPage : UserControl, IShellPage
             session.StatisticsUpdated += stats => Dispatcher.BeginInvoke(() => ShowStatistics(stats));
             session.BandwidthMeasured += (name, mbps) => Dispatcher.BeginInvoke(() => OnBandwidthMeasured(name, mbps));
             session.RemoteRequested += request => Dispatcher.BeginInvoke(() => OnRemoteRequested(request));
+            session.ServerChanged += () => Dispatcher.BeginInvoke(OnSessionServerChanged);
             await Task.Run(session.Start);
             _liveAddress = adapter.Address;
+            _liveServerLabel = publish is null ? null : AppServices.Server.Target?.Label ?? publish.Host;
             _liveWindowExe = target.Kind == CaptureKind.Window ? WindowDiscovery.ProcessExe(target.Handle) : null;
             _session = session;
             PublishRemoteState();
@@ -719,9 +829,11 @@ public partial class TransmitPage : UserControl, IShellPage
             StartButton.Visibility = Visibility.Collapsed;
             StopButton.Visibility = Visibility.Visible;
             SetBadge("Ao vivo", "Pink", "PinkSoft");
-            StateText.Text = mode == StreamMode.AudioOnly
+            var viaServer = publish is null ? string.Empty : $" Quem está no servidor {_liveServerLabel} {(mode == StreamMode.AudioOnly ? "ouve" : "assiste")} por lá.";
+            StateText.Text = (mode == StreamMode.AudioOnly
                 ? $"Festa no ar em {adapter.Address}. Quem quiser ouvir só precisa digitar esse IP."
-                : $"Transmitindo {session.Summary} em {adapter.Address}. Quem quiser assistir só precisa digitar esse IP.";
+                : $"Transmitindo {session.Summary} em {adapter.Address}. Quem quiser assistir só precisa digitar esse IP.") + viaServer;
+            UpdateServerLive();
             StatFpsLabel.Text = mode == StreamMode.AudioOnly ? "Opus" : "FPS";
             StatBitrateLabel.Text = mode == StreamMode.AudioOnly ? "Áudio enviado" : "Vídeo";
             AudioDescription.Text = session.AudioDescription ?? (session.AudioEnabled ? "Som do PC" : "Som desligado");
@@ -765,6 +877,8 @@ public partial class TransmitPage : UserControl, IShellPage
         _viewerRows.Clear();
         NoViewers.Visibility = Visibility.Visible;
         ViewerCount.Text = string.Empty;
+        _liveServerLabel = null;
+        ServerLive.Visibility = Visibility.Collapsed;
         LockWhileLive(false);
         StartButton.Visibility = Visibility.Visible;
         StopButton.Visibility = Visibility.Collapsed;
@@ -1066,17 +1180,20 @@ public partial class TransmitPage : UserControl, IShellPage
             var row = _viewerRows.FirstOrDefault(r => r.Id == info.Id);
             if (row is null)
             {
-                _viewerRows.Add(row = new ViewerRow(info.Id, info.Name, info.Address));
+                // O servidor fica no topo da lista (é por ele que passa quem assiste por lá).
+                var index = info.IsServer ? 0 : _viewerRows.Count;
+                _viewerRows.Insert(index, row = new ViewerRow(info.Id, info.Name, info.Address, info.IsServer));
                 joined = true;
             }
             row.Update(info, audioOnly);
         }
         // Quem entrou já recebeu a lista de apps do som guardada; uma lida nova vai logo em seguida.
         if (joined) _ = PublishAudioAppsAsync();
-        var changed = StatViewers.Text != _viewerRows.Count.ToString();
+        var people = Viewers;
+        var changed = StatViewers.Text != people.ToString();
         NoViewers.Visibility = _viewerRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-        ViewerCount.Text = _viewerRows.Count switch { 0 => string.Empty, 1 => "1 pessoa", var n => $"{n} pessoas" };
-        StatViewers.Text = _viewerRows.Count.ToString();
+        ViewerCount.Text = people switch { 0 => string.Empty, 1 => "1 pessoa", var n => $"{n} pessoas" };
+        StatViewers.Text = people.ToString();
         if (changed) _shell.NotifyLiveStateChanged();
     }
 
@@ -1112,7 +1229,8 @@ public partial class TransmitPage : UserControl, IShellPage
 
     private void Kick_Click(object sender, RoutedEventArgs e)
     {
-        if ((sender as FrameworkElement)?.Tag is Guid id) _session?.Kick(id);
+        // O servidor não sai por aqui (voltaria sozinho): para tirar, encerre e transmita sem o servidor.
+        if ((sender as FrameworkElement)?.Tag is Guid id && _viewerRows.FirstOrDefault(r => r.Id == id) is { IsServer: false }) _session?.Kick(id);
     }
 
     private async void Bandwidth_Click(object sender, RoutedEventArgs e)
@@ -1657,7 +1775,7 @@ public partial class TransmitPage : UserControl, IShellPage
         public TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 
-    public sealed class ViewerRow(Guid id, string name, string address) : INotifyPropertyChanged
+    public sealed class ViewerRow(Guid id, string name, string address, bool isServer = false) : INotifyPropertyChanged
     {
         private string _details = "Conectando…";
         private bool _testing;
@@ -1668,6 +1786,17 @@ public partial class TransmitPage : UserControl, IShellPage
         public string Initial => Name.Length > 0 ? char.ToUpperInvariant(Name[0]).ToString() : "?";
         public string TestText => _testing ? "Testando…" : "Testar banda";
         public bool CanTest => !_testing;
+
+        /// <summary>(1.4.1) O servidor ScreenFlow: uma linha só para todo mundo que assiste por ele.</summary>
+        public bool IsServer { get; } = isServer;
+        public bool IsPerson => !IsServer;
+        public bool CanKick => !IsServer;
+
+        /// <summary>Quantas pessoas esta linha conta (o servidor conta quem assiste por ele).</summary>
+        public int People { get; private set; } = isServer ? 0 : 1;
+
+        public string TestTip => IsServer ? "Mede a banda até o servidor por 3 segundos (o servidor manda para cada pessoa que assiste por lá)"
+            : "Mede a banda até esta pessoa por 3 segundos";
 
         public string Details
         {
@@ -1687,11 +1816,27 @@ public partial class TransmitPage : UserControl, IShellPage
         }
 
         public void Update(ViewerInfo info, bool audioOnly)
-            => Details = info.RoundTripMs <= 0
+        {
+            People = info.People;
+            if (IsServer)
+            {
+                var names = info.AudienceNames is { Count: > 0 } list ? " (" + string.Join(", ", list.Take(4)) + (list.Count > 4 ? "…" : string.Empty) + ")" : string.Empty;
+                var who = info.Audience switch
+                {
+                    0 => "Ninguém assistindo por lá ainda",
+                    1 => $"1 pessoa assistindo por lá{names}",
+                    var n => $"{n} pessoas assistindo por lá{names}",
+                };
+                Details = info.RoundTripMs <= 0 || info.Audience == 0 ? who
+                    : $"{who} · o servidor recebe {info.ReceivedMbps:0.#} Mbps · ping {info.RoundTripMs:0} ms · perda {info.LossRate:P1}";
+                return;
+            }
+            Details = info.RoundTripMs <= 0
                 ? "Conectando…"
                 : audioOnly
                     ? $"Ouvindo · ping {info.RoundTripMs:0} ms · perda {info.LossRate:P1}"
                     : $"Recebendo {info.ReceivedMbps:0.#} Mbps · ping {info.RoundTripMs:0} ms · latência {info.LatencyMs:0} ms · perda {info.LossRate:P1}";
+        }
 
         public event PropertyChangedEventHandler? PropertyChanged;
 

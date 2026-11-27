@@ -170,9 +170,10 @@ public partial class ChatPage : UserControl, IShellPage
         var menu = new ContextMenu { PlacementTarget = element };
         menu.Items.Add(MenuItemFor("Abrir o canal", "", () => AppServices.Room.SelectText(channel.Name)));
         if (channel.HasUnread) menu.Items.Add(MenuItemFor("Marcar como lido", "", () => channel.Unread = 0));
-        if (channel.IsMine)
+        if (channel.CanEdit)
         {
             menu.Items.Add(new Separator());
+            menu.Items.Add(MenuItemFor("Mudar o nome", "", () => RenameChannel(channel.Channel)));
             menu.Items.Add(MenuItemFor("Apagar o canal", "", () => DeleteChannel(channel.Channel), danger: true));
         }
         menu.IsOpen = true;
@@ -192,9 +193,10 @@ public partial class ChatPage : UserControl, IShellPage
         var menu = new ContextMenu { PlacementTarget = element };
         if (channel.IsCurrent) menu.Items.Add(MenuItemFor("Sair da voz", "", () => _ = room.LeaveVoiceAsync()));
         else menu.Items.Add(MenuItemFor(room.InVoice ? "Mudar para este canal" : "Entrar no canal", "", () => _ = JoinVoiceAsync(channel.Name)));
-        if (channel.IsMine)
+        if (channel.CanEdit)
         {
             menu.Items.Add(new Separator());
+            menu.Items.Add(MenuItemFor("Mudar o nome", "", () => RenameChannel(channel.Channel)));
             menu.Items.Add(MenuItemFor("Apagar o canal", "", () => DeleteChannel(channel.Channel), danger: true));
         }
         menu.IsOpen = true;
@@ -219,7 +221,7 @@ public partial class ChatPage : UserControl, IShellPage
 
     private void CreateChannel(RoomChannelKind kind)
     {
-        if (ChannelDialog.Ask(Window.GetWindow(this), kind) is not { } name) return;
+        if (ChannelDialog.Ask(Window.GetWindow(this), kind, server: AppServices.Room.ViaServer) is not { } name) return;
         if (AppServices.Room.CreateChannel(kind, name) is { } error)
         {
             _shell.Toast(error, ToastKind.Warning);
@@ -232,10 +234,20 @@ public partial class ChatPage : UserControl, IShellPage
     private void DeleteChannel(RoomChannel channel)
     {
         var name = channel.Kind == RoomChannelKind.Text ? $"#{channel.Name}" : channel.Name;
+        var server = AppServices.Room.ViaServer;
         if (!ConfirmDialog.Ask(Window.GetWindow(this), $"Apagar o canal {name}?",
-                "Ele some da lista de todo mundo. Quem já conversou nele continua vendo as mensagens até fechar o ScreenFlow.", "Apagar", danger: true))
+                server
+                    ? "Ele sai do servidor e some da lista de todo mundo. Quem já conversou nele continua vendo as mensagens até fechar o ScreenFlow."
+                    : "Ele some da lista de todo mundo. Quem já conversou nele continua vendo as mensagens até fechar o ScreenFlow.", "Apagar", danger: true))
             return;
-        AppServices.Room.DeleteChannel(channel);
+        if (AppServices.Room.DeleteChannel(channel) is { } error) _shell.Toast(error, ToastKind.Warning);
+    }
+
+    /// <summary>(1.4.1) Muda o nome de um canal seu (no servidor, de qualquer canal do servidor).</summary>
+    private void RenameChannel(RoomChannel channel)
+    {
+        if (ChannelDialog.Ask(Window.GetWindow(this), channel.Kind, channel) is not { } name) return;
+        if (AppServices.Room.RenameChannel(channel, name) is { } error) _shell.Toast(error, ToastKind.Warning);
     }
 
     private static MenuItem MenuItemFor(string text, string glyph, Action action, bool danger = false)

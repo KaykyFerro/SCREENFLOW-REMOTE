@@ -2,26 +2,37 @@ using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using ScreenFlow.Core.Diagnostics;
+using ScreenFlow.Core.Network;
 using ScreenFlow.Core.Protocol;
 
 namespace ScreenFlow.Infrastructure.Network;
 
-/// <summary>Host: envia um anúncio por broadcast UDP na sub-rede do Radmin a cada segundo.</summary>
+/// <summary>Host: envia um anúncio por broadcast UDP na rede escolhida a cada segundo (e direto para quem está no Tailscale).</summary>
 public sealed class DiscoveryAnnouncer : IAsyncDisposable
 {
+    /// <summary>No máximo tantos PCs recebem o anúncio direto (além do broadcast).</summary>
+    public const int MaxDirectTargets = 64;
+
     private readonly Func<DiscoveryAnnouncement> _snapshot;
     private readonly IPAddress _bindAddress;
     private readonly IPAddress _broadcast;
     private readonly int _port;
+    private readonly Func<IReadOnlyList<IPAddress>>? _directTargets;
     private readonly CancellationTokenSource _cancellation = new();
     private Task? _loop;
 
-    public DiscoveryAnnouncer(IPAddress bindAddress, IPAddress broadcast, int port, Func<DiscoveryAnnouncement> snapshot)
+    /// <param name="directTargets">
+    /// (1.4.1) PCs que recebem o anúncio direto, além do broadcast (o Tailscale não repassa broadcast). Só valem os do
+    /// Tailscale, e só com a transmissão no Tailscale: o anúncio diz o endereço da rede escolhida.
+    /// </param>
+    public DiscoveryAnnouncer(IPAddress bindAddress, IPAddress broadcast, int port, Func<DiscoveryAnnouncement> snapshot,
+        Func<IReadOnlyList<IPAddress>>? directTargets = null)
     {
         _bindAddress = bindAddress;
         _broadcast = broadcast;
         _port = port;
         _snapshot = snapshot;
+        _directTargets = directTargets;
     }
 
     public void Start() => _loop = Task.Run(LoopAsync);
@@ -29,17 +40,55 @@ public sealed class DiscoveryAnnouncer : IAsyncDisposable
     private async Task LoopAsync()
     {
         using var socket = new UdpClient(new IPEndPoint(_bindAddress, 0)) { EnableBroadcast = true };
-        var targets = new[] { new IPEndPoint(_broadcast, _port), new IPEndPoint(IPAddress.Broadcast, _port) };
+        var broadcasts = new[] { new IPEndPoint(_broadcast, _port), new IPEndPoint(IPAddress.Broadcast, _port) };
+        IReadOnlyList<IPEndPoint> direct = [];
+        var directAt = long.MinValue;
         while (!_cancellation.IsCancellationRequested)
         {
             try
             {
                 var payload = _snapshot().ToBytes();
-                foreach (var target in targets) await socket.SendAsync(payload, target, _cancellation.Token);
+                foreach (var target in broadcasts) await socket.SendAsync(payload, target, _cancellation.Token);
+                if (_directTargets is not null)
+                {
+                    if (Environment.TickCount64 - directAt >= 5000)
+                    {
+                        directAt = Environment.TickCount64;
+                        direct = DirectTargets();
+                    }
+                    foreach (var target in direct)
+                    {
+                        try { await socket.SendAsync(payload, target, _cancellation.Token); }
+                        catch (SocketException) { }
+                    }
+                }
             }
             catch (OperationCanceledException) { break; }
             catch (Exception exception) { Log.Debug($"Anúncio de descoberta falhou: {exception.Message}"); }
             try { await Task.Delay(1000, _cancellation.Token); } catch (OperationCanceledException) { break; }
+        }
+    }
+
+    /// <summary>
+    /// Os PCs da sala no Tailscale, quando a transmissão está no Tailscale: ele não repassa broadcast (o Radmin VPN e a
+    /// rede local repassam, então lá o broadcast já basta).
+    /// </summary>
+    private IReadOnlyList<IPEndPoint> DirectTargets()
+    {
+        if (!TailscaleAddress.IsTailscale(_bindAddress)) return [];
+        try
+        {
+            return _directTargets!()
+                .Where(a => TailscaleAddress.IsTailscale(a) && !a.Equals(_bindAddress))
+                .Distinct()
+                .Take(MaxDirectTargets)
+                .Select(a => new IPEndPoint(a, _port))
+                .ToArray();
+        }
+        catch (Exception exception)
+        {
+            Log.Debug($"Anúncio direto: {exception.Message}");
+            return [];
         }
     }
 

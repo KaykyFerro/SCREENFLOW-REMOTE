@@ -22,6 +22,9 @@ public static class AppInfo
     public const string GitHubOwner = "KaykyFerro";
     public const string GitHubRepository = "SCREENFLOW-REMOTE";
 
+    /// <summary>(1.4.1) O guia do servidor ScreenFlow (montar o PC servidor no Linux ou no Windows).</summary>
+    public const string ServerGuideUrl = "https://github.com/" + GitHubOwner + "/" + GitHubRepository + "/blob/main/docs/SERVIDOR.md";
+
     public static Version Version { get; } =
         typeof(AppInfo).Assembly.GetName().Version ?? new Version(1, 0, 0);
 
