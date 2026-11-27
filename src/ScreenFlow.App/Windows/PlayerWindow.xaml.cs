@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
@@ -60,6 +61,14 @@ public partial class PlayerWindow : Window
 
     // Controles de quem assiste (1.2.0)
     private readonly DispatcherTimer _mediaClock = new() { Interval = TimeSpan.FromMilliseconds(500) };
+    /// <summary>Espera um pouco antes de tirar os botões da música (entre uma música e outra o Spotify some por um instante).</summary>
+    private readonly DispatcherTimer _mediaGone = new() { Interval = TimeSpan.FromSeconds(4) };
+    private static readonly TimeSpan MediaHold = TimeSpan.FromSeconds(4);
+    private DateTime _mediaSeenAt = DateTime.MinValue;
+    private bool _barMediaShown;
+    private SystemMediaSession? _systemMedia;
+    private string? _coverKey;
+    private byte[]? _coverBytes;
     private bool _remoteOn;
     private RemoteStateMessage _remote = RemoteStateMessage.Disabled;
     private MediaStateMessage _media = MediaStateMessage.None;
@@ -96,7 +105,16 @@ public partial class PlayerWindow : Window
             UpdateLayers();
         });
         session.RemoteChanged += () => Dispatcher.BeginInvoke(OnRemoteChanged);
-        _mediaClock.Tick += (_, _) => UpdateMediaPosition();
+        _mediaClock.Tick += (_, _) =>
+        {
+            UpdateMediaPosition();
+            UpdateSystemMedia();
+        };
+        _mediaGone.Tick += (_, _) =>
+        {
+            _mediaGone.Stop();
+            ShowRemote();
+        };
         // As janelinhas acompanham a barra quando ela vai para a janela sobreposta (o nome do botão não é achado lá).
         RemoteQualityPopup.PlacementTarget = QualityButton;
         RemoteAppsPopup.PlacementTarget = AppsButton;
@@ -104,7 +122,11 @@ public partial class PlayerWindow : Window
         CompositionTarget.Rendering += OnRendering;
         _hideControls.Tick += (_, _) => HideControls();
         _cameraWatch.Tick += (_, _) => UpdateCameraPip();
-        SourceInitialized += (_, _) => ThemeManager.ApplyFrame(this);
+        SourceInitialized += (_, _) =>
+        {
+            ThemeManager.ApplyFrame(this);
+            StartSystemMedia();
+        };
         Loaded += (_, _) => OnLoaded();
         LocationChanged += (_, _) => RepositionOverlays();
         SizeChanged += (_, _) =>
@@ -234,6 +256,98 @@ public partial class PlayerWindow : Window
         else _cameraWatch.Stop();
         UpdateLayers();
         ShowRemote();
+    }
+
+    // ───────────────────────── Controles de mídia do Windows (1.3.0) ─────────────────────────
+
+    /// <summary>
+    /// O player aparece no Windows como um player de música: no painel de mídia, nas teclas de mídia e nos apps que
+    /// mostram o que está tocando.
+    /// </summary>
+    private void StartSystemMedia()
+    {
+        if (_demo || AppServices.DemoMode || !AppServices.Settings.Current.SystemMediaControls) return;
+        _systemMedia = SystemMediaSession.Create(new WindowInteropHelper(this).Handle);
+        if (_systemMedia is null) return;
+        _systemMedia.ButtonPressed += button => Dispatcher.BeginInvoke(() => OnSystemMediaButton(button));
+        _systemMedia.SeekRequested += position => Dispatcher.BeginInvoke(() =>
+        {
+            if (RemoteMediaControls && _media.CanSeek) _ = SendMediaAsync(MediaCommandMessage.Seek, position.TotalSeconds);
+        });
+        UpdateSystemMedia();
+    }
+
+    /// <summary>Os botões mexem na música de quem transmite quando ele deixa; senão, tocar e pausar ligam e desligam o som aqui.</summary>
+    private bool RemoteMediaControls => _remoteOn && _remote.CanControlMedia && _media.Available;
+
+    private bool LocallyMuted => VolumeSlider.Value <= 0.001;
+
+    private void OnSystemMediaButton(SystemMediaButton button)
+    {
+        if (_shuttingDown) return;
+        ShowControls();
+        if (RemoteMediaControls)
+        {
+            switch (button)
+            {
+                case SystemMediaButton.Play when !_media.Playing:
+                case SystemMediaButton.Pause when _media.Playing:
+                    MediaPlayPause_Click(this, new RoutedEventArgs());
+                    break;
+                case SystemMediaButton.Next when _media.CanNext:
+                    _ = SendMediaAsync(MediaCommandMessage.Next);
+                    break;
+                case SystemMediaButton.Previous when _media.CanPrevious:
+                    _ = SendMediaAsync(MediaCommandMessage.Previous);
+                    break;
+            }
+            return;
+        }
+        if ((button == SystemMediaButton.Play && LocallyMuted) || (button is SystemMediaButton.Pause or SystemMediaButton.Stop && !LocallyMuted)) ToggleMute();
+    }
+
+    /// <summary>Conta para o Windows o que está tocando: a música de quem transmite (com a capa) ou a própria transmissão.</summary>
+    private void UpdateSystemMedia()
+    {
+        if (_systemMedia is null || _shuttingDown) return;
+        var host = Session.HostName.Length > 0 ? Session.HostName : _host;
+        var remote = RemoteMediaControls;
+        var playingHere = !LocallyMuted;
+        SystemMediaState state;
+        if (_remoteOn && _media.Available)
+        {
+            var media = _media;
+            state = new SystemMediaState(
+                media.Title.Length > 0 ? media.Title : media.AppName,
+                media.Artist.Length > 0 ? media.Artist : media.AppName,
+                $"{host} · ScreenFlow",
+                CoverBytes(media.Cover),
+                remote ? media.Playing : playingHere,
+                CanPlayPause: !remote || media.CanPlayPause,
+                CanPrevious: remote && media.CanPrevious,
+                CanNext: remote && media.CanNext,
+                Position: TimeSpan.FromSeconds(Math.Round(Session.MediaPosition)),
+                Duration: TimeSpan.FromSeconds(Math.Round(media.DurationSeconds)),
+                CanSeek: remote && media.CanSeek);
+        }
+        else
+        {
+            var title = _mode == StreamMode.AudioOnly ? $"Festa de música de {host}" : $"Transmissão de {host}";
+            state = new SystemMediaState(title, "ScreenFlow · ao vivo", host, null, playingHere, CanPlayPause: true, CanPrevious: false, CanNext: false);
+        }
+        _systemMedia.Update(state with { Connecting = Session.State != ConnectionState.Connected });
+    }
+
+    /// <summary>A capa em bytes (a mesma matriz enquanto a capa não muda: o Windows só lê de novo quando ela troca).</summary>
+    private byte[]? CoverBytes(string? base64)
+    {
+        if (base64 == _coverKey) return _coverBytes;
+        _coverKey = base64;
+        _coverBytes = null;
+        if (string.IsNullOrEmpty(base64) || base64.Length > RemoteControl.MaxCoverBytes * 4 / 3 + 4) return null;
+        try { _coverBytes = Convert.FromBase64String(base64); }
+        catch (FormatException) { _coverBytes = null; }
+        return _coverBytes;
     }
 
     /// <summary>Caminho pela CPU: copia o frame mais recente na hora da composição (sem fila, sem latência acumulada).</summary>
@@ -377,6 +491,7 @@ public partial class PlayerWindow : Window
         UpdateLayers();
         if (state == ConnectionState.Connected) _hideControls.Start();
         else ShowControls();
+        UpdateSystemMedia();
     }
 
     private void ShowStatistics(ViewerStatistics s)
@@ -432,6 +547,7 @@ public partial class PlayerWindow : Window
         Session.Volume = (float)e.NewValue;
         MuteButton.Content = e.NewValue <= 0.001 ? "" : e.NewValue < 0.34 ? "" : e.NewValue < 0.67 ? "" : "";
         AppServices.Settings.Current.Volume = e.NewValue;
+        if ((e.OldValue <= 0.001) != (e.NewValue <= 0.001)) UpdateSystemMedia();
     }
 
     private void Mute_Click(object sender, RoutedEventArgs e) => ToggleMute();
@@ -591,36 +707,70 @@ public partial class PlayerWindow : Window
         var playGlyph = media.Playing ? "\uE769" : "\uE768";
         var playTip = media.Playing ? "Pausar (vale para todo mundo)" : "Tocar (vale para todo mundo)";
 
-        BarMedia.Visibility = controls ? Visibility.Visible : Visibility.Collapsed;
-        BarMediaTitle.Text = title;
-        BarMediaArtist.Text = media.Artist.Length > 0 ? media.Artist : media.AppName;
-        BarMedia.ToolTip = media.Artist.Length > 0 ? $"{title} · {media.Artist} ({media.AppName})" : $"{title} ({media.AppName})";
-        BarPlayPause.Content = playGlyph;
-        BarPlayPause.ToolTip = playTip;
-        BarPrevious.IsEnabled = PartyPrevious.IsEnabled = media.CanPrevious;
-        BarNext.IsEnabled = PartyNext.IsEnabled = media.CanNext;
-        BarPlayPause.IsEnabled = PartyPlayPause.IsEnabled = media.CanPlayPause;
+        // Entre uma música e outra o app some dos controles por um instante: o que mostra a música espera uns segundos
+        // antes de sair (com os botões desligados), para a barra e o cartão não ficarem sumindo e voltando a cada música.
+        var now = DateTime.UtcNow;
+        if (playing) _mediaSeenAt = now;
+        var hold = !playing && on && now - _mediaSeenAt < MediaHold;
+        if (hold && !_mediaGone.IsEnabled) _mediaGone.Start();
+        else if (!hold) _mediaGone.Stop();
 
-        PartyMedia.Visibility = playing && !video ? Visibility.Visible : Visibility.Collapsed;
-        PartyDetail.Visibility = PartyMedia.Visibility == Visibility.Visible ? Visibility.Collapsed : Visibility.Visible;
-        PartyMediaApp.Text = $"{media.AppName} · {(media.Playing ? "tocando agora" : "pausado")}";
-        PartyMediaTitle.Text = title;
-        PartyMediaArtist.Text = media.Artist;
-        PartyMediaArtist.Visibility = media.Artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        PartyMediaButtons.Visibility = controls ? Visibility.Visible : Visibility.Collapsed;
-        PartyPlayGlyph.Text = playGlyph;
-        PartyPlayPause.ToolTip = playTip;
-        ShowCover(playing ? media.Cover : null);
-        UpdateMediaPosition();
+        if (controls)
+        {
+            BarMediaTitle.Text = title;
+            BarMediaArtist.Text = media.Artist.Length > 0 ? media.Artist : media.AppName;
+            BarMedia.ToolTip = media.Artist.Length > 0 ? $"{title} · {media.Artist} ({media.AppName})" : $"{title} ({media.AppName})";
+            BarPlayPause.Content = playGlyph;
+            BarPlayPause.ToolTip = playTip;
+        }
+        _barMediaShown = controls || (hold && state.CanControlMedia && _barMediaShown);
+        BarMedia.Visibility = _barMediaShown ? Visibility.Visible : Visibility.Collapsed;
+        BarPrevious.IsEnabled = PartyPrevious.IsEnabled = controls && media.CanPrevious;
+        BarNext.IsEnabled = PartyNext.IsEnabled = controls && media.CanNext;
+        BarPlayPause.IsEnabled = PartyPlayPause.IsEnabled = controls && media.CanPlayPause;
+
+        var partyShown = !video && (playing || (hold && PartyMedia.Visibility == Visibility.Visible));
+        PartyMedia.Visibility = partyShown ? Visibility.Visible : Visibility.Collapsed;
+        PartyDetail.Visibility = partyShown ? Visibility.Collapsed : Visibility.Visible;
+        if (playing)
+        {
+            PartyMediaApp.Text = $"{media.AppName} · {(media.Playing ? "tocando agora" : "pausado")}";
+            PartyMediaTitle.Text = title;
+            PartyMediaArtist.Text = media.Artist;
+            PartyMediaArtist.Visibility = media.Artist.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            PartyMediaButtons.Visibility = controls ? Visibility.Visible : Visibility.Collapsed;
+            PartyPlayGlyph.Text = playGlyph;
+            PartyPlayPause.ToolTip = playTip;
+        }
+        if (playing || !hold)
+        {
+            ShowCover(playing ? media.Cover : null);
+            UpdateMediaPosition();
+        }
         if (playing && media.Playing) _mediaClock.Start();
         else _mediaClock.Stop();
         FitControlBar();
+        UpdateSystemMedia();
     }
 
-    /// <summary>Com o player estreito, a barra perde o nome da música (os botões continuam).</summary>
+    /// <summary>
+    /// A barra tem tamanho fixo: tudo nela tem largura fixa, menos o nome da música, que fica com o espaço que sobra (até
+    /// 260). Assim ela só muda de tamanho quando a janela muda ou quando aparece um botão novo, nunca porque a música
+    /// trocou. Com o player estreito, o nome da música sai (os botões continuam).
+    /// </summary>
     private void FitControlBar()
     {
-        BarMediaInfo.Visibility = ActualWidth is 0 or >= 1150 ? Visibility.Visible : Visibility.Collapsed;
+        if (!IsInitialized) return;
+        BarMediaInfo.Visibility = Visibility.Collapsed;
+        BarContent.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+        var fixedWidth = BarContent.DesiredSize.Width + ControlBar.Padding.Left + ControlBar.Padding.Right + 2;
+        var window = ActualWidth > 0 ? ActualWidth : Width;
+        var room = Math.Floor(window - 48 - fixedWidth - BarMediaInfo.Margin.Left - BarMediaInfo.Margin.Right);
+        if (_barMediaShown && room >= 110)
+        {
+            BarMediaInfo.Width = Math.Min(room, 260);
+            BarMediaInfo.Visibility = Visibility.Visible;
+        }
     }
 
     /// <summary>A posição anda sozinha entre uma atualização e outra do host (parada se estiver pausado).</summary>
@@ -835,6 +985,9 @@ public partial class PlayerWindow : Window
         _hideControls.Stop();
         _cameraWatch.Stop();
         _mediaClock.Stop();
+        _mediaGone.Stop();
+        _systemMedia?.Dispose();
+        _systemMedia = null;
         RemoteQualityPopup.IsOpen = RemoteAppsPopup.IsOpen = false;
         _controlsOverlay?.Close();
         _statsOverlay?.Close();

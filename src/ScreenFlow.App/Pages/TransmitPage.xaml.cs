@@ -226,7 +226,8 @@ public partial class TransmitPage : UserControl, IShellPage
 
     /// <summary>Como separar o som do PC para a transmissão neste modo (a festa pode ir com o som de um app só).</summary>
     private SystemAudioOptions AudioOptions(StreamMode mode)
-        => new(Settings.SeparateAppAudio, Settings.MutedApps, mode == StreamMode.AudioOnly ? Settings.PartyApp : null);
+        => new(Settings.SeparateAppAudio, Settings.MutedApps, mode == StreamMode.AudioOnly ? Settings.PartyApp : null,
+            Settings.KeepStreamVolume);
 
     /// <summary>"Mandar a câmera junto": mostra a escolha da câmera e já procura as câmeras do PC.</summary>
     private void CameraWithScreen_Changed(object sender, RoutedEventArgs e)

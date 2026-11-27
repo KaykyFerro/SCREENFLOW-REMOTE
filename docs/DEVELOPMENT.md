@@ -40,11 +40,11 @@ O instalador sai em `artifacts/ScreenFlow-Setup-win-x64.exe`.
 
 ## Lançar uma versão
 
-Pelo site: **Releases › Draft a new release**, crie a tag nova `v1.2.0` na `main` e clique em **Publish release**. Ou pelo git:
+Pelo site: **Releases › Draft a new release**, crie a tag nova `v1.3.0` na `main` e clique em **Publish release**. Ou pelo git:
 
 ```powershell
-git tag v1.2.0
-git push origin v1.2.0
+git tag v1.3.0
+git push origin v1.3.0
 ```
 
 Nos dois casos o workflow `release.yml` usa a tag como versão, gera o instalador e o `.sha256` e anexa ao release (pelo git, ele também cria o release). Leva uns 10 minutos. O app instalado só oferece a versão nova depois que o instalador estiver anexado.
@@ -55,6 +55,7 @@ Nos dois casos o workflow `release.yml` usa a tag como versão, gera o instalado
 2. No host: Transmitir, copie o IP, Começar.
 3. No viewer: Assistir, cole o IP, Conectar.
 4. No viewer, F3 mostra FPS real, latência e perda. No host, **Testar banda** mede o upload até aquele viewer.
-5. Para a 1.1.1: troque a foto em Configurações › Seu perfil e veja ela mudar no outro PC; mande uma imagem no chat (Ctrl+V com um print); transmita uma janela do Spotify ou do navegador e use os controles da música; faça uma festa só com o Spotify.
+5. Para a 1.1.1: troque a foto em Configurações › Geral e veja ela mudar no outro PC; mande uma imagem no chat (Ctrl+V com um print); transmita uma janela do Spotify ou do navegador e use os controles da música; faça uma festa só com o Spotify.
 6. Para a 1.2.0: no player, troque a qualidade, pause e pule a música tocando no host e tire um app do som; no host, veja o aviso com o nome de quem pediu e desligue **Quem assiste pode mexer nos controles** para os botões sumirem. Confira o cartão da placa de vídeo na Visão geral e o texto do Diagnóstico.
-7. Logs: `%LOCALAPPDATA%\ScreenFlow\logs`. As fotos e imagens ficam em `%LOCALAPPDATA%\ScreenFlow\imagens`.
+7. Para a 1.3.0: crie um canal de voz na Sala da rede, entre nele com um PC e confira que o outro (no Geral) não ouve; mude o volume de uma pessoa pelo botão direito; no host, abaixe o volume do Windows até o mudo com a transmissão no ar e confira que quem assiste continua ouvindo igual; no viewer, veja o ScreenFlow no painel do volume do Windows e use as teclas de mídia na festa; ligue **Guardar o chat no Google Drive** e confira a pasta **ScreenFlow Chat** no Drive. Com um PC na 1.2.0, confira que ele só vê o #geral e a voz Geral.
+8. Logs: `%LOCALAPPDATA%\ScreenFlow\logs`. As fotos e imagens ficam em `%LOCALAPPDATA%\ScreenFlow\imagens`.

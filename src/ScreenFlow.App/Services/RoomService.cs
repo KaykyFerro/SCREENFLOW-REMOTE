@@ -1,5 +1,7 @@
 using System.Collections.ObjectModel;
+using System.Collections.Specialized;
 using System.ComponentModel;
+using System.Globalization;
 using System.Net;
 using System.Runtime.InteropServices;
 using System.Windows.Media;
@@ -15,12 +17,18 @@ using ScreenFlow.Infrastructure.Room;
 namespace ScreenFlow.App.Services;
 
 /// <summary>
-/// A sala da rede vista pela interface: quem está na rede, quem está na voz e o chat, em listas que as telas ligam
-/// direto. Tudo aqui roda na thread da interface; o que chega da rede é trazido para cá antes de mexer nas listas.
+/// A sala da rede vista pela interface, como um servidor do Discord (1.3.0): os canais de texto com as conversas, os
+/// canais de voz com quem está em cada um, quem está na rede e o chat guardado numa pasta. Tudo aqui roda na thread da
+/// interface; o que chega da rede é trazido para cá antes de mexer nas listas.
 /// </summary>
 public sealed class RoomService
 {
     private static readonly TimeSpan GroupWindow = TimeSpan.FromMinutes(5);
+    private static readonly StringComparer Names = StringComparer.Create(CultureInfo.GetCultureInfo("pt-BR"), ignoreCase: true);
+
+    /// <summary>Mensagens mostradas por canal de texto (as mais antigas saem da tela).</summary>
+    public const int ChannelCapacity = 300;
+
     private readonly Dispatcher _dispatcher;
     private readonly DispatcherTimer _speakingTimer;
     private readonly Dictionary<Guid, RoomPeer> _peers = [];
@@ -29,29 +37,78 @@ public sealed class RoomService
     private readonly Dictionary<string, ImageSource?> _photos = [];
     /// <summary>A última foto que cada pessoa mostrou (fica para as mensagens de quem já saiu).</summary>
     private readonly Dictionary<Guid, string?> _avatars = [];
+    /// <summary>Os canais de texto pelo nome comparável, cada um com a sua conversa (mesmo fora da lista).</summary>
+    private readonly Dictionary<string, TextChannelRow> _textRows = [];
+    private readonly Dictionary<string, VoiceChannelRow> _voiceRows = [];
+    /// <summary>Uma linha por pessoa na voz: a mesma aparece no canal dela e no painel do menu lateral.</summary>
+    private readonly Dictionary<Guid, VoiceMemberRow> _memberRows = [];
+    private readonly Dictionary<Guid, double> _volumeBeforeMute = [];
+    /// <summary>Mensagens já na tela (quem mandou, id), para não repetir quando chegam de novo.</summary>
+    private readonly HashSet<(Guid, ulong)> _shown = [];
+    private readonly HashSet<string> _restoring = [];
+    private List<string> _voiceInUse = [];
+    private TextChannelRow _currentText;
     private NetworkRoom? _room;
+    private ChatArchive? _archive;
+    private (bool Enabled, string? Folder)? _archiveApplied;
+    private int _archiveVersion;
     private int _refreshQueued;
-    private int _unread;
+    private int _photosVersion;
+    private int _photosShown = -1;
     private bool _joining;
     private bool _demo;
     private bool _demoVoice;
+    private string _demoVoiceChannel = RoomChannels.DefaultVoiceName;
     private bool _demoMuted;
     private bool _demoDeafened;
+    private readonly List<(string Channel, VoiceMemberState State)> _demoMembers = [];
+    private readonly List<(RoomChannel Channel, string Owner)> _demoChannels = [];
 
     public RoomService(Dispatcher dispatcher)
     {
         _dispatcher = dispatcher;
         _speakingTimer = new DispatcherTimer(DispatcherPriority.Background, dispatcher) { Interval = TimeSpan.FromMilliseconds(150) };
         _speakingTimer.Tick += (_, _) => UpdateSpeaking();
+        _currentText = TextRow(null);
+        _currentText.IsSelected = true;
+        RebuildChannels();
     }
 
     /// <summary>Os outros PCs da sala (você não entra nesta lista).</summary>
     public ObservableCollection<RoomPersonRow> People { get; } = [];
 
-    /// <summary>Quem está na voz agora, você incluído, em ordem de nome.</summary>
+    /// <summary>
+    /// Quem está no seu canal de voz, você incluído, em ordem de nome. Fora da voz, quem está no canal em que o botão
+    /// Entrar põe você (<see cref="SuggestedVoiceChannel"/>).
+    /// </summary>
     public ObservableCollection<VoiceMemberRow> VoiceMembers { get; } = [];
 
-    public ObservableCollection<ChatRow> Messages { get; } = [];
+    /// <summary>Os canais de texto: os padrão primeiro, depois os criados pelo pessoal da sala.</summary>
+    public ObservableCollection<TextChannelRow> TextChannels { get; } = [];
+
+    /// <summary>Os canais de voz, cada um com quem está nele.</summary>
+    public ObservableCollection<VoiceChannelRow> VoiceChannels { get; } = [];
+
+    /// <summary>O canal de texto aberto no chat.</summary>
+    public TextChannelRow CurrentText => _currentText;
+
+    /// <summary>A conversa do canal de texto aberto.</summary>
+    public ObservableCollection<ChatRow> Messages => _currentText.Messages;
+
+    /// <summary>Trocou o canal de texto aberto.</summary>
+    public event Action? CurrentTextChanged;
+
+    /// <summary>O canal de voz em que você está (null fora da voz).</summary>
+    public string? VoiceChannel => _demo ? (_demoVoice ? _demoVoiceChannel : null) : _room?.VoiceChannel;
+
+    /// <summary>Fora da voz, o canal em que o botão Entrar põe você: o que tem mais gente, senão o último em que você esteve.</summary>
+    public string SuggestedVoiceChannel { get; private set; } = RoomChannels.DefaultVoiceName;
+
+    /// <summary>Quantas pessoas estão em algum canal de voz, você incluído.</summary>
+    public int VoiceCount => _memberRows.Count;
+
+    /// <summary>Quantas pessoas da sala estão numa versão sem canais (1.2 ou mais antiga): só veem o #geral.</summary>
+    public int OldVersionCount => _peers.Values.Count(p => !p.Presence.SupportsChannels);
 
     public Guid SelfId { get; private set; }
     public string SelfName => AppServices.Settings.Current.DeviceName;
@@ -73,13 +130,21 @@ public sealed class RoomService
     public bool Deafened => _demo ? _demoDeafened : _room?.Deafened == true;
     public bool IsJoining => _joining;
 
-    /// <summary>Mensagens de outras pessoas que chegaram com o chat fechado.</summary>
-    public int Unread => _unread;
+    /// <summary>Mensagens de outras pessoas que chegaram sem ninguém ver, somando todos os canais.</summary>
+    public int Unread
+    {
+        get
+        {
+            var total = 0;
+            foreach (var row in _textRows.Values) total += row.Unread;
+            return total;
+        }
+    }
 
     /// <summary>A tela do chat está aberta e na frente (quem decide é a janela principal).</summary>
     public Func<bool>? IsChatInFront { get; set; }
 
-    /// <summary>Pessoas, voz ou mudo mudaram: o painel da voz e a bandeja se atualizam.</summary>
+    /// <summary>Pessoas, canais, voz ou mudo mudaram: o painel da voz e a bandeja se atualizam.</summary>
     public event Action? Changed;
     public event Action? UnreadChanged;
 
@@ -115,7 +180,11 @@ public sealed class RoomService
             // Quem pede um arquivo que este PC tem (a sua foto, uma imagem do chat) recebe daqui.
             BlobSource = blobs.Get,
             HasBlob = blobs.Has,
+            CreatedChannels = settings.MyChannels,
         };
+        // O volume de cada pessoa que você ajustou continua o mesmo nas próximas vezes.
+        foreach (var (key, volume) in settings.PeerVolumes)
+            if (Guid.TryParseExact(key, "N", out var peer)) room.SetPeerVolume(peer, (float)volume);
         room.SetMuted(settings.VoiceMuted);
         room.PeersChanged += QueueRefresh;
         room.VoiceChanged += QueueRefresh;
@@ -135,6 +204,8 @@ public sealed class RoomService
         AppServices.Settings.Saved += OnSettingsSaved;
         // O id deste PC na sala precisa continuar o mesmo nas próximas vezes.
         try { AppServices.Settings.Save(); } catch (Exception exception) { Log.Warn($"Configurações não salvas: {exception.Message}"); }
+        if (settings.LastTextChannel is { } last) SelectText(last);
+        _ = UpdateArchiveAsync();
         QueueRefresh();
     }
 
@@ -145,6 +216,10 @@ public sealed class RoomService
         var room = _room;
         _room = null;
         if (room is not null) await room.DisposeAsync();
+        var archive = _archive;
+        _archive = null;
+        _archiveVersion++;
+        if (archive is not null) await CloseArchiveAsync(archive);
     }
 
     private void OnSettingsSaved(AppSettings settings)
@@ -155,10 +230,12 @@ public sealed class RoomService
             return;
         }
         ProfileChanged?.Invoke();
+        if (_archiveApplied != (settings.ChatArchiveEnabled, settings.ChatArchiveFolder)) _ = UpdateArchiveAsync();
         if (_room is not { } room) return;
         room.Volume = (float)settings.VoiceVolume;
         room.Sensitivity = settings.VoiceSensitivity;
         room.SoundsEnabled = settings.VoiceSounds;
+        room.CreatedChannels = settings.MyChannels;
         var avatar = SelfAvatarRef();
         if (room.Local.Name != settings.DeviceName || room.Local.Avatar != avatar)
         {
@@ -174,8 +251,9 @@ public sealed class RoomService
 
     private async Task RejoinAsync()
     {
+        var channel = VoiceChannel;
         await LeaveVoiceAsync();
-        if (await JoinVoiceAsync() is { } error) Log.Warn($"Troca de microfone: {error}");
+        if (await JoinVoiceAsync(channel) is { } error) Log.Warn($"Troca de microfone: {error}");
     }
 
     /// <summary>O que este PC mostra para a sala (transmissão, assistindo). O nome e a foto vêm sempre das configurações.</summary>
@@ -193,6 +271,7 @@ public sealed class RoomService
         var settings = AppServices.Settings.Current;
         settings.AvatarId = avatar is null ? null : AppServices.Blobs.Put(avatar);
         AppServices.Settings.Save();
+        _photosVersion++;
         if (_demo) ProfileChanged?.Invoke();
     }
 
@@ -221,35 +300,56 @@ public sealed class RoomService
     private void OnBlobArrived(string id)
     {
         _photos.Remove(id);
+        _photosVersion++;
         Refresh();
-        foreach (var row in Messages)
-            if (row.Image?.Id == id) LoadPicture(row);
+        var referenced = false;
+        foreach (var row in AllMessages())
+        {
+            if (row.Image?.Id != id) continue;
+            referenced = true;
+            LoadPicture(row);
+        }
+        // A imagem de uma mensagem que já está na pasta do chat guardado vai para lá também.
+        if (referenced && _archive is { } archive && AppServices.Blobs.Get(id) is { } data) archive.AddImage(id, data);
     }
 
     private void OnBlobFailed(string id)
     {
-        foreach (var row in Messages)
+        foreach (var row in AllMessages())
             if (row.Image?.Id == id && row.Picture is null) row.ImageState = ChatImageState.Failed;
     }
 
+    private IEnumerable<ChatRow> AllMessages() => _textRows.Values.SelectMany(channel => channel.Messages);
+
     // ───────────────────────── Voz ─────────────────────────
 
-    /// <summary>Entra na voz da rede. Retorna o motivo quando não deu (microfone ausente ou bloqueado).</summary>
-    public async Task<string?> JoinVoiceAsync()
+    /// <summary>
+    /// Entra num canal de voz (null: o <see cref="SuggestedVoiceChannel"/>). Já na voz, só troca de canal, sem desligar o
+    /// microfone. Retorna o motivo quando não deu (microfone ausente ou bloqueado).
+    /// </summary>
+    public async Task<string?> JoinVoiceAsync(string? channel = null)
     {
+        var name = RoomChannels.CleanName(RoomChannelKind.Voice, channel ?? SuggestedVoiceChannel) is { Length: > 0 } clean ? clean : RoomChannels.DefaultVoiceName;
+        RememberVoice(name);
         if (_demo)
         {
             _demoVoice = true;
-            Changed?.Invoke();
+            _demoVoiceChannel = name;
+            ShowDemoVoice();
             return null;
         }
         if (_room is not { IsRunning: true } room) return Error;
-        if (room.InVoice || _joining) return null;
+        if (room.InVoice)
+        {
+            room.MoveVoice(name);
+            return null;
+        }
+        if (_joining) return null;
         _joining = true;
         Changed?.Invoke();
         try
         {
-            await Task.Run(() => room.JoinVoice());
+            await Task.Run(() => room.JoinVoice(channel: name));
             return null;
         }
         catch (Exception exception)
@@ -264,12 +364,22 @@ public sealed class RoomService
         }
     }
 
+    /// <summary>O último canal de voz fica salvo: o botão Entrar volta para ele quando ninguém está na voz.</summary>
+    private void RememberVoice(string name)
+    {
+        var settings = AppServices.Settings.Current;
+        var value = RoomChannels.IsDefaultVoice(name) ? null : name;
+        if (_demo || settings.LastVoiceChannel == value) return;
+        settings.LastVoiceChannel = value;
+        AppServices.Settings.Save();
+    }
+
     public async Task LeaveVoiceAsync()
     {
         if (_demo)
         {
             _demoVoice = false;
-            Changed?.Invoke();
+            ShowDemoVoice();
             return;
         }
         if (_room is { } room) await room.LeaveVoiceAsync();
@@ -326,11 +436,223 @@ public sealed class RoomService
         };
     }
 
+    // ───────────────────────── Volume de cada pessoa ─────────────────────────
+
+    /// <summary>O volume de uma pessoa só para você (0 = silenciada, 1 = normal, até 2).</summary>
+    public double PeerVolume(Guid id)
+        => id != SelfId && AppServices.Settings.Current.PeerVolumes.TryGetValue(id.ToString("N"), out var volume) ? volume : 1;
+
+    /// <summary>
+    /// Muda o volume de uma pessoa só para você (como no Discord). Fica salvo para as próximas vezes; durante o arraste
+    /// do controle passe <paramref name="save"/> false e salve no fim.
+    /// </summary>
+    public void SetPeerVolume(Guid id, double volume, bool save = true)
+    {
+        if (id == SelfId || id == Guid.Empty) return;
+        volume = Math.Round(Math.Clamp(volume, 0, 2), 2);
+        var volumes = AppServices.Settings.Current.PeerVolumes;
+        var key = id.ToString("N");
+        if (Math.Abs(volume - 1) < 0.005) volumes.Remove(key);
+        else volumes[key] = volume;
+        _room?.SetPeerVolume(id, (float)volume);
+        if (_memberRows.TryGetValue(id, out var row)) row.Volume = volume;
+        if (save) AppServices.Settings.Save();
+    }
+
+    /// <summary>Silencia (ou volta a ouvir) uma pessoa só para você. Voltar devolve o volume de antes.</summary>
+    public void SetPeerMuted(Guid id, bool muted)
+    {
+        var current = PeerVolume(id);
+        if (muted)
+        {
+            if (current <= 0.001) return;
+            _volumeBeforeMute[id] = current;
+            SetPeerVolume(id, 0);
+        }
+        else if (current <= 0.001) SetPeerVolume(id, _volumeBeforeMute.Remove(id, out var before) ? before : 1);
+    }
+
+    // ───────────────────────── Canais ─────────────────────────
+
+    /// <summary>
+    /// Cria um canal seu: aparece para todo mundo da sala enquanto você estiver nela. Um canal que já existe só é aberto.
+    /// Retorna o motivo quando não deu.
+    /// </summary>
+    public string? CreateChannel(RoomChannelKind kind, string name)
+    {
+        if (RoomChannels.Create(kind, name) is not { } channel) return "Escolha um nome com letras ou números.";
+        var existing = kind == RoomChannelKind.Text
+            ? TextChannels.Select(c => c.Channel).FirstOrDefault(c => c.Same(channel))
+            : VoiceChannels.Select(c => c.Channel).FirstOrDefault(c => c.Same(channel));
+        if (existing is not null)
+        {
+            if (kind == RoomChannelKind.Text) SelectText(existing.Name);
+            return null;
+        }
+        var settings = AppServices.Settings.Current;
+        if (settings.MyChannels.Count >= RoomChannels.MaxPerPerson)
+            return $"Cada PC cria até {RoomChannels.MaxPerPerson} canais. Apague um dos seus (botão direito no canal) para criar outro.";
+        settings.MyChannels.Add(channel);
+        AppServices.Settings.Save();
+        if (_room is { } room) room.CreatedChannels = settings.MyChannels;
+        RebuildChannels();
+        if (kind == RoomChannelKind.Text) SelectText(channel.Name);
+        Changed?.Invoke();
+        return null;
+    }
+
+    /// <summary>Apaga um canal seu. Quem já conversou nele continua vendo a conversa até fechar o ScreenFlow.</summary>
+    public void DeleteChannel(RoomChannel channel)
+    {
+        var settings = AppServices.Settings.Current;
+        if (settings.MyChannels.RemoveAll(c => c.Same(channel)) == 0) return;
+        AppServices.Settings.Save();
+        if (_room is { } room) room.CreatedChannels = settings.MyChannels;
+        if (channel.Kind == RoomChannelKind.Text && _currentText.Channel.Same(channel) && _currentText.Messages.Count == 0) SelectText(null);
+        RebuildChannels();
+        Changed?.Invoke();
+    }
+
+    /// <summary>Abre um canal de texto no chat (null: o "geral") e marca como lido se o chat estiver na frente.</summary>
+    public void SelectText(string? channel)
+    {
+        var row = TextRow(channel);
+        if (row != _currentText)
+        {
+            _currentText.IsSelected = false;
+            _currentText = row;
+            row.IsSelected = true;
+            if (!row.Listed) RebuildChannels();
+            var settings = AppServices.Settings.Current;
+            var last = row.IsDefaultText ? null : row.Name;
+            if (!_demo && settings.LastTextChannel != last)
+            {
+                settings.LastTextChannel = last;
+                AppServices.Settings.Save();
+            }
+            CurrentTextChanged?.Invoke();
+        }
+        if (IsChatInFront?.Invoke() == true) MarkRead();
+    }
+
+    /// <summary>A linha de um canal de texto (criada na primeira vez), pelo nome; null ou vazio é o "geral".</summary>
+    private TextChannelRow TextRow(string? name)
+    {
+        var clean = RoomChannels.IsDefaultText(name) ? RoomChannels.DefaultTextName : RoomChannels.CleanName(RoomChannelKind.Text, name);
+        if (clean.Length == 0) clean = RoomChannels.DefaultTextName;
+        var key = RoomChannels.Key(clean);
+        if (_textRows.TryGetValue(key, out var known)) return known;
+        var channel = RoomChannels.Defaults.FirstOrDefault(c => c.Kind == RoomChannelKind.Text && c.Key == key) ?? new RoomChannel(RoomChannelKind.Text, clean);
+        if (!_textRows.TryGetValue(channel.Key, out var row)) _textRows[channel.Key] = row = new TextChannelRow(channel);
+        return row;
+    }
+
+    private VoiceChannelRow VoiceRow(RoomChannel channel)
+    {
+        if (!_voiceRows.TryGetValue(channel.Key, out var row)) _voiceRows[channel.Key] = row = new VoiceChannelRow(channel);
+        return row;
+    }
+
+    /// <summary>
+    /// Monta as listas de canais: os padrão, os seus, os que o pessoal da sala criou, os de texto que têm conversa (mesmo
+    /// que quem criou tenha saído) e os de voz que têm gente.
+    /// </summary>
+    private void RebuildChannels()
+    {
+        var mine = AppServices.Settings.Current.MyChannels;
+        var owners = new Dictionary<(RoomChannelKind, string), string>();
+        var created = new List<RoomChannel>();
+        foreach (var channel in mine)
+        {
+            created.Add(channel);
+            owners.TryAdd((channel.Kind, channel.Key), SelfName);
+        }
+        IEnumerable<(RoomChannel Channel, string Owner)> announced = _demo
+            ? _demoChannels
+            : _peers.Values.SelectMany(peer => peer.Presence.CreatedChannels.Select(channel => (channel, peer.Presence.Name)));
+        foreach (var (channel, owner) in announced)
+        {
+            created.Add(channel);
+            owners.TryAdd((channel.Kind, channel.Key), owner);
+        }
+        foreach (var row in _textRows.Values)
+            if (row.Messages.Count > 0 || row == _currentText) created.Add(row.Channel);
+        foreach (var name in _voiceInUse)
+            if (RoomChannels.CleanName(RoomChannelKind.Voice, name) is { Length: > 0 } clean) created.Add(new RoomChannel(RoomChannelKind.Voice, clean));
+
+        var text = RoomChannels.Merge(RoomChannelKind.Text, created);
+        Sync(TextChannels, text.Select(c => (c.Key, c)).ToList(), row => row.Key, (_, channel) => TextRow(channel.Name), (row, channel) =>
+        {
+            row.IsMine = mine.Any(c => c.Same(channel));
+            row.Owner = owners.GetValueOrDefault((RoomChannelKind.Text, channel.Key));
+        });
+        var listed = text.Select(c => c.Key).ToHashSet();
+        foreach (var (key, row) in _textRows.ToList())
+        {
+            row.Listed = listed.Contains(key);
+            // Canal que saiu da lista sem conversa nenhuma não precisa ficar na memória.
+            if (!row.Listed && row.Messages.Count == 0 && row != _currentText) _textRows.Remove(key);
+        }
+
+        var voice = RoomChannels.Merge(RoomChannelKind.Voice, created);
+        Sync(VoiceChannels, voice.Select(c => (c.Key, c)).ToList(), row => row.Key, (_, channel) => VoiceRow(channel), (row, channel) =>
+        {
+            row.IsMine = mine.Any(c => c.Same(channel));
+            row.Owner = owners.GetValueOrDefault((RoomChannelKind.Voice, channel.Key));
+        });
+        var voiceKeys = voice.Select(c => c.Key).ToHashSet();
+        foreach (var key in _voiceRows.Keys.Where(k => !voiceKeys.Contains(k)).ToList()) _voiceRows.Remove(key);
+    }
+
+    /// <summary>Quem está em cada canal de voz, o canal sugerido e o painel da voz do menu lateral.</summary>
+    private void ShowVoice(List<(string Channel, VoiceMemberState State)> members)
+    {
+        _voiceInUse = members.Select(m => m.Channel).ToList();
+        RebuildChannels();
+        var byChannel = members
+            .GroupBy(m => RoomChannels.Key(m.Channel))
+            .ToDictionary(g => g.Key, g => g.Select(m => m.State).OrderBy(s => s.Name, Names).ToList());
+        var current = VoiceChannel;
+        foreach (var row in VoiceChannels)
+        {
+            var list = byChannel.GetValueOrDefault(row.Key) ?? [];
+            Sync(row.Members, list.Select(s => (s.Id, s)), MemberRow, UpdateMember);
+            row.IsCurrent = current is not null && RoomChannels.SameName(current, row.Name);
+        }
+        var inVoice = members.Select(m => m.State.Id).ToHashSet();
+        foreach (var id in _memberRows.Keys.Where(id => !inVoice.Contains(id)).ToList()) _memberRows.Remove(id);
+
+        // Fora da voz, o Entrar põe você onde está o pessoal (ou no último canal em que você esteve).
+        var last = AppServices.Settings.Current.LastVoiceChannel ?? RoomChannels.DefaultVoiceName;
+        SuggestedVoiceChannel = VoiceChannels
+            .Where(c => c.Members.Count > 0)
+            .OrderByDescending(c => c.Members.Count)
+            .ThenByDescending(c => RoomChannels.SameName(c.Name, last))
+            .FirstOrDefault()?.Name
+            ?? VoiceChannels.FirstOrDefault(c => RoomChannels.SameName(c.Name, last))?.Name
+            ?? RoomChannels.DefaultVoiceName;
+        var focus = RoomChannels.Key(current ?? SuggestedVoiceChannel);
+        Sync(VoiceMembers, (byChannel.GetValueOrDefault(focus) ?? []).Select(s => (s.Id, s)), MemberRow, UpdateMember);
+    }
+
+    private VoiceMemberRow MemberRow(Guid id)
+    {
+        if (!_memberRows.TryGetValue(id, out var row)) _memberRows[id] = row = new VoiceMemberRow(id);
+        return row;
+    }
+
+    private void UpdateMember(VoiceMemberRow row, VoiceMemberState state)
+    {
+        row.Update(state);
+        row.Photo = PhotoOf(state.Id);
+        row.Volume = state.IsMe ? 1 : PeerVolume(state.Id);
+    }
+
     // ───────────────────────── Chat ─────────────────────────
 
     /// <summary>
-    /// Manda para todo mundo da sala, com uma imagem se quiser (quem recebe baixa a imagem deste PC). false quando a
-    /// sala está desligada ou não há nada para mandar.
+    /// Manda no canal de texto aberto para todo mundo da sala, com uma imagem se quiser (quem recebe baixa a imagem
+    /// deste PC). false quando a sala está desligada ou não há nada para mandar.
     /// </summary>
     public bool Send(string text, PreparedImage? image = null)
     {
@@ -340,25 +662,31 @@ public sealed class RoomService
             var id = AppServices.Blobs.Put(image.Data);
             attached = new ChatImage(id, image.Data.Length, image.Width, image.Height);
         }
+        var channel = _currentText.IsDefaultText ? null : _currentText.Name;
         if (_demo)
         {
             var clean = RoomPacket.CleanText(text);
             if (clean.Length == 0 && attached is null) return false;
             AddMessage(new RoomChatMessage(SelfId, SelfName, (ulong)Random.Shared.NextInt64(), DateTimeOffset.Now,
-                clean.Length == 0 ? RoomPacket.ImagePlaceholder : clean, Image: attached));
+                clean.Length == 0 ? RoomPacket.ImagePlaceholder : clean, Image: attached, Channel: channel));
             return true;
         }
-        return _room is { IsRunning: true } room && room.SendChat(text, attached) is not null;
+        return _room is { IsRunning: true } room && room.SendChat(text, attached, channel) is not null;
     }
 
     /// <summary>A imagem não veio: pede de novo, a quem mandou e a todo mundo da sala (quem já baixou também tem).</summary>
     public void RetryImage(ChatRow row)
     {
-        if (row.Image is not { } image || _room is not { } room) return;
+        if (row.Image is not { } image) return;
         row.ImageState = ChatImageState.Loading;
         if (AppServices.Blobs.Has(image.Id))
         {
             LoadPicture(row);
+            return;
+        }
+        if (_room is not { } room)
+        {
+            row.ImageState = ChatImageState.Failed;
             return;
         }
         room.FetchBlob(image.Blob, [row.AuthorId, .. People.Select(p => p.Id).Where(id => id != row.AuthorId)]);
@@ -371,59 +699,175 @@ public sealed class RoomService
         if (AppServices.Blobs.Get(image.Id) is not { } data)
         {
             if (row.ImageState != ChatImageState.Failed) row.ImageState = ChatImageState.Loading;
+            if (row.FromArchive) RestoreFromArchive(image.Id);
             return;
         }
         row.Picture = ImageTools.Decode(data, Math.Min(image.Width, ChatRow.PictureDecodeWidth));
         row.ImageState = row.Picture is null ? ChatImageState.Failed : ChatImageState.Ready;
     }
 
+    /// <summary>A imagem de uma mensagem guardada já saiu deste PC: busca na pasta do chat (fora da thread da interface).</summary>
+    private async void RestoreFromArchive(string id)
+    {
+        if (_archive is not { } archive || !_restoring.Add(id)) return;
+        var restored = false;
+        try
+        {
+            var data = await Task.Run(() => archive.ReadImage(id));
+            restored = data is not null && AppServices.Blobs.Save(id, data);
+        }
+        catch (Exception exception) { Log.Debug($"Imagem do chat guardado: {exception.Message}"); }
+        if (restored) OnBlobArrived(id);
+        else OnBlobFailed(id); // "Tentar de novo" pede para quem está na sala
+    }
+
+    /// <summary>Marca como lido o canal aberto (o chat está na frente).</summary>
     public void MarkRead()
     {
-        if (_unread == 0) return;
-        _unread = 0;
+        if (_currentText.Unread == 0) return;
+        _currentText.Unread = 0;
         UnreadChanged?.Invoke();
     }
+
+    /// <summary>A mensagem está na frente de quem usa: o chat aberto, nesse canal.</summary>
+    public bool IsShowing(ChatRow row) => IsShowing(TextRow(row.ChannelName));
+
+    private bool IsShowing(TextChannelRow channel) => channel == _currentText && IsChatInFront?.Invoke() == true;
 
     private void OnMessage(RoomChatMessage message)
     {
         var row = AddMessage(message);
-        if (row is null || row.IsMine || message.History) return;
-        if (IsChatInFront?.Invoke() != true)
+        if (row is null) return;
+        _archive?.Add(message, message.Image is { } image ? AppServices.Blobs.Get(image.Id) : null);
+        if (row.IsMine || message.History) return;
+        var channel = TextRow(message.ChannelName);
+        if (!IsShowing(channel))
         {
-            _unread++;
+            channel.Unread++;
             UnreadChanged?.Invoke();
         }
         MessageArrived?.Invoke(row);
     }
 
-    private ChatRow? AddMessage(RoomChatMessage message)
+    private ChatRow? AddMessage(RoomChatMessage message, bool fromArchive = false)
     {
-        foreach (var existing in Messages)
-            if (existing.AuthorId == message.AuthorId && existing.MessageId == message.MessageId) return null;
-        var row = new ChatRow(message, message.AuthorId == SelfId) { Photo = PhotoOf(message.AuthorId) };
+        if (!_shown.Add((message.AuthorId, message.MessageId))) return null;
+        var channel = TextRow(message.ChannelName);
+        var row = new ChatRow(message, message.AuthorId == SelfId, fromArchive) { Photo = PhotoOf(message.AuthorId) };
+        var messages = channel.Messages;
+        var index = messages.Count;
+        while (index > 0 && messages[index - 1].Time > row.Time) index--;
+        if (index == 0 && messages.Count >= ChannelCapacity) return null; // mais antiga que tudo o que cabe na tela
         LoadPicture(row);
-        var index = Messages.Count;
-        while (index > 0 && Messages[index - 1].Time > row.Time) index--;
-        Messages.Insert(index, row);
-        while (Messages.Count > ChatHistory.Capacity)
+        messages.Insert(index, row);
+        while (messages.Count > ChannelCapacity)
         {
-            Messages.RemoveAt(0);
+            messages.RemoveAt(0);
             index--;
         }
-        Regroup(Math.Max(0, index));
+        Regroup(messages, Math.Max(0, index));
+        // Um canal que não estava na lista (quem criou já saiu) aparece com a conversa.
+        if (!channel.Listed) RebuildChannels();
         return row;
     }
 
     /// <summary>Mensagens seguidas da mesma pessoa (até 5 minutos) ficam juntas, sem repetir nome e foto.</summary>
-    private void Regroup(int index)
+    private static void Regroup(ObservableCollection<ChatRow> messages, int index)
     {
-        for (var i = Math.Max(0, index); i <= Math.Min(Messages.Count - 1, index + 1); i++)
+        for (var i = Math.Max(0, index); i <= Math.Min(messages.Count - 1, index + 1); i++)
         {
-            var previous = i > 0 ? Messages[i - 1] : null;
-            var current = Messages[i];
+            var previous = i > 0 ? messages[i - 1] : null;
+            var current = messages[i];
             current.ShowHeader = previous is null || previous.AuthorId != current.AuthorId || current.Time - previous.Time > GroupWindow
                 || previous.Time.ToLocalTime().Date != current.Time.ToLocalTime().Date;
         }
+    }
+
+    // ───────────────────────── Chat guardado (Google Drive) ─────────────────────────
+
+    /// <summary>A pasta em que o chat está sendo guardado (null com a opção desligada ou sem pasta).</summary>
+    public string? ArchiveFolder => _archive?.Folder;
+
+    /// <summary>Por que o chat não está sendo guardado (null quando está tudo certo ou a opção está desligada).</summary>
+    public string? ArchiveProblem { get; private set; }
+
+    /// <summary>A pasta do chat guardado abriu, fechou ou deu problema.</summary>
+    public event Action? ArchiveChanged;
+
+    /// <summary>Uma gravação do chat guardado falhou (a pasta sumiu, o Drive está fechado...).</summary>
+    public event Action<string>? ArchiveFailed;
+
+    /// <summary>Abre (ou fecha) a pasta do chat guardado conforme as configurações. A pasta é lida fora da interface.</summary>
+    private async Task UpdateArchiveAsync()
+    {
+        var settings = AppServices.Settings.Current;
+        var wanted = (settings.ChatArchiveEnabled, settings.ChatArchiveFolder);
+        _archiveApplied = wanted;
+        var version = ++_archiveVersion;
+        string? root = null;
+        string? problem = null;
+        if (wanted.ChatArchiveEnabled && !_demo)
+        {
+            root = wanted.ChatArchiveFolder ?? await Task.Run(ChatArchiveFolders.FindGoogleDrive);
+            if (version != _archiveVersion) return;
+            if (root is null) problem = "O Google Drive para computador não foi encontrado neste PC. Instale e entre na sua conta, ou escolha outra pasta.";
+        }
+        if (_archive is { } open && open.Root != root)
+        {
+            _archive = null;
+            _ = CloseArchiveAsync(open);
+        }
+        ArchiveProblem = problem;
+        if (root is null || _archive is not null)
+        {
+            ArchiveChanged?.Invoke();
+            return;
+        }
+
+        ChatArchive archive;
+        try { archive = new ChatArchive(root); }
+        catch (Exception exception)
+        {
+            ArchiveProblem = exception.Message;
+            ArchiveChanged?.Invoke();
+            return;
+        }
+        archive.Failed += error => _dispatcher.BeginInvoke(() =>
+        {
+            if (_archive != archive) return;
+            ArchiveProblem = $"O chat não foi gravado na pasta: {error}";
+            ArchiveFailed?.Invoke(error);
+            ArchiveChanged?.Invoke();
+        });
+        _archive = archive;
+        ArchiveChanged?.Invoke();
+        Log.Info($"Chat guardado em {archive.Folder}.");
+
+        IReadOnlyList<RoomChatMessage> recent;
+        try { recent = await Task.Run(() => archive.LoadRecent()); }
+        catch (Exception exception)
+        {
+            Log.Warn($"Chat guardado não foi lido: {exception.Message}");
+            recent = [];
+        }
+        if (_archive != archive) return;
+        foreach (var message in recent) AddMessage(message, fromArchive: true);
+        // O que já estava na tela antes de a pasta abrir também vai para ela.
+        foreach (var row in AllMessages().ToList())
+            archive.Add(row.Message, row.Image is { } image ? AppServices.Blobs.Get(image.Id) : null);
+    }
+
+    private static async Task CloseArchiveAsync(ChatArchive archive)
+    {
+        try
+        {
+            await Task.Run(() =>
+            {
+                archive.Flush(TimeSpan.FromSeconds(3));
+                archive.Dispose();
+            });
+        }
+        catch (Exception exception) { Log.Debug($"Chat guardado ao fechar: {exception.Message}"); }
     }
 
     // ───────────────────────── Pessoas ─────────────────────────
@@ -462,7 +906,9 @@ public sealed class RoomService
         foreach (var peer in peers)
         {
             _peers[peer.Id] = peer;
-            _avatars[peer.Id] = peer.Presence.Avatar?.Id;
+            var avatar = peer.Presence.Avatar?.Id;
+            if (!_avatars.TryGetValue(peer.Id, out var known) || known != avatar) _photosVersion++;
+            _avatars[peer.Id] = avatar;
         }
         Sync(People, peers.Select(p => (p.Id, p)), id => new RoomPersonRow(id), (row, peer) =>
         {
@@ -470,25 +916,27 @@ public sealed class RoomService
             row.Photo = PhotoFor(peer.Presence.Avatar?.Id);
         });
 
-        var voice = peers.Where(p => p.Presence.InVoice)
-            .Select(p => new VoiceMemberState(p.Id, p.Presence.Name, p.Presence.Muted, p.Presence.Deafened, false))
-            .ToList();
-        if (room.InVoice) voice.Add(new VoiceMemberState(SelfId, SelfName, room.Muted || room.Deafened, room.Deafened, true));
-        voice.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase));
-        Sync(VoiceMembers, voice.Select(v => (v.Id, v)), id => new VoiceMemberRow(id), (row, state) =>
+        var members = new List<(string Channel, VoiceMemberState State)>();
+        foreach (var peer in peers)
+            if (peer.Presence.CurrentVoiceChannel is { } channel)
+                members.Add((channel, new VoiceMemberState(peer.Id, peer.Presence.Name, peer.Presence.Muted, peer.Presence.Deafened, false)));
+        if (room.VoiceChannel is { } mine) members.Add((mine, new VoiceMemberState(SelfId, SelfName, room.Muted || room.Deafened, room.Deafened, true)));
+        ShowVoice(members);
+
+        // As fotos das mensagens só mudam quando alguém troca de foto (ou uma foto chega).
+        if (_photosShown != _photosVersion)
         {
-            row.Update(state);
-            row.Photo = PhotoOf(state.Id);
-        });
-        var photos = new Dictionary<Guid, ImageSource?>();
-        foreach (var message in Messages)
-        {
-            if (!photos.TryGetValue(message.AuthorId, out var photo)) photos[message.AuthorId] = photo = PhotoOf(message.AuthorId);
-            message.Photo = photo;
+            _photosShown = _photosVersion;
+            var photos = new Dictionary<Guid, ImageSource?>();
+            foreach (var message in AllMessages())
+            {
+                if (!photos.TryGetValue(message.AuthorId, out var photo)) photos[message.AuthorId] = photo = PhotoOf(message.AuthorId);
+                message.Photo = photo;
+            }
         }
 
         _speakingTimer.IsEnabled = room.InVoice;
-        if (!room.InVoice) foreach (var row in VoiceMembers) row.Speaking = false;
+        if (!room.InVoice) foreach (var row in _memberRows.Values) row.Speaking = false;
         Changed?.Invoke();
     }
 
@@ -497,6 +945,7 @@ public sealed class RoomService
         if (_room is not { } room) return;
         var now = DateTimeOffset.UtcNow;
         var self = room.Voice?.IsSpeaking == true;
+        // Só quem está no seu canal manda voz para cá: o anel verde aparece para eles.
         foreach (var row in VoiceMembers)
             row.Speaking = row.IsMe ? self : _peers.TryGetValue(row.Id, out var peer) && peer.IsSpeaking(now);
     }
@@ -515,25 +964,30 @@ public sealed class RoomService
     /// <summary>Atualiza a lista no lugar (sem recriar as linhas), na ordem de <paramref name="items"/>.</summary>
     private static void Sync<TRow, TData>(ObservableCollection<TRow> rows, IEnumerable<(Guid Id, TData Data)> items, Func<Guid, TRow> create, Action<TRow, TData> update)
         where TRow : IRoomRow
+        => Sync(rows, items.ToList(), row => row.Id, (id, _) => create(id), update);
+
+    private static void Sync<TRow, TKey, TData>(ObservableCollection<TRow> rows, IReadOnlyList<(TKey Key, TData Data)> items, Func<TRow, TKey> keyOf,
+        Func<TKey, TData, TRow> create, Action<TRow, TData> update) where TKey : notnull
     {
-        var list = items.ToList();
-        var ids = list.Select(i => i.Id).ToHashSet();
+        var keys = new HashSet<TKey>(items.Count);
+        foreach (var item in items) keys.Add(item.Key);
         for (var i = rows.Count - 1; i >= 0; i--)
-            if (!ids.Contains(rows[i].Id)) rows.RemoveAt(i);
-        for (var index = 0; index < list.Count; index++)
+            if (!keys.Contains(keyOf(rows[i]))) rows.RemoveAt(i);
+        var comparer = EqualityComparer<TKey>.Default;
+        for (var index = 0; index < items.Count; index++)
         {
-            var (id, data) = list[index];
+            var (key, data) = items[index];
             var current = -1;
             for (var j = index; j < rows.Count; j++)
             {
-                if (rows[j].Id != id) continue;
+                if (!comparer.Equals(keyOf(rows[j]), key)) continue;
                 current = j;
                 break;
             }
             TRow row;
             if (current < 0)
             {
-                row = create(id);
+                row = create(key, data);
                 rows.Insert(index, row);
             }
             else
@@ -547,12 +1001,14 @@ public sealed class RoomService
 
     // ───────────────────────── Capturas de tela ─────────────────────────
 
-    /// <summary>Sala de exemplo para as capturas do CI: quatro pessoas, três na voz e uma conversa.</summary>
+    /// <summary>
+    /// Sala de exemplo para as capturas do CI: quatro pessoas, gente em dois canais de voz, um canal criado e conversas
+    /// no #geral e no #música.
+    /// </summary>
     public void LoadDemo(bool inVoice = true, int unread = 2)
     {
         _demo = true;
         SelfId = new Guid("6b1f1d5e-0c4a-4f7e-9d3b-2a8c5e7f9a0f");
-        _demoVoice = inVoice;
         var ana = new Guid("0d6f3a52-8b1e-4c9a-a7f2-5e3b9c1d2f42");
         var bruno = new Guid("9a2c7e14-3f5b-4d8a-b6e1-7c4f2a9d3e51");
         var carla = new Guid("4e8b1c63-7a2d-4f9e-8c5b-1d6a3f7e2b5f");
@@ -560,16 +1016,29 @@ public sealed class RoomService
         var (anaPhoto, brunoPhoto, wallpaper) = DemoImages();
         _avatars[ana] = anaPhoto;
         _avatars[bruno] = brunoPhoto;
+        _photosVersion++;
         People.Clear();
         People.Add(RoomPersonRow.Demo(ana, "Ana Lu", "Ao vivo · tela, câmera e áudio", true, StreamMode.Screen, "26.47.19.113", false, PhotoOf(ana)));
-        People.Add(RoomPersonRow.Demo(bruno, "Bruno", "Na voz", false, StreamMode.Screen, null, true, PhotoOf(bruno)));
-        People.Add(RoomPersonRow.Demo(carla, "Carla-PC", "Assistindo Ana Lu", false, StreamMode.Screen, null, true));
-        People.Add(RoomPersonRow.Demo(diego, "Diego", "Online", false, StreamMode.Screen, null, false));
-        VoiceMembers.Clear();
-        VoiceMembers.Add(VoiceMemberRow.Demo(bruno, "Bruno", speaking: inVoice, muted: false, photo: PhotoOf(bruno)));
-        VoiceMembers.Add(VoiceMemberRow.Demo(carla, "Carla-PC", speaking: false, muted: true));
-        if (inVoice) VoiceMembers.Insert(2, VoiceMemberRow.Demo(SelfId, SelfName, speaking: false, muted: false, isMe: true, photo: SelfPhoto));
-        Messages.Clear();
+        People.Add(RoomPersonRow.Demo(bruno, "Bruno", "Online · na voz: Geral", false, StreamMode.Screen, null, true, PhotoOf(bruno)));
+        People.Add(RoomPersonRow.Demo(carla, "Carla-PC", "Assistindo Ana Lu · na voz: Geral, mudo", false, StreamMode.Screen, null, true));
+        People.Add(RoomPersonRow.Demo(diego, "Diego", "Online · na voz: Valorant", false, StreamMode.Screen, null, true));
+
+        _demoChannels.Clear();
+        _demoChannels.Add((new RoomChannel(RoomChannelKind.Voice, "Valorant"), "Diego"));
+        _demoChannels.Add((new RoomChannel(RoomChannelKind.Text, "campeonato"), "Ana Lu"));
+        _demoMembers.Clear();
+        _demoMembers.Add((RoomChannels.DefaultVoiceName, new VoiceMemberState(bruno, "Bruno", false, false, false)));
+        _demoMembers.Add((RoomChannels.DefaultVoiceName, new VoiceMemberState(carla, "Carla-PC", true, false, false)));
+        _demoMembers.Add(("Valorant", new VoiceMemberState(diego, "Diego", false, false, false)));
+        _demoVoice = inVoice;
+        _demoVoiceChannel = RoomChannels.DefaultVoiceName;
+
+        foreach (var row in _textRows.Values)
+        {
+            row.Messages.Clear();
+            row.Unread = 0;
+        }
+        _shown.Clear();
         var today = DateTimeOffset.Now.Date;
         var at = (int h, int m) => new DateTimeOffset(today.AddHours(h).AddMinutes(m));
         AddMessage(new RoomChatMessage(ana, "Ana Lu", 1, at(20, 2), "Boa noite, gente! Vou abrir a transmissão do jogo daqui a pouco"));
@@ -580,10 +1049,28 @@ public sealed class RoomService
         if (wallpaper is not null)
             AddMessage(new RoomChatMessage(ana, "Ana Lu", 7, at(20, 6), "O fundo que eu fiz pra live de hoje", Image: wallpaper));
         AddMessage(new RoomChatMessage(carla, "Carla-PC", 6, at(20, 7), "Já estou assistindo, ficou ótimo"));
-        _unread = unread;
-        Changed?.Invoke();
+        AddMessage(new RoomChatMessage(diego, "Diego", 8, at(20, 9), "Coloquei a playlist da festa, quem quiser é só entrar", Channel: "música"));
+        AddMessage(new RoomChatMessage(ana, "Ana Lu", 9, at(20, 10), "Chave do campeonato de sábado no ar!", Channel: "campeonato"));
+        _currentText.IsSelected = false;
+        _currentText = TextRow(null);
+        _currentText.IsSelected = true;
+        _currentText.Unread = unread;
+        TextRow("música").Unread = 1;
+        CurrentTextChanged?.Invoke();
+        ShowDemoVoice();
         UnreadChanged?.Invoke();
         ProfileChanged?.Invoke();
+    }
+
+    private void ShowDemoVoice()
+    {
+        var members = new List<(string Channel, VoiceMemberState State)>(_demoMembers);
+        if (_demoVoice) members.Add((_demoVoiceChannel, new VoiceMemberState(SelfId, SelfName, _demoMuted || _demoDeafened, _demoDeafened, true)));
+        ShowVoice(members);
+        // O Bruno está falando (o anel verde aparece) quando você está no canal dele.
+        var bruno = new Guid("9a2c7e14-3f5b-4d8a-b6e1-7c4f2a9d3e51");
+        foreach (var row in _memberRows.Values) row.Speaking = _demoVoice && row.Id == bruno && RoomChannels.IsDefaultVoice(_demoVoiceChannel);
+        Changed?.Invoke();
     }
 
     /// <summary>Fotos e uma imagem de exemplo (recortes do fundo do app), guardadas como se tivessem chegado pela rede.</summary>
@@ -601,6 +1088,29 @@ public sealed class RoomService
             Log.Warn($"Imagens de exemplo: {exception.Message}");
             return (null, null, null);
         }
+    }
+}
+
+/// <summary>Acha a pasta do Google Drive para computador neste PC (as unidades e a pasta do usuário).</summary>
+public static class ChatArchiveFolders
+{
+    public static string? FindGoogleDrive()
+    {
+        var drives = new List<(string Root, string? Label)>();
+        try
+        {
+            foreach (var drive in System.IO.DriveInfo.GetDrives())
+            {
+                try
+                {
+                    if (drive.DriveType == System.IO.DriveType.CDRom || !drive.IsReady) continue;
+                    drives.Add((drive.RootDirectory.FullName, drive.VolumeLabel));
+                }
+                catch (Exception exception) when (exception is System.IO.IOException or UnauthorizedAccessException) { }
+            }
+        }
+        catch (Exception exception) { Log.Debug($"Unidades do PC: {exception.Message}"); }
+        return CloudFolders.FindGoogleDrive(drives, Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
     }
 }
 
@@ -656,6 +1166,11 @@ public abstract class RoomRowBase : INotifyPropertyChanged
     {
         if (EqualityComparer<T>.Default.Equals(field, value)) return;
         field = value;
+        Notify(names);
+    }
+
+    protected void Notify(params string[] names)
+    {
         foreach (var name in names) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
     }
 }
@@ -692,14 +1207,16 @@ public sealed class RoomPersonRow(Guid id) : RoomRowBase, IRoomRow
         Name = presence.Name;
         IsLive = presence.Live;
         LiveMode = presence.LiveMode;
-        InVoice = presence.InVoice;
+        InVoice = presence.InAnyVoice;
         Muted = presence.Muted;
         WatchAddress = presence.Live ? peer.WatchAddress.ToString() : null;
         var status = presence.Live
             ? (presence.LiveMode == StreamMode.AudioOnly ? "Ao vivo · festa de música" : $"Ao vivo · {presence.LiveSummary}")
               + (presence.Flags.HasFlag(PresenceFlags.PinRequired) ? " · com PIN" : string.Empty)
             : presence.Watching ? "Assistindo uma transmissão" : "Online";
-        if (presence.InVoice) status += presence.Deafened ? " · na voz, sem som" : presence.Muted ? " · na voz, mudo" : " · na voz";
+        if (presence.CurrentVoiceChannel is { } channel)
+            status += presence.Deafened ? $" · na voz: {channel}, sem som" : presence.Muted ? $" · na voz: {channel}, mudo" : $" · na voz: {channel}";
+        if (!presence.SupportsChannels) status += " · versão antiga, só vê o #geral";
         StatusText = status;
     }
 
@@ -709,7 +1226,7 @@ public sealed class RoomPersonRow(Guid id) : RoomRowBase, IRoomRow
 
 public readonly record struct VoiceMemberState(Guid Id, string Name, bool Muted, bool Deafened, bool IsMe);
 
-/// <summary>Alguém na voz, no painel do menu lateral.</summary>
+/// <summary>Alguém na voz: no canal de voz da sala e no painel do menu lateral.</summary>
 public sealed class VoiceMemberRow(Guid id) : RoomRowBase, IRoomRow
 {
     private string _name = string.Empty;
@@ -717,20 +1234,35 @@ public sealed class VoiceMemberRow(Guid id) : RoomRowBase, IRoomRow
     private bool _deafened;
     private bool _speaking;
     private bool _isMe;
+    private double _volume = 1;
     private ImageSource? _photo;
 
     public Guid Id { get; } = id;
     public AvatarColors Avatar { get; } = AvatarColors.For(id);
-    public string Name { get => _name; private set => Set(ref _name, value, nameof(Name), nameof(Initial), nameof(DisplayName)); }
+    public string Name { get => _name; private set => Set(ref _name, value, nameof(Name), nameof(Initial), nameof(DisplayName), nameof(Hint)); }
     public string Initial => AvatarColors.Initial(_name);
     public ImageSource? Photo { get => _photo; set => Set(ref _photo, value, nameof(Photo)); }
     public string DisplayName => _isMe ? $"{_name} (você)" : _name;
-    public bool IsMe { get => _isMe; private set => Set(ref _isMe, value, nameof(IsMe), nameof(DisplayName)); }
+    public bool IsMe { get => _isMe; private set => Set(ref _isMe, value, nameof(IsMe), nameof(DisplayName), nameof(LocallyMuted), nameof(Hint)); }
     public bool Muted { get => _muted; private set => Set(ref _muted, value, nameof(Muted), nameof(ShowMuted)); }
     public bool Deafened { get => _deafened; private set => Set(ref _deafened, value, nameof(Deafened), nameof(ShowMuted)); }
     /// <summary>O ícone de microfone cortado aparece só quando não está com o fone cortado (que já inclui o mudo).</summary>
     public bool ShowMuted => _muted && !_deafened;
     public bool Speaking { get => _speaking; set => Set(ref _speaking, value, nameof(Speaking)); }
+
+    /// <summary>O volume desta pessoa só para você (1 = normal).</summary>
+    public double Volume { get => _volume; set => Set(ref _volume, value, nameof(Volume), nameof(LocallyMuted), nameof(VolumeChanged), nameof(Hint)); }
+
+    /// <summary>Silenciada só para você.</summary>
+    public bool LocallyMuted => !_isMe && _volume <= 0.001;
+
+    /// <summary>Volume diferente do normal (aparece um ícone).</summary>
+    public bool VolumeChanged => !_isMe && _volume > 0.001 && Math.Abs(_volume - 1) > 0.005;
+
+    /// <summary>A dica ao passar o mouse.</summary>
+    public string Hint => _isMe ? "Você" : LocallyMuted ? $"{_name} · silenciado só para você (botão direito para mudar)"
+        : VolumeChanged ? $"{_name} · volume {_volume * 100:0}% para você (botão direito para mudar)"
+        : $"{_name} · botão direito para mudar o volume só para você";
 
     public void Update(VoiceMemberState state)
     {
@@ -740,9 +1272,86 @@ public sealed class VoiceMemberRow(Guid id) : RoomRowBase, IRoomRow
         Deafened = state.Deafened;
         if (state.Muted || state.Deafened) Speaking = false;
     }
+}
 
-    internal static VoiceMemberRow Demo(Guid id, string name, bool speaking, bool muted, bool isMe = false, ImageSource? photo = null)
-        => new(id) { Name = name, Speaking = speaking, Muted = muted, IsMe = isMe, Photo = photo };
+/// <summary>Um canal de texto da sala, com a conversa dele.</summary>
+public sealed class TextChannelRow(RoomChannel channel) : RoomRowBase
+{
+    private int _unread;
+    private bool _selected;
+    private bool _mine;
+    private string? _owner;
+
+    public RoomChannel Channel { get; } = channel;
+    public string Key { get; } = channel.Key;
+    public string Name => Channel.Name;
+    public bool IsDefaultText => RoomChannels.IsDefaultText(Channel.Name);
+    public ObservableCollection<ChatRow> Messages { get; } = [];
+
+    /// <summary>Está na lista de canais agora.</summary>
+    internal bool Listed { get; set; }
+
+    public int Unread { get => _unread; set => Set(ref _unread, Math.Max(0, value), nameof(Unread), nameof(HasUnread), nameof(UnreadText)); }
+    public bool HasUnread => _unread > 0;
+    public string UnreadText => _unread > 99 ? "99+" : _unread.ToString(CultureInfo.InvariantCulture);
+    public bool IsSelected { get => _selected; set => Set(ref _selected, value, nameof(IsSelected)); }
+    public bool IsMine { get => _mine; set => Set(ref _mine, value, nameof(IsMine), nameof(Topic)); }
+    public string? Owner { get => _owner; set => Set(ref _owner, value, nameof(Owner), nameof(Topic)); }
+
+    /// <summary>O assunto do canal, embaixo do nome na conversa.</summary>
+    public string Topic => Key switch
+    {
+        "geral" => "Conversa de todo mundo da rede. Quem ainda está numa versão antiga do ScreenFlow também vê este canal.",
+        "musica" => "Pedidos, indicações e a festa de música.",
+        "prints-e-clipes" => "Prints, clipes e imagens: cole com Ctrl+V ou arraste para cá.",
+        _ => IsMine ? "Canal criado por você. Aparece para todo mundo da sala enquanto você estiver nela."
+            : Owner is { } owner ? $"Canal criado por {owner}."
+            : "Canal criado por alguém da sala.",
+    };
+}
+
+/// <summary>Um canal de voz da sala e quem está nele.</summary>
+public sealed class VoiceChannelRow : RoomRowBase
+{
+    private bool _current;
+    private bool _mine;
+    private string? _owner;
+
+    public VoiceChannelRow(RoomChannel channel)
+    {
+        Channel = channel;
+        Key = channel.Key;
+        Members.CollectionChanged += OnMembersChanged;
+    }
+
+    public RoomChannel Channel { get; }
+    public string Key { get; }
+    public string Name => Channel.Name;
+    public ObservableCollection<VoiceMemberRow> Members { get; } = [];
+    public bool HasMembers => Members.Count > 0;
+    public string CountText => Members.Count == 0 ? string.Empty : Members.Count.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>Você está neste canal.</summary>
+    public bool IsCurrent { get => _current; set => Set(ref _current, value, nameof(IsCurrent), nameof(Hint)); }
+    public bool IsMine { get => _mine; set => Set(ref _mine, value, nameof(IsMine), nameof(Hint)); }
+    public string? Owner { get => _owner; set => Set(ref _owner, value, nameof(Owner), nameof(Hint)); }
+
+    /// <summary>A dica ao passar o mouse: o que o clique faz.</summary>
+    public string Hint
+    {
+        get
+        {
+            var action = IsCurrent ? "Você está neste canal" : Members.Count switch
+            {
+                0 => $"Entrar no canal {Name}",
+                1 => $"Entrar no canal {Name} (1 pessoa)",
+                var n => $"Entrar no canal {Name} ({n} pessoas)",
+            };
+            return Channel.IsDefault ? action : IsMine ? $"{action} · criado por você" : Owner is { } owner ? $"{action} · criado por {owner}" : action;
+        }
+    }
+
+    private void OnMembersChanged(object? sender, NotifyCollectionChangedEventArgs e) => Notify(nameof(HasMembers), nameof(CountText), nameof(Hint));
 }
 
 public enum ChatImageState { None, Loading, Ready, Failed }
@@ -761,15 +1370,18 @@ public sealed class ChatRow : RoomRowBase
     private ImageSource? _picture;
     private ChatImageState _imageState;
 
-    public ChatRow(RoomChatMessage message, bool isMine)
+    public ChatRow(RoomChatMessage message, bool isMine, bool fromArchive = false)
     {
+        Message = message;
         AuthorId = message.AuthorId;
         MessageId = message.MessageId;
         Author = message.AuthorName;
         Text = message.Caption;
         Image = message.Image;
         Time = message.Time;
+        ChannelName = message.ChannelName;
         IsMine = isMine;
+        FromArchive = fromArchive;
         Avatar = AvatarColors.For(message.AuthorId);
         _imageState = Image is null ? ChatImageState.None : ChatImageState.Loading;
         if (Image is { } image)
@@ -780,6 +1392,8 @@ public sealed class ChatRow : RoomRowBase
         }
     }
 
+    /// <summary>A mensagem como chegou (para guardar na pasta do chat).</summary>
+    public RoomChatMessage Message { get; }
     public Guid AuthorId { get; }
     public ulong MessageId { get; }
     public string Author { get; }
@@ -789,7 +1403,11 @@ public sealed class ChatRow : RoomRowBase
     public string Text { get; }
     public bool HasText => Text.Length > 0;
     public DateTimeOffset Time { get; }
+    /// <summary>O canal de texto da mensagem ("geral" nas das versões antigas).</summary>
+    public string ChannelName { get; }
     public bool IsMine { get; }
+    /// <summary>Veio da pasta do chat guardado (a imagem, se faltar, é buscada lá).</summary>
+    public bool FromArchive { get; }
     public AvatarColors Avatar { get; }
     public ImageSource? Photo { get => _photo; set => Set(ref _photo, value, nameof(Photo)); }
 
@@ -821,7 +1439,7 @@ public sealed class ChatRow : RoomRowBase
         }
     }
 
-    public string FullTimeText => Time.ToLocalTime().ToString("dddd, dd/MM/yyyy 'às' HH:mm", System.Globalization.CultureInfo.GetCultureInfo("pt-BR"));
+    public string FullTimeText => Time.ToLocalTime().ToString("dddd, dd/MM/yyyy 'às' HH:mm", CultureInfo.GetCultureInfo("pt-BR"));
 
     /// <summary>Primeira de um grupo: mostra foto, nome e hora.</summary>
     public bool ShowHeader { get => _showHeader; set => Set(ref _showHeader, value, nameof(ShowHeader)); }

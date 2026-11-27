@@ -14,6 +14,10 @@ namespace ScreenFlow.Core.Room;
 /// <remarks>
 /// 1.1.1: <see cref="BlobRequest"/> e <see cref="BlobChunk"/> levam a foto do perfil e as imagens do chat. As versões
 /// antigas descartam os tipos que não conhecem.
+/// 1.3.0: canais de texto e de voz, como num servidor do Discord. A presença diz em que canal de voz a pessoa está e
+/// quais canais ela criou; a mensagem do chat diz o canal. Quem está na voz "Geral" continua com
+/// <see cref="PresenceFlags.InVoice"/> (as versões antigas ouvem e são ouvidas); nos outros canais vai
+/// <see cref="PresenceFlags.InVoiceChannel"/>, que as versões antigas não conhecem.
 /// </remarks>
 public enum RoomPacketType : byte { Presence = 1, Leave = 2, Chat = 3, ChatAck = 4, Voice = 5, HistoryRequest = 6, BlobRequest = 7, BlobChunk = 8 }
 
@@ -32,6 +36,10 @@ public enum PresenceFlags : ushort
     PinRequired = 128,
     /// <summary>Pede para quem recebe responder com a própria presença (usado ao adicionar alguém pelo IP).</summary>
     WantsReply = 256,
+    /// <summary>Entende canais (1.3.0): recebe mensagens dos canais de texto além do "geral".</summary>
+    Channels = 512,
+    /// <summary>Na voz, num canal que não é o "Geral" (o nome vai no campo do canal de voz).</summary>
+    InVoiceChannel = 1024,
 }
 
 /// <summary>Um arquivo da sala (a foto do perfil ou uma imagem do chat): o id (hash do conteúdo) e o tamanho em bytes.</summary>
@@ -43,7 +51,10 @@ public sealed record ChatImage(string Id, int Size, int Width, int Height)
     public RoomBlobRef Blob => new(Id, Size);
 }
 
-/// <summary>Como um PC aparece na sala: nome, foto, se está na voz (e mudo), se está ao vivo e o quê.</summary>
+/// <summary>
+/// Como um PC aparece na sala: nome, foto, em que canal de voz está (e se está mudo), se está ao vivo e o quê, e os
+/// canais que criou.
+/// </summary>
 public sealed record RoomPresence(
     string Name,
     string Version,
@@ -53,9 +64,29 @@ public sealed record RoomPresence(
     int ControlPort = AppInfo.DefaultControlPort,
     IPAddress? LiveAddress = null,
     uint Sequence = 0,
-    RoomBlobRef? Avatar = null)
+    RoomBlobRef? Avatar = null,
+    string? VoiceChannel = null,
+    ValueList<RoomChannel>? Channels = null)
 {
+    /// <summary>Na voz "Geral" (a única das versões antigas).</summary>
     public bool InVoice => Flags.HasFlag(PresenceFlags.InVoice);
+
+    /// <summary>O canal de voz em que está (null fora da voz). As versões antigas na voz estão sempre na "Geral".</summary>
+    public string? CurrentVoiceChannel => InVoice ? RoomChannels.DefaultVoiceName
+        : Flags.HasFlag(PresenceFlags.InVoiceChannel) && VoiceChannel is { Length: > 0 } channel ? channel : null;
+
+    /// <summary>Em algum canal de voz.</summary>
+    public bool InAnyVoice => CurrentVoiceChannel is not null;
+
+    /// <summary>Entende canais de texto (1.3.0 ou mais nova).</summary>
+    public bool SupportsChannels => Flags.HasFlag(PresenceFlags.Channels);
+
+    /// <summary>Os canais criados por este PC (vazio nas versões antigas).</summary>
+    public IReadOnlyList<RoomChannel> CreatedChannels => Channels ?? ValueList<RoomChannel>.Empty;
+
+    /// <summary>Está no mesmo canal de voz que <paramref name="channel"/>.</summary>
+    public bool InVoiceChannel(string? channel) => channel is not null && CurrentVoiceChannel is { } mine && RoomChannels.SameName(mine, channel);
+
     public bool Muted => Flags.HasFlag(PresenceFlags.Muted);
     public bool Deafened => Flags.HasFlag(PresenceFlags.Deafened);
     public bool Live => Flags.HasFlag(PresenceFlags.Live);
@@ -71,10 +102,16 @@ public sealed record RoomPresence(
 /// que é o que as versões antigas mostram).
 /// </summary>
 public sealed record RoomChatMessage(Guid AuthorId, string AuthorName, ulong MessageId, DateTimeOffset Time, string Text, bool History = false,
-    ChatImage? Image = null)
+    ChatImage? Image = null, string? Channel = null)
 {
     /// <summary>A legenda da imagem (vazia quando o texto é só o aviso para as versões antigas).</summary>
     public string Caption => Image is not null && Text == RoomPacket.ImagePlaceholder ? string.Empty : Text;
+
+    /// <summary>O canal de texto (as mensagens sem canal, das versões antigas, são do "geral").</summary>
+    public string ChannelName => Channel is { Length: > 0 } channel ? channel : RoomChannels.DefaultTextName;
+
+    /// <summary>É do canal "geral" (o único que as versões antigas mostram).</summary>
+    public bool InDefaultChannel => RoomChannels.IsDefaultText(Channel);
 }
 
 public static class RoomPacket
@@ -93,7 +130,10 @@ public static class RoomPacket
 
     private const byte HistoryFlag = 1;
     private const byte ImageFlag = 2;
+    private const byte ChannelFlag = 4;
     private const byte AvatarField = 1;
+    private const byte VoiceChannelField = 2;
+    private const byte CreatedChannelField = 3;
 
     // ───────────────────────── Cabeçalho ─────────────────────────
 
@@ -143,8 +183,25 @@ public static class RoomPacket
             hash.CopyTo(buffer, offset); offset += RoomBlob.IdBytes;
             BinaryPrimitives.WriteInt32BigEndian(buffer.AsSpan(offset), avatar.Size); offset += 4;
         }
+        if (presence.VoiceChannel is { } voice && RoomChannels.CleanName(RoomChannelKind.Voice, voice) is { Length: > 0 } voiceName)
+        {
+            buffer[offset++] = VoiceChannelField;
+            offset += WriteShortString(buffer.AsSpan(offset), voiceName, MaxChannelBytes);
+        }
+        // Um campo por canal criado (cada campo tem no máximo 255 bytes).
+        foreach (var channel in RoomChannels.Normalize(presence.Channels))
+        {
+            buffer[offset++] = CreatedChannelField;
+            var bytes = Encoding.UTF8.GetBytes(TrimToBytes(channel.Name, MaxChannelBytes));
+            buffer[offset++] = (byte)(bytes.Length + 1);
+            buffer[offset++] = (byte)channel.Kind;
+            bytes.CopyTo(buffer, offset); offset += bytes.Length;
+        }
         return buffer[..offset];
     }
+
+    /// <summary>Bytes de um nome de canal (24 letras de até 4 bytes cada).</summary>
+    private const int MaxChannelBytes = RoomChannels.MaxNameLength * 4;
 
     public static bool TryReadPresence(ReadOnlySpan<byte> body, out RoomPresence presence)
     {
@@ -162,6 +219,8 @@ public static class RoomPacket
         name = CleanName(name);
         if (name.Length == 0) return false;
         RoomBlobRef? avatar = null;
+        string? voiceChannel = null;
+        List<RoomChannel>? created = null;
         while (offset + 2 <= body.Length)
         {
             var field = body[offset];
@@ -175,9 +234,21 @@ public static class RoomPacket
                 var size = BinaryPrimitives.ReadInt32BigEndian(value[RoomBlob.IdBytes..]);
                 if (size is > 0 and <= RoomBlob.MaxAvatarBytes) avatar = new RoomBlobRef(RoomBlob.IdText(value[..RoomBlob.IdBytes]), size);
             }
+            else if (field == VoiceChannelField && length > 0)
+            {
+                var clean = RoomChannels.CleanName(RoomChannelKind.Voice, Encoding.UTF8.GetString(value));
+                if (clean.Length > 0) voiceChannel = clean;
+            }
+            else if (field == CreatedChannelField && length > 1 && (created?.Count ?? 0) < RoomChannels.MaxPerPerson
+                     && RoomChannels.Create((RoomChannelKind)value[0], Encoding.UTF8.GetString(value[1..])) is { IsDefault: false } channel)
+            {
+                created ??= [];
+                if (!created.Any(c => c.Same(channel))) created.Add(channel);
+            }
         }
         presence = new RoomPresence(name, Truncate(version, 24), flags, mode, viewers, port,
-            address.Equals(IPAddress.Any) ? null : address, sequence, avatar);
+            address.Equals(IPAddress.Any) ? null : address, sequence, avatar, voiceChannel,
+            created is null ? null : new ValueList<RoomChannel>(created));
         return true;
     }
 
@@ -205,7 +276,9 @@ public static class RoomPacket
         message.AuthorId.TryWriteBytes(buffer.AsSpan(offset, 16), bigEndian: true, out _); offset += 16;
         BinaryPrimitives.WriteInt64BigEndian(buffer.AsSpan(offset), message.Time.ToUnixTimeMilliseconds()); offset += 8;
         var image = message.Image is { } attached && RoomBlob.TryParseId(attached.Id, out var hash) && IsValidImage(attached) ? (attached, hash) : default;
-        buffer[offset++] = (byte)((message.History ? HistoryFlag : 0) | (image.attached is not null ? ImageFlag : 0));
+        var channel = message.InDefaultChannel ? null : RoomChannels.CleanName(RoomChannelKind.Text, message.Channel);
+        if (channel is { Length: 0 }) channel = null;
+        buffer[offset++] = (byte)((message.History ? HistoryFlag : 0) | (image.attached is not null ? ImageFlag : 0) | (channel is not null ? ChannelFlag : 0));
         offset += WriteShortString(buffer.AsSpan(offset), CleanName(message.AuthorName), MaxNameLength * 4);
         var clean = CleanText(message.Text);
         if (clean.Length == 0 && image.attached is not null) clean = ImagePlaceholder;
@@ -221,6 +294,8 @@ public static class RoomPacket
             BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)picture.Width); offset += 2;
             BinaryPrimitives.WriteUInt16BigEndian(buffer.AsSpan(offset), (ushort)picture.Height); offset += 2;
         }
+        // O canal vai por último (1.3.0): as versões antigas leem só o texto e a imagem.
+        if (channel is not null) offset += WriteShortString(buffer.AsSpan(offset), channel, MaxChannelBytes);
         return buffer[..offset];
     }
 
@@ -236,6 +311,7 @@ public static class RoomPacket
         var unixMs = BinaryPrimitives.ReadInt64BigEndian(body[24..]);
         var history = (body[32] & HistoryFlag) != 0;
         var hasImage = (body[32] & ImageFlag) != 0;
+        var hasChannel = (body[32] & ChannelFlag) != 0;
         var offset = 33;
         if (author == Guid.Empty || !TryReadShortString(body, ref offset, out var name)) return false;
         if (offset + 2 > body.Length) return false;
@@ -250,15 +326,27 @@ public static class RoomPacket
         try { time = DateTimeOffset.FromUnixTimeMilliseconds(unixMs); }
         catch (ArgumentOutOfRangeException) { return false; }
         ChatImage? image = null;
+        var imageComplete = !hasImage;
         if (hasImage && offset + RoomBlob.IdBytes + 8 <= body.Length)
         {
+            imageComplete = true;
             var picture = new ChatImage(RoomBlob.IdText(body.Slice(offset, RoomBlob.IdBytes)),
                 BinaryPrimitives.ReadInt32BigEndian(body[(offset + RoomBlob.IdBytes)..]),
                 BinaryPrimitives.ReadUInt16BigEndian(body[(offset + RoomBlob.IdBytes + 4)..]),
                 BinaryPrimitives.ReadUInt16BigEndian(body[(offset + RoomBlob.IdBytes + 6)..]));
+            offset += RoomBlob.IdBytes + 8;
             if (IsValidImage(picture)) image = picture;
         }
-        message = new RoomChatMessage(author, name, id, time, text, history, image);
+        string? channel = null;
+        if (hasChannel)
+        {
+            // Um canal que não dá para ler não vira "geral": a mensagem é descartada.
+            if (!imageComplete || !TryReadShortString(body, ref offset, out var raw)) return false;
+            channel = RoomChannels.CleanName(RoomChannelKind.Text, raw);
+            if (channel.Length == 0) return false;
+            if (RoomChannels.IsDefaultText(channel)) channel = null;
+        }
+        message = new RoomChatMessage(author, name, id, time, text, history, image, channel);
         return true;
     }
 

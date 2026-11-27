@@ -15,6 +15,7 @@ public sealed class VoiceEngine : IDisposable
     private readonly VoiceOutput? _output;
     private readonly VoiceGate _gate = new();
     private readonly Dictionary<Guid, RemoteVoice> _remotes = [];
+    private readonly Dictionary<Guid, float> _peerVolumes = [];
     private readonly object _remotesGate = new();
     private readonly object _encodeGate = new();
     private byte[] _previous = [];
@@ -125,7 +126,7 @@ public sealed class VoiceEngine : IDisposable
             if (_disposed) return;
             if (!_remotes.TryGetValue(peer, out remote!))
             {
-                try { remote = new RemoteVoice(_output); }
+                try { remote = new RemoteVoice(_output) { Volume = _peerVolumes.GetValueOrDefault(peer, 1f) }; }
                 catch (Exception exception)
                 {
                     Log.Warn($"Não deu para tocar a voz de outra pessoa: {exception.Message}");
@@ -135,6 +136,16 @@ public sealed class VoiceEngine : IDisposable
             }
         }
         remote.Receive(sequence, current, previous);
+    }
+
+    /// <summary>Volume de uma pessoa só (0 a 2), como o "Volume do usuário" do Discord.</summary>
+    public void SetPeerVolume(Guid peer, float volume)
+    {
+        lock (_remotesGate)
+        {
+            _peerVolumes[peer] = volume;
+            if (_remotes.TryGetValue(peer, out var remote)) remote.Volume = volume;
+        }
     }
 
     public void RemovePeer(Guid peer)
@@ -182,6 +193,11 @@ public sealed class VoiceEngine : IDisposable
 
         public long FramesDecoded { get; private set; }
         public long FramesRecovered { get; private set; }
+
+        public float Volume
+        {
+            set { if (_buffer is not null) _buffer.Volume = value; }
+        }
 
         public void Receive(uint sequence, ReadOnlySpan<byte> current, ReadOnlySpan<byte> previous)
         {

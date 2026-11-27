@@ -1279,6 +1279,21 @@
         </Setter>
     </Style>
 
+    <!-- Conteúdo que dá para mexer dentro de um menu (o volume de alguém na voz): clicar nele não fecha o menu -->
+    <Style x:Key="MenuPanel" TargetType="MenuItem">
+        <Setter Property="OverridesDefaultStyle" Value="True"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="StaysOpenOnClick" Value="True"/>
+        <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="MenuItem">
+                    <ContentPresenter ContentSource="Header" Margin="12,8,12,6"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
     <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator">
         <Setter Property="OverridesDefaultStyle" Value="True"/>
         <Setter Property="Focusable" Value="False"/>

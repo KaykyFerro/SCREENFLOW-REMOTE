@@ -217,12 +217,14 @@ public static class SelfTest
             if (!peerInVoice) line("FALHOU: um não viu o outro entrar na voz.");
             if (!voiceOk) line("FALHOU: a voz não chegou dos dois lados.");
 
+            var channelsOk = await ChannelsTestAsync(a, b, line);
+
             await a.LeaveVoiceAsync();
-            var leftOk = await WaitAsync(() => b.Peers.FirstOrDefault()?.Presence.InVoice == false, 4);
+            var leftOk = await WaitAsync(() => b.Peers.FirstOrDefault()?.Presence.InAnyVoice == false, 4);
             if (!leftOk) line("FALHOU: B não viu A sair da voz.");
 
-            var ok = chatOk && avatarOk && pictureOk && voiceOk && peerInVoice && leftOk;
-            line(ok ? "PASSOU: presença, chat, fotos, imagens e voz funcionam entre dois PCs." : "FALHOU: a sala da rede não funcionou como deveria.");
+            var ok = chatOk && avatarOk && pictureOk && voiceOk && peerInVoice && channelsOk && leftOk;
+            line(ok ? "PASSOU: presença, chat, fotos, imagens, voz e canais funcionam entre dois PCs." : "FALHOU: a sala da rede não funcionou como deveria.");
             return ok;
         }
         catch (Exception exception)
@@ -237,6 +239,38 @@ public static class SelfTest
             await b.DisposeAsync();
             line("Salas fechadas.");
         }
+    }
+
+    /// <summary>
+    /// Canais (1.3.0), com A e B na voz Geral: A cria um canal de texto e um de voz, manda uma mensagem no de texto e muda
+    /// de canal de voz; B vê os canais, recebe a mensagem no canal certo, vê A mudar e, indo atrás, volta a ouvir A.
+    /// </summary>
+    private static async Task<bool> ChannelsTestAsync(NetworkRoom a, NetworkRoom b, Action<string> line)
+    {
+        a.CreatedChannels = [new RoomChannel(RoomChannelKind.Text, "autoteste"), new RoomChannel(RoomChannelKind.Voice, "Autoteste")];
+        var listedOk = await WaitAsync(() => b.Peers.FirstOrDefault()?.Presence.CreatedChannels.Count == 2, 6);
+        if (!listedOk) line("FALHOU: B não viu os canais que A criou.");
+
+        var inChannel = new TaskCompletionSource<RoomChatMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        b.MessageReceived += message =>
+        {
+            if (message.AuthorId == a.SelfId && !message.InDefaultChannel) inChannel.TrySetResult(message);
+        };
+        a.SendChat("Mensagem no canal do autoteste", channel: "autoteste");
+        var textOk = await Task.WhenAny(inChannel.Task, Task.Delay(5000)) == inChannel.Task && inChannel.Task.Result.ChannelName == "autoteste";
+        if (!textOk) line("FALHOU: a mensagem do #autoteste não chegou no canal certo.");
+
+        a.MoveVoice("Autoteste");
+        var movedOk = await WaitAsync(() => b.Peers.FirstOrDefault()?.Presence.CurrentVoiceChannel == "Autoteste", 6);
+        if (!movedOk) line("FALHOU: B não viu A mudar para o canal de voz Autoteste.");
+        b.MoveVoice("Autoteste");
+        var heard = b.Voice?.FramesDecoded ?? 0;
+        var voiceOk = await WaitAsync(() => (b.Voice?.FramesDecoded ?? 0) > heard + 50 && b.Peers.FirstOrDefault()?.Presence.InVoiceChannel("Autoteste") == true, 10);
+        if (!voiceOk) line("FALHOU: a voz não chegou no canal de voz novo.");
+
+        var ok = listedOk && textOk && movedOk && voiceOk;
+        if (ok) line($"Canais: B viu os 2 canais de A, a mensagem chegou no #autoteste e B ouviu A no canal Autoteste ({(b.Voice?.FramesDecoded ?? 0) - heard} quadros).");
+        return ok;
     }
 
     // Tons do teste do som do PC: o do ScreenFlow e os dois que o CI deixa tocando fora dele (veja windows-build.yml).

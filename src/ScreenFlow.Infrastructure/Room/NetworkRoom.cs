@@ -29,9 +29,14 @@ public sealed record RoomLocalState(
 /// Sala da rede: todo mundo com o ScreenFlow aberto na mesma rede do Radmin se vê, conversa no chat e pode entrar na
 /// voz. Tudo passa pela porta de descoberta (UDP 47802, já liberada no firewall pelo instalador):
 /// presença por broadcast a cada 2 s (e direto para quem já é conhecido), chat direto para cada PC com confirmação e
-/// reenvio, e voz direto para quem está na voz. Os anúncios em JSON das transmissões (versões 1.0.x) também chegam
-/// aqui e alimentam a lista da tela Assistir.
+/// reenvio, e voz direto para quem está no mesmo canal de voz. Os anúncios em JSON das transmissões (versões 1.0.x)
+/// também chegam aqui e alimentam a lista da tela Assistir.
 /// </summary>
+/// <remarks>
+/// Canais (1.3.0), como num servidor do Discord: cada mensagem é de um canal de texto e cada pessoa na voz está num
+/// canal de voz; só quem está no mesmo canal de voz se ouve. As versões antigas ficam no "geral" e na voz "Geral":
+/// mensagens dos outros canais nem vão para elas.
+/// </remarks>
 public sealed class NetworkRoom : IAsyncDisposable
 {
     private static readonly TimeSpan PresenceInterval = TimeSpan.FromSeconds(2);
@@ -60,6 +65,9 @@ public sealed class NetworkRoom : IAsyncDisposable
     private VoiceEngine? _voice;
     private uint _presenceSequence;
     private volatile bool _inVoice;
+    private volatile string _voiceChannel = RoomChannels.DefaultVoiceName;
+    private volatile ValueList<RoomChannel> _createdChannels = ValueList<RoomChannel>.Empty;
+    private readonly ConcurrentDictionary<Guid, float> _peerVolumes = new();
     private volatile bool _muted;
     private volatile bool _deafened;
     private volatile bool _announceSoon;
@@ -110,6 +118,22 @@ public sealed class NetworkRoom : IAsyncDisposable
 
     public bool IsRunning => _socket is not null && !_cancellation.IsCancellationRequested;
     public bool InVoice => _inVoice;
+
+    /// <summary>O canal de voz em que você está (null fora da voz).</summary>
+    public string? VoiceChannel => _inVoice ? _voiceChannel : null;
+
+    /// <summary>Os canais que você criou (aparecem para todo mundo da sala enquanto você estiver nela).</summary>
+    public IReadOnlyList<RoomChannel> CreatedChannels
+    {
+        get => _createdChannels;
+        set
+        {
+            var list = new ValueList<RoomChannel>(RoomChannels.Normalize(value));
+            if (list.Equals(_createdChannels)) return;
+            _createdChannels = list;
+            _announceSoon = true;
+        }
+    }
     public bool Muted => _muted;
     public bool Deafened => _deafened;
     public VoiceEngine? Voice => _voice;
@@ -246,19 +270,26 @@ public sealed class NetworkRoom : IAsyncDisposable
     // ───────────────────────── Chat ─────────────────────────
 
     /// <summary>
-    /// Manda uma mensagem para todo mundo da sala, com uma imagem se quiser (o arquivo dela precisa estar em
-    /// <see cref="BlobSource"/>: quem recebe pede os pedaços). Retorna a mensagem (já no histórico) ou null se vazia.
+    /// Manda uma mensagem para todo mundo da sala num canal de texto (null é o "geral"), com uma imagem se quiser (o
+    /// arquivo dela precisa estar em <see cref="BlobSource"/>: quem recebe pede os pedaços). As mensagens dos outros
+    /// canais só vão para quem entende canais (1.3.0 ou mais nova). Retorna a mensagem (já no histórico) ou null se vazia.
     /// </summary>
-    public RoomChatMessage? SendChat(string text, ChatImage? image = null)
+    public RoomChatMessage? SendChat(string text, ChatImage? image = null, string? channel = null)
     {
         text = RoomPacket.CleanText(text);
         if (text.Length == 0 && image is null) return null;
         if (text.Length == 0) text = RoomPacket.ImagePlaceholder;
+        string? channelName = null;
+        if (!RoomChannels.IsDefaultText(channel))
+        {
+            channelName = RoomChannels.CleanName(RoomChannelKind.Text, channel);
+            if (channelName.Length == 0) return null;
+        }
         var message = new RoomChatMessage(SelfId, _local.Name, BitConverter.ToUInt64(RandomNumberGenerator.GetBytes(8)), DateTimeOffset.UtcNow, text,
-            Image: image);
+            Image: image, Channel: channelName);
         _history.Add(message);
         var packet = RoomPacket.Chat(SelfId, message);
-        var peers = _peers.Snapshot();
+        var peers = _peers.Snapshot().Where(p => message.InDefaultChannel || p.Presence.SupportsChannels).ToList();
         foreach (var peer in peers) Send(packet, peer.EndPoint);
         _outbox.Add(message, packet, peers.Select(p => p.Id), DateTimeOffset.UtcNow);
         MessageReceived?.Invoke(message);
@@ -287,13 +318,33 @@ public sealed class NetworkRoom : IAsyncDisposable
         }
     }
 
-    /// <summary>Entra na voz da rede com o microfone (ou outra fonte, no autoteste). Lança se o microfone não abrir.</summary>
-    public void JoinVoice(IVoiceInput? input = null)
+    /// <summary>
+    /// Entra na voz da rede, no canal <paramref name="channel"/> (null é a "Geral"), com o microfone (ou outra fonte, no
+    /// autoteste). Já na voz, só troca de canal. Lança se o microfone não abrir.
+    /// </summary>
+    public void JoinVoice(IVoiceInput? input = null, string? channel = null)
     {
+        var name = CleanVoiceChannel(channel);
         VoiceEngine engine;
+        bool alreadyIn;
         lock (_voiceGate)
         {
-            if (_voice is not null || _cancellation.IsCancellationRequested) return;
+            if (_cancellation.IsCancellationRequested) return;
+            alreadyIn = _voice is not null;
+        }
+        if (alreadyIn)
+        {
+            input?.Dispose();
+            MoveVoice(name);
+            return;
+        }
+        lock (_voiceGate)
+        {
+            if (_voice is not null || _cancellation.IsCancellationRequested)
+            {
+                input?.Dispose();
+                return;
+            }
             input ??= new MicrophoneInput(MicrophoneId);
             try
             {
@@ -304,17 +355,53 @@ public sealed class NetworkRoom : IAsyncDisposable
                 input.Dispose();
                 throw;
             }
+            foreach (var (peer, volume) in _peerVolumes) engine.SetPeerVolume(peer, volume);
             engine.FrameEncoded += SendVoice;
+            _voiceChannel = name;
             engine.Start();
             _voice = engine;
             _inVoice = true;
         }
         if (SoundsEnabled) engine.Play(VoiceCue.Join);
-        Log.Info($"Entrou na voz da rede ({engine.InputDescription}).");
+        Log.Info($"Entrou na voz da rede, canal {name} ({engine.InputDescription}).");
         _announceSoon = true;
         VoiceChanged?.Invoke();
         PeersChanged?.Invoke();
     }
+
+    /// <summary>Troca de canal de voz sem desligar o microfone (como clicar em outro canal no Discord).</summary>
+    public void MoveVoice(string? channel)
+    {
+        var name = CleanVoiceChannel(channel);
+        if (RoomChannels.SameName(name, _voiceChannel)) return;
+        _voiceChannel = name;
+        if (_voice is { } voice)
+        {
+            // Quem ficou no canal antigo para de tocar aqui; quem está no novo começa no próximo quadro.
+            foreach (var peer in _peers.Snapshot()) voice.RemovePeer(peer.Id);
+            PlayCue(VoiceCue.Join);
+            Log.Info($"Voz da rede: mudou para o canal {name}.");
+        }
+        _announceSoon = true;
+        VoiceChanged?.Invoke();
+        PeersChanged?.Invoke();
+    }
+
+    private static string CleanVoiceChannel(string? channel)
+        => RoomChannels.CleanName(RoomChannelKind.Voice, channel) is { Length: > 0 } clean && !RoomChannels.IsDefaultVoice(clean)
+            ? clean
+            : RoomChannels.DefaultVoiceName;
+
+    /// <summary>Volume de uma pessoa só, para você (0 = silenciada; 1 = normal; até 2). Vale também depois de sair e voltar.</summary>
+    public void SetPeerVolume(Guid peer, float volume)
+    {
+        volume = Math.Clamp(volume, 0f, 2f);
+        if (Math.Abs(volume - 1f) < 0.001f) _peerVolumes.TryRemove(peer, out _);
+        else _peerVolumes[peer] = volume;
+        _voice?.SetPeerVolume(peer, volume);
+    }
+
+    public float PeerVolume(Guid peer) => _peerVolumes.GetValueOrDefault(peer, 1f);
 
     public async Task LeaveVoiceAsync()
     {
@@ -366,11 +453,12 @@ public sealed class NetworkRoom : IAsyncDisposable
     private void SendVoice(uint sequence, byte level, byte[] current, byte[] previous)
     {
         if (!_inVoice || _deafened) return;
+        var channel = _voiceChannel;
         Span<byte> packet = stackalloc byte[RoomPacket.HeaderSize + 7 + current.Length + previous.Length];
         var length = RoomPacket.WriteVoice(packet, SelfId, sequence, level, current, previous);
         foreach (var peer in _peers.Snapshot())
         {
-            if (!peer.Presence.InVoice || peer.Presence.Deafened) continue;
+            if (!peer.Presence.InVoiceChannel(channel) || peer.Presence.Deafened) continue;
             Send(packet[..length], peer.EndPoint);
         }
     }
@@ -380,8 +468,11 @@ public sealed class NetworkRoom : IAsyncDisposable
     private RoomPresence LocalPresence(bool wantsReply)
     {
         var local = _local;
-        var flags = PresenceFlags.None;
-        if (_inVoice) flags |= PresenceFlags.InVoice;
+        var flags = PresenceFlags.Channels;
+        var channel = _voiceChannel;
+        var defaultVoice = RoomChannels.IsDefaultVoice(channel);
+        // Na "Geral" as versões antigas também ouvem; nos outros canais, só quem entende canais.
+        if (_inVoice) flags |= defaultVoice ? PresenceFlags.InVoice : PresenceFlags.InVoiceChannel;
         if (_muted || _deafened) flags |= PresenceFlags.Muted;
         if (_deafened) flags |= PresenceFlags.Deafened;
         if (local.Live) flags |= PresenceFlags.Live;
@@ -391,7 +482,8 @@ public sealed class NetworkRoom : IAsyncDisposable
         if (local.Watching) flags |= PresenceFlags.Watching;
         if (wantsReply) flags |= PresenceFlags.WantsReply;
         return new RoomPresence(local.Name, AppInfo.DisplayVersion, flags, local.LiveMode, local.Viewers, local.ControlPort,
-            local.Live ? local.LiveAddress : null, Interlocked.Increment(ref _presenceSequence), local.Avatar);
+            local.Live ? local.LiveAddress : null, Interlocked.Increment(ref _presenceSequence), local.Avatar,
+            _inVoice && !defaultVoice ? channel : null, _createdChannels);
     }
 
     private byte[] PresencePacket(bool wantsReply) => RoomPacket.Presence(SelfId, LocalPresence(wantsReply));
@@ -565,16 +657,19 @@ public sealed class NetworkRoom : IAsyncDisposable
             Send(PresencePacket(wantsReply: false), from);
         }
 
-        if (presence.InVoice != (previous?.InVoice ?? false))
+        if (presence.InAnyVoice != (previous?.InAnyVoice ?? false))
         {
-            if (presence.InVoice) PeerJoinedVoice?.Invoke(peer);
-            else
-            {
-                _voice?.RemovePeer(sender);
-                if (previous is not null) PeerLeftVoice?.Invoke(peer);
-            }
-            if (_inVoice && previous is not null) PlayCue(presence.InVoice ? VoiceCue.Join : VoiceCue.Leave);
-            else if (_inVoice && update.IsNew && presence.InVoice) PlayCue(VoiceCue.Join);
+            if (presence.InAnyVoice) PeerJoinedVoice?.Invoke(peer);
+            else if (previous is not null) PeerLeftVoice?.Invoke(peer);
+        }
+        // Os sons de entrar e sair são só de quem entra ou sai do seu canal de voz.
+        var mine = VoiceChannel;
+        var wasHere = previous?.InVoiceChannel(mine) ?? false;
+        var isHere = presence.InVoiceChannel(mine);
+        if (wasHere != isHere)
+        {
+            if (!isHere) _voice?.RemovePeer(sender);
+            if (_inVoice) PlayCue(isHere ? VoiceCue.Join : VoiceCue.Leave);
         }
         if (presence.Live && previous is { Live: false }) PeerWentLive?.Invoke(peer);
         if (presence.Avatar is { } avatar) MaybeFetch(avatar, now, sender);
@@ -588,12 +683,12 @@ public sealed class NetworkRoom : IAsyncDisposable
         Log.Info($"Sala da rede: {peer.Presence.Name} {reason}.");
         _outbox.Forget(peer.Id);
         _downloads.Forget(peer.Id, DateTimeOffset.UtcNow);
-        if (peer.Presence.InVoice)
+        if (peer.Presence.InVoiceChannel(VoiceChannel))
         {
             _voice?.RemovePeer(peer.Id);
-            if (_inVoice) PlayCue(VoiceCue.Leave);
-            PeerLeftVoice?.Invoke(peer);
+            PlayCue(VoiceCue.Leave);
         }
+        if (peer.Presence.InAnyVoice) PeerLeftVoice?.Invoke(peer);
         PeerLeft?.Invoke(peer);
         PeersChanged?.Invoke();
     }
@@ -628,10 +723,13 @@ public sealed class NetworkRoom : IAsyncDisposable
     /// <summary>Relógio do outro PC adiantado ou atrasado demais: usa a hora de chegada.</summary>
     private static DateTimeOffset Clamp(DateTimeOffset time, DateTimeOffset now) => (time - now).Duration() > TimeSpan.FromMinutes(2) ? now : time;
 
+    /// <summary>Quem acabou de abrir pede as mensagens recentes (de todos os canais; só do "geral" para as versões antigas).</summary>
     private void OnHistoryRequest(Guid sender, IPEndPoint from, DateTimeOffset now)
     {
-        if (_peers.Find(sender) is null || !_historyLimit.TryTake(sender, now)) return;
-        foreach (var message in _history.Recent(40))
+        if (_peers.Find(sender) is not { } peer || !_historyLimit.TryTake(sender, now)) return;
+        var channels = peer.Presence.SupportsChannels;
+        var messages = _history.All().Where(m => channels || m.InDefaultChannel).TakeLast(channels ? 80 : 40);
+        foreach (var message in messages)
             Send(RoomPacket.Chat(SelfId, message with { History = true }), from);
     }
 
@@ -639,9 +737,10 @@ public sealed class NetworkRoom : IAsyncDisposable
     {
         if (!RoomPacket.TryReadVoice(body, out var sequence, out var level, out var current, out var previous)) return;
         var peer = _peers.Touch(sender, from, now);
-        if (peer is null || !peer.Presence.InVoice) return;
+        // Só toca a voz de quem está no mesmo canal (uma versão antiga na "Geral" manda para todo mundo na voz dela).
+        if (peer is null || !peer.Presence.InVoiceChannel(VoiceChannel)) return;
         peer.RecordVoice(level, now);
-        if (_inVoice && !_deafened) _voice?.Receive(sender, sequence, current, previous);
+        if (!_deafened) _voice?.Receive(sender, sequence, current, previous);
     }
 
     // ───────────────────────── Arquivos (foto do perfil e imagens do chat) ─────────────────────────

@@ -86,13 +86,20 @@
                             </ItemsControl.Template>
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Border x:Name="Row" CornerRadius="8" Padding="6,4" Margin="0,0,0,1" Background="Transparent" ToolTip="{Binding DisplayName}">
+                                    <Border x:Name="Row" CornerRadius="8" Padding="6,4" Margin="0,0,0,1" Background="Transparent" ToolTip="{Binding Hint}"
+                                            MouseRightButtonUp="VoiceMember_MouseRightButtonUp">
                                         <DockPanel>
                                             <Grid Width="24" Height="24">
                                                 <Ellipse x:Name="Ring" Margin="-3" Stroke="{DynamicResource Success}" StrokeThickness="2" Opacity="0"/>
                                                 <controls:AvatarView Colors="{Binding Avatar}" Initial="{Binding Initial}" Photo="{Binding Photo}" TextElement.FontSize="11"/>
                                             </Grid>
                                             <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                                                <TextBlock Style="{StaticResource Icon}" Text="&#xE993;" FontSize="12" Margin="4,0,0,0" Foreground="{DynamicResource TextSubtle}"
+                                                           Visibility="{Binding VolumeChanged, Converter={StaticResource BoolToVisibility}}"/>
+                                                <Grid Width="16" Height="16" Margin="4,0,0,0" Visibility="{Binding LocallyMuted, Converter={StaticResource BoolToVisibility}}">
+                                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE767;" FontSize="12" Foreground="{DynamicResource Danger}"/>
+                                                    <Path Data="M2.5,2.5 L13.5,13.5" Stroke="{DynamicResource Danger}" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                                                </Grid>
                                                 <Grid Width="16" Height="16" Margin="4,0,0,0" ToolTip="Microfone desligado"
                                                       Visibility="{Binding ShowMuted, Converter={StaticResource BoolToVisibility}}">
                                                     <TextBlock Style="{StaticResource Icon}" Text="&#xE720;" FontSize="12" Foreground="{DynamicResource Danger}"/>
@@ -134,7 +141,7 @@
                             <Button x:Name="CompactLeaveButton" Style="{StaticResource VoiceHangUpButton}" Width="Auto" Height="36" Margin="3,0" Content="&#xE778;" ToolTip="Sair da voz"
                                     Visibility="Collapsed" Click="LeaveVoice_Click"/>
                             <Grid x:Name="ChatButtonBox" Margin="3,0">
-                                <Button x:Name="ChatButton" Style="{StaticResource VoiceButton}" Margin="0" ToolTip="Abrir o chat de todo mundo da rede" Click="OpenChat_Click">
+                                <Button x:Name="ChatButton" Style="{StaticResource VoiceButton}" Margin="0" ToolTip="Abrir a Sala da rede: os canais de texto e de voz" Click="OpenChat_Click">
                                     <StackPanel Orientation="Horizontal">
                                         <TextBlock Style="{StaticResource Icon}" Text="&#xE8BD;" FontSize="14"/>
                                         <TextBlock x:Name="ChatLabel" Text="Chat" Margin="8,0,0,0" VerticalAlignment="Center"/>
@@ -154,7 +161,7 @@
                         <RadioButton x:Name="NavOverview" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xF0E2;" Content="Visão geral" Checked="Nav_Checked"/>
                         <RadioButton x:Name="NavTransmit" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE714;" Content="Transmissão" Checked="Nav_Checked"/>
                         <RadioButton x:Name="NavWatch" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE768;" Content="Assistir" Checked="Nav_Checked"/>
-                        <RadioButton x:Name="NavChat" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE8BD;" Content="Chat da rede" Checked="Nav_Checked"/>
+                        <RadioButton x:Name="NavChat" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE8F2;" Content="Sala da rede" Checked="Nav_Checked"/>
                         <RadioButton x:Name="NavMonitor" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE95E;" Content="Monitoramento" Checked="Nav_Checked"/>
                         <RadioButton x:Name="NavSettings" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE9E9;" Content="Configurações" Checked="Nav_Checked"/>
                         <RadioButton x:Name="NavUpdates" GroupName="nav" Style="{StaticResource NavItem}" Tag="&#xE895;" Content="Atualizações" Checked="Nav_Checked"/>

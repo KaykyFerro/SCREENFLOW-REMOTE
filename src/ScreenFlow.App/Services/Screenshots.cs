@@ -11,6 +11,7 @@ using ScreenFlow.App.Windows;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
+using ScreenFlow.Core.Room;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Infrastructure.Session;
 
@@ -90,7 +91,23 @@ public static class Screenshots
             DemoData.FillTelemetry();
             return Go(window, window.MonitorPage);
         });
-        await Shot("05-configuracoes.png", () => Go(window, window.SettingsPage, 800));
+        // Configurações em abas (1.3.0): Transmissão, Voz e sala (com o chat guardado no Google Drive) e Assistir.
+        await Shot("05-configuracoes.png", () =>
+        {
+            window.SettingsPage.ShowTab(SettingsTab.Stream);
+            return Go(window, window.SettingsPage, 800);
+        });
+        await Shot("25-configuracoes-voz-e-sala.png", () =>
+        {
+            window.SettingsPage.ShowArchiveDemo();
+            window.SettingsPage.ShowTab(SettingsTab.Voice);
+            return Go(window, window.SettingsPage, 500);
+        });
+        await Shot("26-configuracoes-assistir.png", () =>
+        {
+            window.SettingsPage.ShowTab(SettingsTab.Player);
+            return Go(window, window.SettingsPage, 400);
+        });
         await Shot("06-atualizacoes.png", () => Go(window, window.UpdatesPage));
         await Shot("07-sininho.png", () =>
         {
@@ -125,7 +142,29 @@ public static class Screenshots
             return Go(window, window.ChatPage, 500);
         });
         window.ChatPage.ShowAttachmentDemo(null, string.Empty);
-        await Shot("22-seu-perfil.png", () => Go(window, window.SettingsPage, 600), () => window.SettingsPage.ProfileCard);
+        await Shot("22-seu-perfil.png", () =>
+        {
+            window.SettingsPage.ShowTab(SettingsTab.General);
+            return Go(window, window.SettingsPage, 600);
+        }, () => window.SettingsPage.ProfileCard);
+
+        // Um canal de texto criado por alguém da sala e o botão direito em alguém da voz (volume só para você).
+        await Shot("30-sala-canal-criado.png", () =>
+        {
+            AppServices.Room.SelectText("campeonato");
+            return Go(window, window.ChatPage, 500);
+        });
+        AppServices.Room.SelectText(null);
+        ContextMenu? memberMenu = null;
+        await Shot("28-volume-por-pessoa.png", async () =>
+        {
+            await Go(window, window.ChatPage, 300);
+            var member = AppServices.Room.VoiceMembers.First(m => !m.IsMe);
+            AppServices.Room.SetPeerVolume(member.Id, 0.8, save: false);
+            memberMenu = VoiceMemberMenu.Open(window.ChatPage, member, window);
+            await Task.Delay(400);
+        }, () => memberMenu!);
+        if (memberMenu is not null) memberMenu.IsOpen = false;
 
         PlayerWindow OpenPlayer(StreamMode mode, ConnectionState state, bool camera)
         {
@@ -195,11 +234,32 @@ public static class Screenshots
             return Task.Delay(300);
         }, () => WindowRoot(dialog!));
         dialog?.Close();
+        dialog = null;
+        await Shot("29-criar-canal-de-voz.png", () =>
+        {
+            dialog = ChannelDialog.Build(window, RoomChannelKind.Voice, out var name);
+            name.Text = "Minecraft";
+            dialog.WindowStartupLocation = WindowStartupLocation.Manual;
+            dialog.Left = dialog.Top = -30000;
+            dialog.ShowActivated = false;
+            dialog.Show();
+            return Task.Delay(300);
+        }, () => WindowRoot(dialog!));
+        dialog?.Close();
 
         // Janela no tamanho mínimo: o menu vira ícones e as colunas se empilham.
         Resize(window, new Size(window.MinWidth, window.MinHeight));
         await Shot("12-transmissao-janela-pequena.png", () => Go(window, window.TransmitPage, 600));
-        await Shot("13-configuracoes-janela-pequena.png", () => Go(window, window.SettingsPage, 600));
+        await Shot("13-configuracoes-janela-pequena.png", () =>
+        {
+            window.SettingsPage.ShowTab(SettingsTab.Stream);
+            return Go(window, window.SettingsPage, 600);
+        });
+        await Shot("27-configuracoes-voz-janela-pequena.png", () =>
+        {
+            window.SettingsPage.ShowTab(SettingsTab.Voice);
+            return Go(window, window.SettingsPage, 500);
+        });
         await Shot("14-atualizacoes-janela-pequena.png", () => Go(window, window.UpdatesPage));
         await Shot("17-chat-janela-pequena.png", () => Go(window, window.ChatPage, 500));
 

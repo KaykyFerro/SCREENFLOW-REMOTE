@@ -14,13 +14,13 @@ public partial class UpdatesPage : UserControl, IShellPage
     /// <summary>O que mudou nesta versão (mostrado quando não há versão nova).</summary>
     private static readonly string[] CurrentNotes =
     [
-        "Quem assiste pode trocar a qualidade pelo player, entre as resoluções e os FPS que você oferece.",
-        "Quem assiste pode voltar, pausar e pular a música ou o vídeo que toca no seu PC, e mudar o tempo.",
-        "Quem assiste pode tirar o som de um app da transmissão (o Discord, por exemplo).",
-        "Você decide: a chave \"Quem assiste pode mexer nos controles\" desliga tudo isso, e um aviso mostra quem pediu cada mudança.",
-        "Na festa de música, quem ouve vê o que está tocando agora, com a capa.",
-        "Placa de vídeo: aparece na hora na Visão geral e, quando a placa ou o encoder dela não funcionam, o app diz o motivo.",
-        "Transmissão mais estável com a janela minimizada ou na bandeja.",
+        "Sala da rede como um servidor do Discord: canais de texto e de voz, quem está em cada canal e os seus próprios canais.",
+        "Volume de cada pessoa da voz só para você, de 0 a 200% (botão direito na pessoa).",
+        "O som da transmissão não muda com o volume do PC de quem transmite: cada pessoa controla o próprio volume.",
+        "O ScreenFlow aparece como player de mídia do Windows: no painel do volume, na tela de bloqueio e nas teclas de mídia.",
+        "Guardar o chat no Google Drive (ou em qualquer pasta): as últimas conversas voltam quando o app abre.",
+        "Configurações em abas, e quem está na sua rede entra na transmissão direto, sem pedir permissão.",
+        "A barra do player não muda mais de tamanho, as telas foram revisadas para janelas pequenas e o app ficou mais leve.",
     ];
 
     private readonly MainWindow _shell;
@@ -214,7 +214,7 @@ public partial class UpdatesPage : UserControl, IShellPage
     private void Releases_Click(object sender, RoutedEventArgs e) => MainWindow.OpenUrl(UpdateService.ReleasesPage);
 
     /// <summary>Usado nas capturas de tela do CI: finge que existe uma versão nova.</summary>
-    internal static ReleaseInfo DemoRelease { get; } = new(new Version(1, 3, 0), "v1.3.0", "ScreenFlow 1.3.0",
+    internal static ReleaseInfo DemoRelease { get; } = new(new Version(1, 4, 0), "v1.4.0", "ScreenFlow 1.4.0",
         "## Novidades\n- Melhorias de desempenho no player\n- Ajustes no visual\n\n## Correções\n- Correções de estabilidade",
         "https://example.invalid/ScreenFlow-Setup-win-x64.exe", "ScreenFlow-Setup-win-x64.exe", 48_000_000, null);
 }

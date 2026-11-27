@@ -2,27 +2,214 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:controls="clr-namespace:ScreenFlow.App.Controls">
-    <!-- O chat ocupa a altura toda da janela: só a conversa rola, a caixa de escrever fica sempre embaixo. -->
-    <Grid Margin="{DynamicResource PagePadding}" MaxWidth="{DynamicResource ContentMaxWidth}">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-        </Grid.RowDefinitions>
-        <StackPanel>
-            <TextBlock Style="{StaticResource PageTitle}" Text="Chat da rede" Margin="0,22,0,6"/>
-            <TextBlock Style="{StaticResource Subtitle}" Margin="0,0,0,22"
-                       Text="Converse com todo mundo que está com o ScreenFlow aberto na sua rede do Radmin. Para falar por voz, use o painel da voz no menu ao lado."/>
-        </StackPanel>
+    <UserControl.Resources>
+        <!-- Título de cada grupo de canais (CANAIS DE TEXTO, CANAIS DE VOZ) -->
+        <Style x:Key="ChannelCategory" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="11.5"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextSubtle}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
 
-        <Grid x:Name="ContentGrid" Grid.Row="1">
+        <!-- O + de criar canal -->
+        <Style x:Key="ChannelAddButton" TargetType="Button" BasedOn="{StaticResource IconButton}">
+            <Setter Property="Width" Value="26"/>
+            <Setter Property="Height" Value="26"/>
+            <Setter Property="MinHeight" Value="26"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="Content" Value="&#xE710;"/>
+        </Style>
+
+        <!-- Botão de ícone que fica marcado (mostrar quem está na rede) -->
+        <Style x:Key="IconToggle" TargetType="ToggleButton">
+            <Setter Property="Foreground" Value="{DynamicResource TextMuted}"/>
+            <Setter Property="FontFamily" Value="{DynamicResource FontIcons}"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="Width" Value="38"/>
+            <Setter Property="Height" Value="38"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToggleButton">
+                        <Border x:Name="Root" Background="Transparent" BorderBrush="Transparent" BorderThickness="1" CornerRadius="10">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource SurfaceHover}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource Text}"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Root" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                                <Setter TargetName="Root" Property="BorderBrush" Value="{DynamicResource AccentBorder}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource AccentText}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Alguém num canal de voz (anel verde = falando; botão direito = volume só para você) -->
+        <DataTemplate x:Key="MemberTemplate">
+            <Border x:Name="Member" CornerRadius="7" Padding="6,3" Margin="0,1" Background="Transparent" ToolTip="{Binding Hint}"
+                    MouseRightButtonUp="Member_MouseRightButtonUp">
+                <DockPanel>
+                    <Grid Width="24" Height="24">
+                        <Ellipse x:Name="Ring" Margin="-3" Stroke="{DynamicResource Success}" StrokeThickness="2" Opacity="0"/>
+                        <controls:AvatarView Colors="{Binding Avatar}" Initial="{Binding Initial}" Photo="{Binding Photo}" TextElement.FontSize="10.5"/>
+                    </Grid>
+                    <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                        <TextBlock Style="{StaticResource Icon}" Text="&#xE993;" FontSize="12" Margin="4,0,0,0" Foreground="{DynamicResource TextSubtle}"
+                                   Visibility="{Binding VolumeChanged, Converter={StaticResource BoolToVisibility}}"/>
+                        <Grid Width="16" Height="16" Margin="4,0,0,0" Visibility="{Binding LocallyMuted, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE767;" FontSize="12" Foreground="{DynamicResource Danger}"/>
+                            <Path Data="M2.5,2.5 L13.5,13.5" Stroke="{DynamicResource Danger}" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                        </Grid>
+                        <Grid Width="16" Height="16" Margin="4,0,0,0" Visibility="{Binding ShowMuted, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE720;" FontSize="12" Foreground="{DynamicResource Danger}"/>
+                            <Path Data="M2.5,2.5 L13.5,13.5" Stroke="{DynamicResource Danger}" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                        </Grid>
+                        <Grid Width="16" Height="16" Margin="4,0,0,0" Visibility="{Binding Deafened, Converter={StaticResource BoolToVisibility}}">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE7F6;" FontSize="12" Foreground="{DynamicResource Danger}"/>
+                            <Path Data="M2.5,2.5 L13.5,13.5" Stroke="{DynamicResource Danger}" StrokeThickness="1.7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+                        </Grid>
+                    </StackPanel>
+                    <TextBlock x:Name="MemberName" Text="{Binding DisplayName}" Margin="9,0,4,0" FontSize="13" VerticalAlignment="Center"
+                               TextTrimming="CharacterEllipsis" Foreground="{DynamicResource TextMuted}"/>
+                </DockPanel>
+            </Border>
+            <DataTemplate.Triggers>
+                <Trigger SourceName="Member" Property="IsMouseOver" Value="True">
+                    <Setter TargetName="Member" Property="Background" Value="{DynamicResource SurfaceHover}"/>
+                </Trigger>
+                <DataTrigger Binding="{Binding Speaking}" Value="True">
+                    <Setter TargetName="Ring" Property="Opacity" Value="1"/>
+                    <Setter TargetName="MemberName" Property="Foreground" Value="{DynamicResource Text}"/>
+                </DataTrigger>
+            </DataTemplate.Triggers>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <!-- Como um servidor do Discord: canais à esquerda, a conversa do canal no meio e quem está na rede à direita. Só a
+         conversa rola; a caixa de escrever fica sempre embaixo. -->
+    <Grid Margin="24,18,24,24" MaxWidth="1680">
+        <Grid x:Name="ContentGrid">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="ChannelsColumn" Width="236"/>
+                <ColumnDefinition Width="14"/>
                 <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="20"/>
-                <ColumnDefinition x:Name="PeopleColumn" Width="320"/>
+                <ColumnDefinition x:Name="PeopleGap" Width="14"/>
+                <ColumnDefinition x:Name="PeopleColumn" Width="256"/>
             </Grid.ColumnDefinitions>
 
-            <!-- Conversa (dá para soltar uma imagem aqui para mandar) -->
-            <Border x:Name="ConversationCard" Style="{StaticResource Card}" Margin="0" Padding="0" AllowDrop="True"
+            <!-- ───────────── Canais ───────────── -->
+            <Border x:Name="ChannelsCard" Style="{StaticResource Card}" Margin="0" Padding="0">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <DockPanel Margin="16,14,12,13">
+                        <Border Style="{StaticResource IconTileCyan}" Width="34" Height="34" CornerRadius="10" TextElement.FontSize="15" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8F2;"/>
+                        </Border>
+                        <StackPanel Margin="11,0,0,0" VerticalAlignment="Center">
+                            <TextBlock Text="Sala da rede" FontSize="15" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock x:Name="RoomInfo" Style="{StaticResource Caption}" Text="Só você online" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
+                        </StackPanel>
+                    </DockPanel>
+                    <Border Style="{StaticResource DividerLine}" VerticalAlignment="Bottom"/>
+
+                    <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}">
+                        <StackPanel Margin="8,10,8,12">
+                            <DockPanel Margin="8,2,0,4">
+                                <Button DockPanel.Dock="Right" Style="{StaticResource ChannelAddButton}" ToolTip="Criar canal de texto" Click="CreateText_Click"/>
+                                <TextBlock Style="{StaticResource ChannelCategory}" Text="CANAIS DE TEXTO"/>
+                            </DockPanel>
+                            <ItemsControl x:Name="TextChannelList" Focusable="False">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border x:Name="Row" CornerRadius="8" Height="34" Padding="10,0,8,0" Margin="0,1" Background="Transparent" Cursor="Hand"
+                                                ToolTip="{Binding Topic}" MouseLeftButtonUp="TextChannel_MouseLeftButtonUp" MouseRightButtonUp="TextChannel_MouseRightButtonUp">
+                                            <DockPanel>
+                                                <Border DockPanel.Dock="Right" Style="{StaticResource CountBadge}" VerticalAlignment="Center" Margin="6,0,0,0"
+                                                        Visibility="{Binding HasUnread, Converter={StaticResource BoolToVisibility}}">
+                                                    <TextBlock Text="{Binding UnreadText}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                                <TextBlock x:Name="Hash" Text="#" FontSize="18" Width="14" Foreground="{DynamicResource TextSubtle}" VerticalAlignment="Center"
+                                                           Margin="0,0,0,2"/>
+                                                <TextBlock x:Name="ChannelName" Text="{Binding Name}" FontSize="14" Margin="8,0,0,0" VerticalAlignment="Center"
+                                                           Foreground="{DynamicResource TextMuted}" TextTrimming="CharacterEllipsis"/>
+                                            </DockPanel>
+                                        </Border>
+                                        <DataTemplate.Triggers>
+                                            <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="{DynamicResource SurfaceHover}"/>
+                                                <Setter TargetName="ChannelName" Property="Foreground" Value="{DynamicResource Text}"/>
+                                            </Trigger>
+                                            <DataTrigger Binding="{Binding HasUnread}" Value="True">
+                                                <Setter TargetName="ChannelName" Property="Foreground" Value="{DynamicResource Text}"/>
+                                                <Setter TargetName="ChannelName" Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="{DynamicResource AccentSoft}"/>
+                                                <Setter TargetName="Hash" Property="Foreground" Value="{DynamicResource AccentText}"/>
+                                                <Setter TargetName="ChannelName" Property="Foreground" Value="{DynamicResource AccentText}"/>
+                                                <Setter TargetName="ChannelName" Property="FontWeight" Value="SemiBold"/>
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <DockPanel Margin="8,16,0,4">
+                                <Button DockPanel.Dock="Right" Style="{StaticResource ChannelAddButton}" ToolTip="Criar canal de voz" Click="CreateVoice_Click"/>
+                                <TextBlock Style="{StaticResource ChannelCategory}" Text="CANAIS DE VOZ"/>
+                            </DockPanel>
+                            <ItemsControl x:Name="VoiceChannelList" Focusable="False">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Margin="0,1,0,0">
+                                            <Border x:Name="Row" CornerRadius="8" Height="34" Padding="9,0,8,0" Background="Transparent" Cursor="Hand"
+                                                    ToolTip="{Binding Hint}" MouseLeftButtonUp="VoiceChannel_MouseLeftButtonUp" MouseRightButtonUp="VoiceChannel_MouseRightButtonUp">
+                                                <DockPanel>
+                                                    <TextBlock DockPanel.Dock="Right" Text="{Binding CountText}" Style="{StaticResource Caption}" VerticalAlignment="Center" Margin="6,0,0,0"/>
+                                                    <TextBlock x:Name="Glyph" Style="{StaticResource Icon}" Text="&#xE767;" FontSize="15" Width="16" Foreground="{DynamicResource TextSubtle}"/>
+                                                    <TextBlock x:Name="ChannelName" Text="{Binding Name}" FontSize="14" Margin="8,0,0,0" VerticalAlignment="Center"
+                                                               Foreground="{DynamicResource TextMuted}" TextTrimming="CharacterEllipsis"/>
+                                                </DockPanel>
+                                            </Border>
+                                            <ItemsControl ItemsSource="{Binding Members}" Margin="22,0,0,3" Focusable="False" ItemTemplate="{StaticResource MemberTemplate}"/>
+                                        </StackPanel>
+                                        <DataTemplate.Triggers>
+                                            <Trigger SourceName="Row" Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Row" Property="Background" Value="{DynamicResource SurfaceHover}"/>
+                                                <Setter TargetName="ChannelName" Property="Foreground" Value="{DynamicResource Text}"/>
+                                            </Trigger>
+                                            <DataTrigger Binding="{Binding HasMembers}" Value="True">
+                                                <Setter TargetName="ChannelName" Property="Foreground" Value="{DynamicResource Text}"/>
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsCurrent}" Value="True">
+                                                <Setter TargetName="Glyph" Property="Foreground" Value="{DynamicResource Success}"/>
+                                                <Setter TargetName="ChannelName" Property="Foreground" Value="{DynamicResource Success}"/>
+                                                <Setter TargetName="ChannelName" Property="FontWeight" Value="SemiBold"/>
+                                                <Setter TargetName="Row" Property="Cursor" Value="Arrow"/>
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <TextBlock Style="{StaticResource Caption}" Margin="10,10,8,0"
+                                       Text="Clique num canal de voz para entrar. Botão direito em alguém muda o volume só para você."/>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </Border>
+
+            <!-- ───────────── Conversa do canal (dá para soltar uma imagem aqui para mandar) ───────────── -->
+            <Border x:Name="ConversationCard" Grid.Column="2" Style="{StaticResource Card}" Margin="0" Padding="0" AllowDrop="True"
                     PreviewDragOver="Conversation_PreviewDragOver" PreviewDrop="Conversation_PreviewDrop">
                 <Grid>
                     <Grid.RowDefinitions>
@@ -31,13 +218,22 @@
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
 
-                    <DockPanel Margin="22,16,18,14">
-                        <Border Style="{StaticResource IconTileCyan}" Width="38" Height="38" CornerRadius="11" TextElement.FontSize="16" VerticalAlignment="Center">
-                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8BD;"/>
-                        </Border>
-                        <StackPanel Margin="14,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="Todo mundo da rede" FontSize="16" FontWeight="SemiBold"/>
-                            <TextBlock x:Name="ConversationInfo" Style="{StaticResource Caption}" Margin="0,2,0,0" Text="As mensagens ficam só enquanto o ScreenFlow está aberto."/>
+                    <DockPanel Margin="20,12,12,11">
+                        <StackPanel DockPanel.Dock="Right" Orientation="Horizontal" VerticalAlignment="Center">
+                            <Border x:Name="ArchivePill" Style="{StaticResource Pill}" Margin="0,0,8,0" Cursor="Hand" Visibility="Collapsed"
+                                    MouseLeftButtonUp="ArchivePill_MouseLeftButtonUp">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Style="{StaticResource Icon}" Text="&#xE753;" FontSize="12" Margin="0,0,7,0"/>
+                                    <TextBlock x:Name="ArchiveText" Text="Guardado na pasta"/>
+                                </StackPanel>
+                            </Border>
+                            <ToggleButton x:Name="PeopleToggle" Style="{StaticResource IconToggle}" Content="&#xE716;" ToolTip="Mostrar ou esconder quem está na rede"
+                                          Click="PeopleToggle_Click"/>
+                        </StackPanel>
+                        <TextBlock Text="#" FontSize="24" Foreground="{DynamicResource TextSubtle}" VerticalAlignment="Center" Margin="2,0,12,3"/>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock x:Name="ChannelTitle" Text="geral" FontSize="16" FontWeight="SemiBold" TextTrimming="CharacterEllipsis"/>
+                            <TextBlock x:Name="ChannelTopic" Style="{StaticResource Caption}" Margin="0,1,0,0" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"/>
                         </StackPanel>
                     </DockPanel>
                     <Border Style="{StaticResource DividerLine}" VerticalAlignment="Bottom"/>
@@ -49,7 +245,7 @@
                                 <DataTemplate>
                                     <Grid x:Name="Row" Margin="0,0,0,0">
                                         <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="70"/>
+                                            <ColumnDefinition Width="66"/>
                                             <ColumnDefinition Width="*"/>
                                         </Grid.ColumnDefinitions>
                                         <Border x:Name="Hover" Grid.ColumnSpan="2" Background="Transparent"/>
@@ -58,7 +254,7 @@
                                                              Colors="{Binding Avatar}" Initial="{Binding Initial}" Photo="{Binding Photo}" TextElement.FontSize="15"/>
                                         <TextBlock x:Name="SideTime" Text="{Binding TimeText}" Style="{StaticResource Caption}" FontSize="11" HorizontalAlignment="Right"
                                                    VerticalAlignment="Top" Margin="0,3,14,0" Visibility="Hidden"/>
-                                        <StackPanel Grid.Column="1" Margin="0,0,24,0">
+                                        <StackPanel Grid.Column="1" Margin="0,0,22,0">
                                             <StackPanel x:Name="Header" Orientation="Horizontal" Margin="0,0,0,1">
                                                 <TextBlock x:Name="AuthorName" Text="{Binding AuthorText}" FontWeight="SemiBold" FontSize="14"/>
                                                 <TextBlock Text="{Binding TimeText}" ToolTip="{Binding FullTimeText}" Style="{StaticResource Caption}" Margin="9,1,0,0" VerticalAlignment="Center"/>
@@ -123,12 +319,13 @@
                         </ItemsControl>
                     </ScrollViewer>
 
-                    <!-- Conversa vazia -->
+                    <!-- Canal vazio -->
                     <StackPanel x:Name="NoMessages" Grid.Row="1" VerticalAlignment="Center" HorizontalAlignment="Center" Margin="24">
                         <Border Style="{StaticResource IconTileCyan}" HorizontalAlignment="Center" Width="56" Height="56" CornerRadius="16" TextElement.FontSize="24">
-                            <TextBlock Style="{StaticResource Icon}" Text="&#xE8F2;"/>
+                            <TextBlock Text="#" FontSize="26" FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,0,0,3"/>
                         </Border>
-                        <TextBlock x:Name="EmptyTitle" Text="Ninguém escreveu nada ainda" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,16,0,4"/>
+                        <TextBlock x:Name="EmptyTitle" Text="Ninguém escreveu nada ainda" FontSize="16" FontWeight="SemiBold" HorizontalAlignment="Center" Margin="0,16,0,4"
+                                   TextAlignment="Center" TextWrapping="Wrap"/>
                         <TextBlock x:Name="EmptyText" Style="{StaticResource Muted}" TextAlignment="Center" MaxWidth="380" HorizontalAlignment="Center"
                                    Text="Mande um oi: a mensagem vai para todo mundo que está com o ScreenFlow aberto na sua rede."/>
                     </StackPanel>
@@ -143,7 +340,7 @@
                     </Button>
 
                     <!-- Escrever -->
-                    <Border Grid.Row="2" BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Padding="18,14,18,12">
+                    <Border Grid.Row="2" BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Padding="16,12,16,10">
                         <StackPanel>
                             <!-- Imagem anexada, antes de mandar -->
                             <Border x:Name="AttachmentPanel" Style="{StaticResource InsetCard}" Padding="10" Margin="0,0,0,10" Visibility="Collapsed">
@@ -163,47 +360,48 @@
                                 </DockPanel>
                             </Border>
                             <DockPanel>
-                                <Button x:Name="SendButton" DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Width="48" MinHeight="46" Height="46" Padding="0"
+                                <Button x:Name="SendButton" DockPanel.Dock="Right" Style="{StaticResource PrimaryButton}" Width="46" MinHeight="44" Height="44" Padding="0"
                                         Margin="10,0,0,0" VerticalAlignment="Bottom" ToolTip="Enviar (Enter)" Click="Send_Click">
                                     <TextBlock Style="{StaticResource Icon}" Text="&#xE724;" FontSize="16"/>
                                 </Button>
-                                <Button x:Name="AttachButton" DockPanel.Dock="Left" Style="{StaticResource IconButton}" Content="&#xEB9F;" Width="46" Height="46"
+                                <Button x:Name="AttachButton" DockPanel.Dock="Left" Style="{StaticResource IconButton}" Content="&#xEB9F;" Width="44" Height="44"
                                         Margin="0,0,10,0" VerticalAlignment="Bottom" BorderBrush="{DynamicResource BorderStrong}" Background="{DynamicResource SurfaceRaised}"
                                         ToolTip="Mandar uma imagem (ou cole com Ctrl+V, ou arraste para cá)" Click="Attach_Click"/>
-                                <TextBox x:Name="Composer" Tag="Escreva para todo mundo da rede…" MinHeight="46" MaxHeight="132" Padding="14,12" AcceptsReturn="True"
+                                <TextBox x:Name="Composer" Tag="Conversar em #geral" MinHeight="44" MaxHeight="132" Padding="14,11" AcceptsReturn="True"
                                          TextWrapping="Wrap" VerticalContentAlignment="Top" MaxLength="500" VerticalScrollBarVisibility="Auto"
                                          PreviewKeyDown="Composer_PreviewKeyDown" TextChanged="Composer_TextChanged"/>
                             </DockPanel>
-                            <DockPanel Margin="2,8,2,0">
+                            <DockPanel Margin="2,7,2,0">
                                 <TextBlock x:Name="CounterText" DockPanel.Dock="Right" Style="{StaticResource Caption}"/>
-                                <TextBlock x:Name="ComposerHint" Style="{StaticResource Caption}" Text="Enter envia · Shift+Enter pula linha · Ctrl+V cola uma imagem"/>
+                                <TextBlock x:Name="ComposerHint" Style="{StaticResource Caption}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap"
+                                           Text="Enter envia · Shift+Enter pula linha · Ctrl+V cola uma imagem"/>
                             </DockPanel>
                         </StackPanel>
                     </Border>
                 </Grid>
             </Border>
 
-            <!-- Quem está na rede -->
-            <Border Grid.Column="2" Style="{StaticResource Card}" Margin="0" Padding="0">
+            <!-- ───────────── Quem está na rede ───────────── -->
+            <Border x:Name="PeopleCard" Grid.Column="4" Style="{StaticResource Card}" Margin="0" Padding="0">
                 <Grid>
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
                         <RowDefinition Height="Auto"/>
                     </Grid.RowDefinitions>
-                    <DockPanel Margin="20,18,18,14">
+                    <DockPanel Margin="18,17,14,15">
                         <Border x:Name="OnlinePill" DockPanel.Dock="Right" Style="{StaticResource Pill}">
                             <StackPanel Orientation="Horizontal">
                                 <Ellipse Width="7" Height="7" Fill="{DynamicResource Success}" Margin="0,0,7,0" VerticalAlignment="Center"/>
-                                <TextBlock x:Name="OnlineText" Text="0 online"/>
+                                <TextBlock x:Name="OnlineText" Text="1 online"/>
                             </StackPanel>
                         </Border>
-                        <TextBlock Text="Na rede" FontSize="16" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                        <TextBlock Text="Na rede" FontSize="15" FontWeight="SemiBold" VerticalAlignment="Center"/>
                     </DockPanel>
                     <Border Style="{StaticResource DividerLine}" VerticalAlignment="Bottom"/>
 
                     <ScrollViewer Grid.Row="1" Style="{StaticResource PageScroll}">
-                        <StackPanel Margin="10,10,10,6">
+                        <StackPanel Margin="8,10,8,6">
                             <!-- Você -->
                             <DockPanel Margin="8,6,8,10">
                                 <controls:AvatarView x:Name="SelfAvatar" Width="36" Height="36" TextElement.FontSize="14" Cursor="Hand"
@@ -221,7 +419,7 @@
                                             <DockPanel>
                                                 <Grid Width="36" Height="36">
                                                     <controls:AvatarView Colors="{Binding Avatar}" Initial="{Binding Initial}" Photo="{Binding Photo}" TextElement.FontSize="14"/>
-                                                    <!-- Bolinha de ao vivo / na voz -->
+                                                    <!-- Bolinha de ao vivo / online -->
                                                     <Border x:Name="StateDot" Width="13" Height="13" CornerRadius="6.5" HorizontalAlignment="Right" VerticalAlignment="Bottom"
                                                             Margin="0,0,-2,-2" BorderThickness="2.5" BorderBrush="{DynamicResource Surface}" Background="{DynamicResource Success}"/>
                                                 </Grid>
@@ -262,7 +460,7 @@
                     </ScrollViewer>
 
                     <!-- Adicionar pelo IP -->
-                    <Border Grid.Row="2" BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Padding="18,14,18,16">
+                    <Border Grid.Row="2" BorderBrush="{DynamicResource Divider}" BorderThickness="0,1,0,0" Padding="16,12,16,14">
                         <StackPanel>
                             <TextBlock Style="{StaticResource Caption}" Text="Não está vendo alguém? Adicione pelo IP do Radmin." Margin="0,0,0,8"/>
                             <DockPanel>
@@ -277,14 +475,14 @@
         </Grid>
 
         <!-- Sala desligada (porta ocupada) -->
-        <Border x:Name="ErrorPanel" Grid.Row="1" Style="{StaticResource Card}" Margin="0" Padding="28" VerticalAlignment="Top" Visibility="Collapsed"
+        <Border x:Name="ErrorPanel" Style="{StaticResource Card}" Margin="0" Padding="28" VerticalAlignment="Top" Visibility="Collapsed"
                 BorderBrush="{DynamicResource AmberSoft}">
             <DockPanel>
                 <Border Style="{StaticResource IconTileAmber}">
                     <TextBlock Style="{StaticResource Icon}" Text="&#xE7BA;"/>
                 </Border>
                 <StackPanel Margin="18,0,0,0">
-                    <TextBlock Style="{StaticResource Heading}" Text="O chat da rede está desligado"/>
+                    <TextBlock Style="{StaticResource Heading}" Text="A sala da rede está desligada"/>
                     <TextBlock x:Name="ErrorText" Style="{StaticResource Muted}" Margin="0,6,0,0"/>
                 </StackPanel>
             </DockPanel>

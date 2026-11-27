@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Shell;
 using ScreenFlow.App.Services;
+using ScreenFlow.Core.Room;
 
 namespace ScreenFlow.App.Windows;
 
@@ -98,6 +99,48 @@ public static class PinDialog
 
         var window = Dialog.Create(Dialog.Usable(owner), "", wrongPin ? "IconTilePink" : "IconTileAmber", $"{host} pede um PIN",
             "Quem está transmitindo protegeu a sessão com um PIN. Peça para essa pessoa e digite aqui.", extra, "Entrar", "Cancelar", null, out var ok);
+        ok.Click += (_, _) => window.DialogResult = true;
+        window.Loaded += (_, _) => box.Focus();
+        return window;
+    }
+}
+
+/// <summary>O nome de um canal novo da sala (1.3.0), com a prévia de como ele vai aparecer na lista.</summary>
+public static class ChannelDialog
+{
+    /// <summary>Null quando a pessoa cancelou.</summary>
+    public static string? Ask(Window? owner, RoomChannelKind kind)
+    {
+        var window = Build(owner, kind, out var box);
+        return window.ShowDialog() == true ? box.Text : null;
+    }
+
+    /// <summary>Monta a janela do canal novo sem abrir (as capturas de tela do CI usam direto).</summary>
+    internal static Window Build(Window? owner, RoomChannelKind kind, out TextBox nameBox)
+    {
+        var text = kind == RoomChannelKind.Text;
+        var box = nameBox = new TextBox { MaxLength = 40, Tag = text ? "ex.: campeonato" : "ex.: Valorant" };
+        var preview = new TextBlock { Style = (Style)Application.Current.FindResource("Caption"), Margin = new Thickness(0, 8, 0, 0) };
+        var extra = new StackPanel();
+        extra.Children.Add(box);
+        extra.Children.Add(preview);
+        var window = Dialog.Create(Dialog.Usable(owner), text ? "" : "", "IconTileCyan", text ? "Criar canal de texto" : "Criar canal de voz",
+            text
+                ? "O canal aparece para todo mundo da sala enquanto você estiver nela. Quem está no ScreenFlow 1.2 ou mais antigo só vê o #geral."
+                : "Quem está no canal só ouve quem está nele, como no Discord. Ele aparece para todo mundo enquanto você estiver na sala (ou enquanto tiver alguém nele).",
+            extra, "Criar canal", "Cancelar", null, out var ok);
+
+        void Update()
+        {
+            var channel = RoomChannels.Create(kind, box.Text);
+            ok.IsEnabled = channel is not null;
+            preview.Text = channel is null
+                ? box.Text.Trim().Length == 0 ? $"Até {RoomChannels.MaxNameLength} letras." : "Use letras ou números."
+                : text ? $"Vai aparecer como #{channel.Name}" : $"Vai aparecer como o canal de voz {channel.Name}";
+        }
+
+        box.TextChanged += (_, _) => Update();
+        Update();
         ok.Click += (_, _) => window.DialogResult = true;
         window.Loaded += (_, _) => box.Focus();
         return window;
