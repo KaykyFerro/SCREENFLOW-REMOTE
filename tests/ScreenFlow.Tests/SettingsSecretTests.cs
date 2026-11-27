@@ -8,8 +8,9 @@ namespace ScreenFlow.Tests;
 
 /// <summary>
 /// (1.5.0) Senhas, PIN e convite nunca mais em texto puro nas configurações, e a atualização da 1.4.1 (o "volume de quem
-/// fala" vira o volume da voz no mixer). Os testes desta classe rodam um de cada vez (o protetor é global).
+/// fala" vira o volume da voz no mixer). Os testes que mexem no protetor (global) rodam um de cada vez, na mesma coleção.
 /// </summary>
+[Collection("Segredos")]
 public class SettingsSecretTests
 {
     /// <summary>Um protetor de teste (no app é o DPAPI do Windows): inverte e embaralha os bytes.</summary>

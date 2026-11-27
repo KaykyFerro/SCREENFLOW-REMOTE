@@ -166,6 +166,9 @@ public sealed class AppSettings
     /// <summary>O último canal de texto aberto e o último canal de voz (o botão Entrar volta para ele).</summary>
     public string? LastTextChannel { get; set; }
     public string? LastVoiceChannel { get; set; }
+
+    /// <summary>(1.5.0) O servidor por rede aberto da última vez (null: a sala da rede).</summary>
+    public Guid? LastServerId { get; set; }
     /// <summary>Volume de cada pessoa na voz, só para você (id da pessoa → 0 a 2; sem a pessoa = 1).</summary>
     public Dictionary<string, double> PeerVolumes { get; set; } = [];
 

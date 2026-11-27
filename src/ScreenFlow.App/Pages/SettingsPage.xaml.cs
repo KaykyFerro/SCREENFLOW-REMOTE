@@ -757,7 +757,7 @@ public partial class SettingsPage : UserControl, IShellPage
         catch (Exception exception)
         {
             Log.Warn($"Teste do microfone: {exception.Message}");
-            MicTestText.Text = RoomService.MicrophoneProblem(exception);
+            MicTestText.Text = RoomServer.MicrophoneProblem(exception);
         }
         finally { MicTestButton.IsEnabled = true; }
     }
@@ -842,7 +842,7 @@ public partial class SettingsPage : UserControl, IShellPage
         catch (Exception exception)
         {
             Log.Warn($"Ouvir o microfone: {exception.Message}");
-            MicMonitorText.Text = RoomService.MicrophoneProblem(exception);
+            MicMonitorText.Text = RoomServer.MicrophoneProblem(exception);
             MicMonitorText.SetResourceReference(TextBlock.ForegroundProperty, "Danger");
         }
         finally

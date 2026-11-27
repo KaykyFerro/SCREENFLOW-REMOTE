@@ -29,10 +29,15 @@ namespace ScreenFlow.Core.Room;
 /// lista de pessoas ou a todo mundo; <see cref="ServerInfo"/> é a sondagem e a resposta do servidor (nome, senha, quantos
 /// estão nele); <see cref="ChannelOp"/> cria, renomeia ou apaga um canal do servidor. Só o servidor entende esses tipos.
 /// </remarks>
+/// <remarks>
+/// 1.5.0: servidores por rede do Radmin. <see cref="PeerList"/> conta quem mais está no servidor (para quem o broadcast
+/// não alcança), <see cref="ChannelTable"/> leva os canais do servidor, <see cref="Direct"/> e <see cref="DirectAck"/> são
+/// o chat privado (cifrado só para a outra pessoa). Só valem dentro de um pacote lacrado.
+/// </remarks>
 public enum RoomPacketType : byte
 {
     Presence = 1, Leave = 2, Chat = 3, ChatAck = 4, Voice = 5, HistoryRequest = 6, BlobRequest = 7, BlobChunk = 8, Sealed = 9, Rekey = 10, Roster = 11,
-    Relay = 12, ServerInfo = 13, ChannelOp = 14,
+    Relay = 12, ServerInfo = 13, ChannelOp = 14, PeerList = 15, ChannelTable = 16, Direct = 17, DirectAck = 18,
 }
 
 [Flags]
@@ -170,7 +175,7 @@ public static partial class RoomPacket
         if (data.Length < HeaderSize) return false;
         if (BinaryPrimitives.ReadUInt16BigEndian(data) != Magic || data[2] != Version) return false;
         type = (RoomPacketType)data[3];
-        if (type is < RoomPacketType.Presence or > RoomPacketType.ChannelOp) return false;
+        if (type is < RoomPacketType.Presence or > RoomPacketType.DirectAck) return false;
         var limit = type switch
         {
             RoomPacketType.Sealed => RoomSeal.MaximumSealedSize,
