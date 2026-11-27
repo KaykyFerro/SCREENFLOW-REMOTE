@@ -40,8 +40,6 @@ UninstallDisplayIcon={app}\{#MyAppExeName}
 UninstallDisplayName={#MyAppName}
 CloseApplications=yes
 RestartApplications=no
-; As VPNs começam desmarcadas a cada instalação (marcar de novo numa atualização não reinstala nem religa nada à toa).
-UsePreviousTasks=no
 
 [Languages]
 Name: "brazilianportuguese"; MessagesFile: "compiler:Languages\BrazilianPortuguese.isl"
@@ -216,8 +214,12 @@ begin
     1: Result := '--entrar-servidor ' + AddressPage.Values[0];
     2: Result := '--modo-servidor';
   end;
-  if WizardIsTaskSelected('tailscale') then Result := Result + ' --instalar-tailscale';
-  if WizardIsTaskSelected('radmin') then Result := Result + ' --instalar-radmin';
+  { Na atualização silenciosa (pelo app), as tarefas lembradas da instalação anterior não pedem para instalar de novo. }
+  if not WizardSilent then
+  begin
+    if WizardIsTaskSelected('tailscale') then Result := Result + ' --instalar-tailscale';
+    if WizardIsTaskSelected('radmin') then Result := Result + ' --instalar-radmin';
+  end;
   Result := Trim(Result);
 end;
 
