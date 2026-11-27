@@ -94,6 +94,27 @@
                                         <ComboBox x:Name="FpsCombo"/>
                                     </StackPanel>
                                 </Grid>
+                                <TextBlock Style="{StaticResource Label}" Text="O que aparece para quem assiste"/>
+                                <Border x:Name="AreaCard" Style="{StaticResource InsetCard}" Margin="0,0,0,10">
+                                    <StackPanel>
+                                        <DockPanel>
+                                            <TextBlock DockPanel.Dock="Left" Style="{StaticResource Icon}" Text="&#xE7B3;" Foreground="{DynamicResource Violet}" VerticalAlignment="Top" Margin="0,2,12,0"/>
+                                            <TextBlock x:Name="AreaSummary" Style="{StaticResource Muted}" FontSize="13" LineHeight="19" TextWrapping="Wrap" Text="Tela inteira, com o cursor."/>
+                                        </DockPanel>
+                                        <WrapPanel Margin="0,10,0,0">
+                                            <Button x:Name="ChooseRegionButton" Style="{StaticResource ChipButton}" Content="Escolher uma parte" Margin="0,0,8,6" Click="ChooseRegion_Click"
+                                                    ToolTip="Arraste por cima da tela para mandar só aquele pedaço. Dá para mudar durante a transmissão."/>
+                                            <Button x:Name="AddMaskButton" Style="{StaticResource ChipButton}" Content="Tapar uma área" Margin="0,0,8,6" Click="AddMask_Click"
+                                                    ToolTip="A área escolhida fica preta para quem assiste (senhas, mensagens, a barra de abas)."/>
+                                            <Button x:Name="ClearAreaButton" Style="{StaticResource ChipButton}" Content="Mostrar tudo de novo" Margin="0,0,8,6" Click="ClearArea_Click"/>
+                                        </WrapPanel>
+                                    </StackPanel>
+                                </Border>
+                                <CheckBox x:Name="CursorToggle" Style="{StaticResource Switch}" Content="Mostrar o cursor do mouse"
+                                          Checked="Area_Changed" Unchecked="Area_Changed"/>
+                                <CheckBox x:Name="MaskNotificationsToggle" Style="{StaticResource Switch}" Content="Tapar as notificações do Windows"
+                                          ToolTip="O canto de baixo à direita, onde aparecem as notificações, fica preto para quem assiste."
+                                          Checked="Area_Changed" Unchecked="Area_Changed"/>
                                 <CheckBox x:Name="CameraWithScreenToggle" Style="{StaticResource Switch}" Content="Mandar a câmera junto"
                                           ToolTip="Quem assiste vê a sua webcam num quadrinho no canto da tela."
                                           Checked="CameraWithScreen_Changed" Unchecked="CameraWithScreen_Changed"/>

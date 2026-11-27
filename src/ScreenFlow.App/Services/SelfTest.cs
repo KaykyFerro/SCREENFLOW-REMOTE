@@ -101,8 +101,64 @@ public static class SelfTest
 
         var roomOk = await RoomTestAsync(Line);
         var soundOk = await PcSoundTestAsync(Line);
-        Line(ok && roomOk && soundOk ? "PASSOU: tudo certo." : "FALHOU: veja as linhas acima.");
-        return (ok && roomOk && soundOk, report.ToString());
+        var cropOk = CaptureCropTest(Line);
+        Line(ok && roomOk && soundOk && cropOk ? "PASSOU: tudo certo." : "FALHOU: veja as linhas acima.");
+        return (ok && roomOk && soundOk && cropOk, report.ToString());
+    }
+
+    /// <summary>
+    /// Região e áreas tapadas (1.4.0), na GPU de verdade: uma imagem branca passa pelo corte com uma máscara e a saída é
+    /// lida de volta. O pedaço tapado tem que sair preto e o resto branco, no tamanho da região. Sem GPU, pula.
+    /// </summary>
+    private static bool CaptureCropTest(Action<string> line)
+    {
+        ScreenFlow.Infrastructure.Capture.GpuDevice gpu;
+        try { gpu = ScreenFlow.Infrastructure.Capture.GpuDevice.Create(); }
+        catch (Exception exception)
+        {
+            line($"Corte da captura: pulado, sem GPU com Direct3D 11 ({exception.Message}).");
+            return true;
+        }
+        using (gpu)
+        {
+            try
+            {
+                const int W = 640, H = 360;
+                // Região: a metade da direita; máscara: o quarto de cima à direita da tela (vira a metade de cima da região).
+                var area = new CaptureArea(Region: new RelativeRect(0.5, 0, 0.5, 1), Masks: [new RelativeRect(0.75, 0, 0.25, 0.5)]);
+                using var crop = new ScreenFlow.Infrastructure.Capture.CaptureCrop(gpu, area, W, H);
+                const Vortice.DXGI.Format Bgra = Vortice.DXGI.Format.B8G8R8A8_UNorm;
+                var bind = Vortice.Direct3D11.BindFlags.RenderTarget | Vortice.Direct3D11.BindFlags.ShaderResource;
+                using var source = gpu.CreateTexture(W, H, Bgra, bind);
+                using (var view = gpu.Device.CreateRenderTargetView(source))
+                    gpu.Context.ClearRenderTargetView(view, new Vortice.Mathematics.Color4(1, 1, 1, 1));
+                using var target = gpu.CreateTexture(crop.Width, crop.Height, Bgra, bind);
+                crop.Copy(source, target);
+                using var staging = gpu.CreateTexture(crop.Width, crop.Height, Bgra, Vortice.Direct3D11.BindFlags.None,
+                    Vortice.Direct3D11.ResourceUsage.Staging, Vortice.Direct3D11.CpuAccessFlags.Read);
+                gpu.Context.CopyResource(staging, target);
+                var map = gpu.Context.Map(staging, 0, Vortice.Direct3D11.MapMode.Read);
+                byte Pixel(int x, int y)
+                {
+                    unsafe { return ((byte*)map.DataPointer)[y * map.RowPitch + x * 4 + 1]; } // canal verde
+                }
+                var masked = Pixel(crop.Width * 3 / 4, crop.Height / 4);
+                var visible = Pixel(crop.Width / 4, crop.Height * 3 / 4);
+                var visibleTop = Pixel(crop.Width / 8, crop.Height / 4);
+                gpu.Context.Unmap(staging, 0);
+                var ok = crop.Width == W / 2 && crop.Height == H && masked < 10 && visible > 245 && visibleTop > 245;
+                line(ok
+                    ? $"PASSOU: corte da captura na GPU ({gpu.AdapterName}): saída {crop.Width}x{crop.Height}, a área tapada saiu preta e o resto intacto."
+                    : $"FALHOU: corte da captura: saída {crop.Width}x{crop.Height}, tapado {masked}, visível {visible}/{visibleTop}.");
+                return ok;
+            }
+            catch (Exception exception)
+            {
+                Log.Error("Autoteste do corte da captura", exception);
+                line($"FALHOU: corte da captura com erro: {exception.Message}");
+                return false;
+            }
+        }
     }
 
     /// <summary>

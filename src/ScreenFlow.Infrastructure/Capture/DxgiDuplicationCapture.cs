@@ -14,13 +14,21 @@ public sealed class DxgiDuplicationCapture : ICaptureSource
 {
     private readonly GpuDevice _gpu;
     private readonly string _deviceName;
+    private readonly CaptureArea _area;
     private IDXGIOutputDuplication? _duplication;
+    private CaptureCrop? _crop;
+    private int _sourceWidth;
+    private int _sourceHeight;
 
-    public DxgiDuplicationCapture(GpuDevice gpu, string monitorDeviceName)
+    public DxgiDuplicationCapture(GpuDevice gpu, string monitorDeviceName, CaptureArea? area = null)
     {
         _gpu = gpu;
         _deviceName = monitorDeviceName;
+        _area = area ?? CaptureArea.Default;
         CreateDuplication();
+        _crop = new CaptureCrop(gpu, _area, _sourceWidth, _sourceHeight);
+        Width = _crop.Width;
+        Height = _crop.Height;
         Texture = gpu.CreateTexture(Width, Height, Format.B8G8R8A8_UNorm, BindFlags.RenderTarget | BindFlags.ShaderResource);
     }
 
@@ -43,9 +51,9 @@ public sealed class DxgiDuplicationCapture : ICaptureSource
                 var mode = _duplication.Description.ModeDescription;
                 var newWidth = (int)mode.Width;
                 var newHeight = (int)mode.Height;
-                if (Width != 0 && (newWidth != Width || newHeight != Height)) SizeChanged = true;
-                Width = newWidth;
-                Height = newHeight;
+                if (_sourceWidth != 0 && (newWidth != _sourceWidth || newHeight != _sourceHeight)) SizeChanged = true;
+                _sourceWidth = newWidth;
+                _sourceHeight = newHeight;
                 return;
             }
         }
@@ -76,7 +84,8 @@ public sealed class DxgiDuplicationCapture : ICaptureSource
                 return false; // só o cursor mudou
             }
             using var texture = resource.QueryInterface<ID3D11Texture2D>();
-            _gpu.Context.CopyResource(Texture, texture);
+            if (_crop is { IsWhole: true } && _crop.Width == _sourceWidth && _crop.Height == _sourceHeight) _gpu.Context.CopyResource(Texture, texture);
+            else _crop?.Copy(texture, Texture);
             _duplication.ReleaseFrame();
             return true;
         }
@@ -96,5 +105,6 @@ public sealed class DxgiDuplicationCapture : ICaptureSource
     {
         _duplication?.Dispose();
         Texture.Dispose();
+        _crop?.Dispose();
     }
 }

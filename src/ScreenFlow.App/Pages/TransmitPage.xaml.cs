@@ -10,6 +10,7 @@ using System.Windows.Media.Imaging;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using ScreenFlow.App.Services;
+using ScreenFlow.App.Windows;
 using ScreenFlow.Core;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
@@ -140,6 +141,11 @@ public partial class TransmitPage : UserControl, IShellPage
         AudioToggle.IsChecked = Settings.AudioEnabled;
         FixedQualityToggle.IsChecked = !Settings.AdaptiveQuality;
         CameraWithScreenToggle.IsChecked = Settings.CameraWithScreen;
+        _loadingArea = true;
+        CursorToggle.IsChecked = Settings.CaptureShowCursor;
+        MaskNotificationsToggle.IsChecked = Settings.MaskNotifications;
+        _loadingArea = false;
+        UpdateAreaSummary();
         ApproveToggle.IsChecked = Settings.ApproveEachViewer;
         ViewerControlsToggle.IsChecked = Settings.ViewerControls;
         PinBox.Text = Settings.Pin ?? string.Empty;
@@ -156,6 +162,85 @@ public partial class TransmitPage : UserControl, IShellPage
     }
 
     // ───────────────────────── Modo ─────────────────────────
+
+    // ── O que aparece para quem assiste (1.4.0) ─────────────────────────────────────────────────────────────
+
+    private bool _loadingArea;
+
+    private void Area_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_loadingArea || !IsInitialized) return;
+        Settings.CaptureShowCursor = CursorToggle.IsChecked == true;
+        Settings.MaskNotifications = MaskNotificationsToggle.IsChecked == true;
+        ApplyArea();
+    }
+
+    private void ChooseRegion_Click(object sender, RoutedEventArgs e)
+    {
+        if (PickArea(mask: false) is { } region)
+        {
+            Settings.CaptureRegion = region;
+            // As áreas tapadas são da tela inteira: continuam valendo dentro da parte nova.
+            ApplyArea();
+        }
+    }
+
+    private void AddMask_Click(object sender, RoutedEventArgs e)
+    {
+        if (Settings.CaptureMasks.Count >= CaptureArea.MaxMasks - 1)
+        {
+            _shell.Toast($"Dá para tapar até {CaptureArea.MaxMasks - 1} áreas. Use “Mostrar tudo de novo” para recomeçar.", ToastKind.Warning);
+            return;
+        }
+        if (PickArea(mask: true) is { } mask)
+        {
+            Settings.CaptureMasks.Add(mask);
+            ApplyArea();
+        }
+    }
+
+    private void ClearArea_Click(object sender, RoutedEventArgs e)
+    {
+        Settings.CaptureRegion = null;
+        Settings.CaptureMasks.Clear();
+        ApplyArea();
+    }
+
+    private RelativeRect? PickArea(bool mask)
+    {
+        var source = _session?.Options.Target ?? SourceCombo.SelectedItem as CaptureTarget;
+        if (source is null || source.Kind == CaptureKind.Camera)
+        {
+            _shell.Toast("Escolha um monitor ou uma janela primeiro.", ToastKind.Warning);
+            return null;
+        }
+        var monitor = source.Kind == CaptureKind.Monitor ? _monitors.FirstOrDefault(m => m.DeviceName == source.Id) : null;
+        var owner = Window.GetWindow(this);
+        var existing = mask ? Settings.CaptureAreaNow().Masks ?? [] : Settings.CaptureRegion is { } r ? [r] : [];
+        var picked = AreaPickerWindow.Pick(owner, source, monitor, mask, existing);
+        owner?.Activate();
+        return picked;
+    }
+
+    /// <summary>Salva e, ao vivo, troca a captura na hora (o que estava embaixo de uma área nova para de ir no próximo frame).</summary>
+    private void ApplyArea()
+    {
+        Settings.Normalize();
+        AppServices.Settings.Save();
+        UpdateAreaSummary();
+        if (_session is { HasVideo: true } session && session.Mode == StreamMode.Screen) session.SetCaptureArea(Settings.CaptureAreaNow());
+    }
+
+    private void UpdateAreaSummary()
+    {
+        var area = Settings.CaptureAreaNow();
+        var text = area.Describe();
+        var source = _session?.Options.Target ?? SourceCombo.SelectedItem as CaptureTarget;
+        if (area.Region is not null && source?.Kind == CaptureKind.Window) text += " A parte escolhida é da janela.";
+        AreaSummary.Text = text;
+        ClearAreaButton.Visibility = area.Region is not null || Settings.CaptureMasks.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        ChooseRegionButton.Content = area.Region is null ? "Escolher uma parte" : "Escolher outra parte";
+    }
 
     private void Mode_Checked(object sender, RoutedEventArgs e)
     {
@@ -612,7 +697,8 @@ public partial class TransmitPage : UserControl, IShellPage
                 Settings.PreferredCodec, Settings.PreferredEncoder, hardware.Encoders,
                 mode == StreamMode.AudioOnly || Settings.AudioEnabled, Settings.AudioBitrateKbps, Settings.AdaptiveQuality, Settings.FecGroupSize, Settings.UploadMbps,
                 mode, Settings.MusicBitrateKbps, OverlayCamera: overlay,
-                AudioSeparation: AudioOptions(mode));
+                AudioSeparation: AudioOptions(mode),
+                Area: mode == StreamMode.Screen ? Settings.CaptureAreaNow() : null);
 
             var session = new HostSession(options) { ApprovalHandler = RequestApprovalAsync };
             session.StatusChanged += message => Dispatcher.BeginInvoke(() => StateText.Text = message);

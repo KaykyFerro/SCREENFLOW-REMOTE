@@ -42,7 +42,8 @@ public sealed record HostOptions(
     int MusicBitrateKbps = 256,
     Func<AudioProfile, IAudioSource>? AudioSourceFactory = null,
     CameraOverlay? OverlayCamera = null,
-    SystemAudioOptions? AudioSeparation = null);
+    SystemAudioOptions? AudioSeparation = null,
+    CaptureArea? Area = null);
 
 /// <summary>Câmera junto com a tela: vai numa segunda faixa de vídeo e aparece num quadrinho por cima da tela.</summary>
 public sealed record CameraOverlay(string DeviceId, string Name, int Width, int Height, int Fps);
@@ -71,6 +72,7 @@ public sealed partial class HostSession : IAsyncDisposable
 {
     // Trocado inteiro (é imutável) quando quem transmite muda a qualidade ao vivo.
     private volatile HostOptions _options;
+    private volatile CaptureArea _captureArea = CaptureArea.Default;
     private readonly ConcurrentDictionary<Guid, RemoteViewer> _viewers = new();
     private readonly ConcurrentDictionary<string, (DateTimeOffset Start, int Count)> _failures = new();
     private readonly CancellationTokenSource _cancellation = new();
@@ -116,6 +118,7 @@ public sealed partial class HostSession : IAsyncDisposable
     public HostSession(HostOptions options)
     {
         _options = options;
+        _captureArea = options.Area ?? CaptureArea.Default;
         var bitrate = options.BitrateKbps > 0 ? options.BitrateKbps : Quality.TargetBitrateKbps(options.Resolution, options.Fps, options.PreferredCodec ?? VideoCodec.Hevc);
         _profile = new StreamTarget(bitrate, options.Fps, options.Resolution);
         _target = _profile;
@@ -170,6 +173,16 @@ public sealed partial class HostSession : IAsyncDisposable
 
     public IReadOnlyList<ViewerInfo> Viewers => _viewers.Values.Select(v => v.Info).OrderBy(v => v.Name).ToArray();
     public HostOptions Options => _options;
+
+    /// <summary>O cursor, a região e as áreas tapadas da captura da tela (1.4.0).</summary>
+    public CaptureArea CaptureArea => _captureArea;
+
+    /// <summary>Troca o cursor, a região ou as áreas tapadas ao vivo: a captura é refeita no próximo frame.</summary>
+    public void SetCaptureArea(CaptureArea area)
+    {
+        _captureArea = area;
+        _wake.Set();
+    }
 
     /// <summary>Alguém assistindo tem os controles de quem assiste (1.2.0 ou mais nova).</summary>
     public bool HasRemoteViewers => _viewers.Values.Any(v => v.State == ViewerState.Streaming && v.Remote);
@@ -699,6 +712,7 @@ public sealed partial class HostSession : IAsyncDisposable
         uint frameId = 0;
         var packets = new List<EncodedPacket>(4);
         long lastEncodeUs = 0;
+        CaptureArea? captureArea = null;
 
         void TearDown()
         {
@@ -729,7 +743,8 @@ public sealed partial class HostSession : IAsyncDisposable
                         captureTarget = _options.Target;
                         captureFps = target.Fps;
                         gpu = GpuDevice.Create(_options.Monitor?.DeviceName);
-                        capture = CaptureFactory.Create(gpu, captureTarget, _options.Monitor, captureFps);
+                        captureArea = _captureArea;
+                        capture = CaptureFactory.Create(gpu, captureTarget, _options.Monitor, captureFps, captureArea);
                         _captureBackend = capture.Backend;
                         _sourceSize = (capture.Width, capture.Height);
                     }
@@ -741,7 +756,7 @@ public sealed partial class HostSession : IAsyncDisposable
                     }
                     // Qualidade trocada ao vivo: a câmera muda de formato, e a captura da tela foi aberta com um limite
                     // de FPS (ela entrega no máximo isso), então um FPS maior precisa de uma captura nova.
-                    if (_options.Target != captureTarget || target.Fps > captureFps)
+                    if (_options.Target != captureTarget || target.Fps > captureFps || !ReferenceEquals(_captureArea, captureArea))
                     {
                         Log.Info("Qualidade nova pede outra captura: recriando.");
                         TearDown();

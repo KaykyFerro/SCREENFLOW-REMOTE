@@ -47,6 +47,25 @@ public sealed class AppSettings
     /// <summary>No modo tela, manda a câmera junto (quem assiste vê num quadrinho por cima da tela).</summary>
     public bool CameraWithScreen { get; set; }
 
+    // O que a captura mostra (1.4.0)
+    /// <summary>Mostra o cursor do mouse na transmissão (no DXGI, a captura de reserva, ele nunca aparece).</summary>
+    public bool CaptureShowCursor { get; set; } = true;
+    /// <summary>Só esta parte da tela ou da janela vai para quem assiste. Null = tudo.</summary>
+    public RelativeRect? CaptureRegion { get; set; }
+    /// <summary>Tapa de preto o canto onde o Windows mostra as notificações.</summary>
+    public bool MaskNotifications { get; set; }
+    /// <summary>Outras áreas tapadas de preto (frações da tela ou da janela).</summary>
+    public List<RelativeRect> CaptureMasks { get; set; } = [];
+
+    /// <summary>O cursor, a região e as áreas tapadas para a captura.</summary>
+    public CaptureArea CaptureAreaNow()
+    {
+        var masks = new List<RelativeRect>();
+        if (MaskNotifications) masks.Add(RelativeRect.Notifications);
+        masks.AddRange(CaptureMasks ?? []);
+        return new CaptureArea(CaptureShowCursor, CaptureRegion, masks.Take(CaptureArea.MaxMasks).ToList());
+    }
+
     // Som do PC
     /// <summary>
     /// Separa o som do PC por app (Windows 10 2004 ou mais novo): a voz da rede, os sons do ScreenFlow e os apps de
@@ -197,6 +216,8 @@ public sealed class AppSettings
         if (string.IsNullOrWhiteSpace(MicrophoneId)) MicrophoneId = null;
         if (string.IsNullOrWhiteSpace(SpeakerId)) SpeakerId = null;
         if (string.IsNullOrWhiteSpace(PushToTalkKey) || PushToTalkKey.Length > 32) PushToTalkKey = "F8";
+        CaptureRegion = CaptureRegion?.Clean();
+        CaptureMasks = (CaptureMasks ?? []).Where(m => m is not null).Select(m => m.Clean()).OfType<RelativeRect>().Take(CaptureArea.MaxMasks - 1).ToList();
         VoiceVolume = Math.Clamp(VoiceVolume, 0, 1.5);
         VoiceSensitivity = Math.Clamp(VoiceSensitivity, 0, 1);
         if (!Room.RoomInvite.TryParse(PrivateRoomCode, out _)) PrivateRoomCode = null;

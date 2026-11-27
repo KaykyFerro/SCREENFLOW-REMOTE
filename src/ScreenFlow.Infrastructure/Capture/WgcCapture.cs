@@ -25,29 +25,34 @@ public sealed class WgcCapture : ICaptureSource
     private readonly Direct3D11CaptureFramePool _pool;
     private readonly GraphicsCaptureSession _session;
     private readonly AutoResetEvent _frameReady = new(false);
+    private readonly CaptureCrop _crop;
     private long _lastTimestampUs;
     private bool _disposed;
 
-    public WgcCapture(GpuDevice gpu, nint monitorHandle, nint windowHandle, int fps)
+    public WgcCapture(GpuDevice gpu, nint monitorHandle, nint windowHandle, int fps, CaptureArea? area = null)
     {
+        area ??= CaptureArea.Default;
         _gpu = gpu;
         _item = windowHandle != 0 ? CreateItemForWindow(windowHandle) : CreateItemForMonitor(monitorHandle);
         _item.Closed += (_, _) => { SizeChanged = true; _frameReady.Set(); };
 
         _winrtDevice = CreateWinRtDevice(gpu.Device);
         var size = _item.Size;
-        Width = Math.Max(2, size.Width & ~1);
-        Height = Math.Max(2, size.Height & ~1);
+        _crop = new CaptureCrop(gpu, area, Math.Max(2, size.Width & ~1), Math.Max(2, size.Height & ~1));
+        Width = _crop.Width;
+        Height = _crop.Height;
         Texture = gpu.CreateTexture(Width, Height, Format.B8G8R8A8_UNorm, BindFlags.RenderTarget | BindFlags.ShaderResource);
 
         _pool = Direct3D11CaptureFramePool.CreateFreeThreaded(_winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized, 2, size);
         _pool.FrameArrived += OnFrameArrived;
         _session = _pool.CreateCaptureSession(_item);
-        TrySet(() => _session.IsCursorCaptureEnabled = true);
+        TrySet(() => _session.IsCursorCaptureEnabled = area.ShowCursor);
         TrySet(() => _session.IsBorderRequired = false);              // Windows 11
         TrySet(() => _session.MinUpdateInterval = TimeSpan.FromSeconds(1.0 / Math.Max(30, fps))); // Windows 11 24H2
         _session.StartCapture();
-        Log.Info($"WGC iniciado: {_item.DisplayName} {Width}x{Height}");
+        Log.Info($"WGC iniciado: {_item.DisplayName} {_crop.SourceWidth}x{_crop.SourceHeight}"
+                 + (_crop.IsWhole ? string.Empty : $", saída {Width}x{Height} com {_crop.MaskCount} área(s) tapada(s)")
+                 + (area.ShowCursor ? string.Empty : ", sem cursor"));
     }
 
     public string Backend => "Windows.Graphics.Capture";
@@ -70,7 +75,7 @@ public sealed class WgcCapture : ICaptureSource
         if (_disposed) return;
         using var frame = sender.TryGetNextFrame();
         if (frame is null) return;
-        if (frame.ContentSize.Width != Width && (frame.ContentSize.Width & ~1) != Width || (frame.ContentSize.Height & ~1) != Height)
+        if ((frame.ContentSize.Width & ~1) != _crop.SourceWidth || (frame.ContentSize.Height & ~1) != _crop.SourceHeight)
         {
             SizeChanged = true;
             _frameReady.Set();
@@ -82,7 +87,7 @@ public sealed class WgcCapture : ICaptureSource
         var pointer = access.GetInterface(ref iid);
         using (var texture = new ID3D11Texture2D(pointer))
         {
-            _gpu.Context.CopySubresourceRegion(Texture, 0, 0, 0, 0, texture, 0, new Vortice.Mathematics.Box(0, 0, 0, Width, Height, 1));
+            _crop.Copy(texture, Texture);
         }
         Interlocked.Exchange(ref _lastTimestampUs, MediaClock.NowUs);
         _frameReady.Set();
@@ -136,6 +141,7 @@ public sealed class WgcCapture : ICaptureSource
         try { _pool.Dispose(); } catch { }
         _winrtDevice.Dispose();
         Texture.Dispose();
+        _crop.Dispose();
         _frameReady.Dispose();
     }
 
@@ -159,7 +165,8 @@ public sealed class WgcCapture : ICaptureSource
 public static class CaptureFactory
 {
     /// <summary>Câmera pelo Media Capture; tela por WGC primeiro (inclui cursor e janelas) e DXGI Duplication como reserva.</summary>
-    public static ICaptureSource Create(GpuDevice gpu, ScreenFlow.Core.CaptureTarget target, ScreenFlow.Core.DisplayMonitor? monitor, int fps)
+    /// <param name="area">Cursor, região e áreas tapadas (não vale para a câmera). No DXGI o cursor nunca aparece.</param>
+    public static ICaptureSource Create(GpuDevice gpu, ScreenFlow.Core.CaptureTarget target, ScreenFlow.Core.DisplayMonitor? monitor, int fps, CaptureArea? area = null)
     {
         if (target.Kind == ScreenFlow.Core.CaptureKind.Camera)
             return new CameraCapture(gpu, target.Id, target.Width, target.Height, target.RefreshRateHz > 0 ? target.RefreshRateHz : fps);
@@ -168,8 +175,8 @@ public static class CaptureFactory
             try
             {
                 return target.Kind == ScreenFlow.Core.CaptureKind.Window
-                    ? new WgcCapture(gpu, 0, target.Handle, fps)
-                    : new WgcCapture(gpu, monitor?.Handle ?? 0, 0, fps);
+                    ? new WgcCapture(gpu, 0, target.Handle, fps, area)
+                    : new WgcCapture(gpu, monitor?.Handle ?? 0, 0, fps, area);
             }
             catch (Exception exception)
             {
@@ -178,6 +185,6 @@ public static class CaptureFactory
             }
         }
         if (monitor is null) throw new InvalidOperationException("Captura de janela exige Windows 10 1903 ou mais novo.");
-        return new DxgiDuplicationCapture(gpu, monitor.DeviceName);
+        return new DxgiDuplicationCapture(gpu, monitor.DeviceName, area);
     }
 }
