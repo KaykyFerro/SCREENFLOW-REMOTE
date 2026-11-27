@@ -128,15 +128,32 @@ public class VoiceProcessingTests
     public void Underruns_AreOnlyCountedWhenTheVoiceComesBackRightAway()
     {
         var classifier = new UnderrunClassifier();
-        var t = DateTimeOffset.UnixEpoch;
+        var t = TimeSpan.FromMinutes(1);
         // Fim de uma frase: o buffer esvazia e a próxima fala só vem 2 s depois. Não é falha da rede.
         classifier.Dry(t);
-        Assert.Null(classifier.Wrote(t.AddSeconds(2)));
+        Assert.Null(classifier.Wrote(t + TimeSpan.FromSeconds(2)));
         // Buraco da rede: o buffer esvazia e o pacote atrasado chega 40 ms depois. Isso conta.
-        classifier.Dry(t.AddSeconds(5));
-        Assert.Equal(t.AddSeconds(5), classifier.Wrote(t.AddSeconds(5.04)));
+        classifier.Dry(t + TimeSpan.FromSeconds(5));
+        Assert.Equal(t + TimeSpan.FromSeconds(5), classifier.Wrote(t + TimeSpan.FromSeconds(5.04)));
         // Escrever sem ter esvaziado não conta nada.
-        Assert.Null(classifier.Wrote(t.AddSeconds(6)));
+        Assert.Null(classifier.Wrote(t + TimeSpan.FromSeconds(6)));
+    }
+
+    [Fact]
+    public void GainRamp_MovesSmoothlyAndKeepsStereoTogether()
+    {
+        var samples = Enumerable.Repeat(1f, 200).ToArray(); // 100 quadros estéreo
+        var applied = 1f;
+        GainRamp.Apply(samples, ref applied, 0f, channels: 2);
+        Assert.Equal(0f, applied);
+        Assert.Equal(0f, samples[^1]);
+        Assert.Equal(samples[0], samples[1]); // os dois lados com o mesmo ganho
+        for (var i = 2; i < samples.Length; i += 2) Assert.True(samples[i - 2] - samples[i] <= 0.0101f);
+        // Sem mudança de ganho e em 1: nada muda.
+        var same = new[] { 0.5f, -0.5f };
+        var unity = 1f;
+        GainRamp.Apply(same, ref unity, 1f);
+        Assert.Equal([0.5f, -0.5f], same);
     }
 
     [Fact]
@@ -152,6 +169,10 @@ public class VoiceProcessingTests
             var gain = MixerCurve.Gain(p);
             Assert.True(gain >= previous);
             previous = gain;
+            // O caminho de volta (o volume antigo da voz vira a porcentagem do mixer) cai na mesma porcentagem.
+            Assert.Equal(p, MixerCurve.PercentFor(gain));
         }
+        Assert.Equal(100, MixerCurve.PercentFor(1.5));
+        Assert.Equal(0, MixerCurve.PercentFor(double.NaN));
     }
 }

@@ -351,11 +351,18 @@ public static class SelfTest
             var pictureOk = await WaitAsync(() => filesB.TryGetValue(RoomBlob.IdOf(picture), out var got) && got.AsSpan().SequenceEqual(picture), 20);
             line(pictureOk ? $"Imagem do chat: B baixou {picture.Length / 1024} KB em {started.ElapsedMilliseconds} ms, com o hash conferido." : "FALHOU: a imagem do chat não chegou em B.");
 
-            a.JoinVoice(new ToneVoiceInput());
+            // (1.5.0) A fala com um microfone bem baixo (−37 dBFS, como muitos microfones no Windows): o ganho automático
+            // de A precisa levar a voz para perto de −20 dBFS em B, que é o que corrige a "voz baixa" das versões antigas.
+            a.JoinVoice(new ToneVoiceInput(amplitude: 0.02));
             b.JoinVoice(new ToneVoiceInput());
             var voiceOk = await WaitAsync(() => a.Voice?.FramesDecoded > 50 && b.Voice?.FramesDecoded > 50, 10);
             line($"Voz: A mandou {a.Voice?.FramesSent ?? 0} quadros e tocou {a.Voice?.FramesDecoded ?? 0}; " +
                  $"B mandou {b.Voice?.FramesSent ?? 0} e tocou {b.Voice?.FramesDecoded ?? 0} (recuperados pela cópia: {(a.Voice?.FramesRecovered ?? 0) + (b.Voice?.FramesRecovered ?? 0)}).");
+            var levelOk = await WaitAsync(() => b.Voice?.HeardLevelDb is >= -26 and <= -14, 10);
+            line(levelOk
+                ? $"Volume da voz: A falou baixo (−37 dBFS) e chegou em B a {b.Voice?.HeardLevelDb:0.0} dBFS (alvo −20; o ganho automático de A subiu {a.Voice?.AutoGainDb:+0.0;-0.0} dB)."
+                : $"FALHOU: a voz baixa de A chegou em B a {b.Voice?.HeardLevelDb?.ToString("0.0") ?? "?"} dBFS (o alvo é perto de −20).");
+            voiceOk &= levelOk;
             var peerInVoice = a.Peers.FirstOrDefault()?.Presence.InVoice == true && b.Peers.FirstOrDefault()?.Presence.InVoice == true;
             if (!peerInVoice) line("FALHOU: um não viu o outro entrar na voz.");
             if (!voiceOk) line("FALHOU: a voz não chegou dos dois lados.");

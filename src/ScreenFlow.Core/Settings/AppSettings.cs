@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 using ScreenFlow.Core.Diagnostics;
 using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Room;
+using ScreenFlow.Core.Security;
 
 namespace ScreenFlow.Core.Settings;
 
@@ -91,7 +92,8 @@ public sealed class AppSettings
     public bool KeepStreamVolume { get; set; } = true;
 
     // Segurança
-    public string? Pin { get; set; }
+    /// <summary>O PIN para assistir. Gravado cifrado (1.5.0), em <see cref="PinProtected"/>.</summary>
+    [JsonIgnore] public string? Pin { get; set; }
     /// <summary>
     /// Quem transmite aceita cada pessoa antes de ela ver a tela. Desde a 1.3.0 vem desligado: quem está na rede entra
     /// direto (as configurações antigas são ajustadas uma vez, em <see cref="Migrate"/>).
@@ -133,7 +135,6 @@ public sealed class AppSettings
     public string? InstanceId { get; set; }
     /// <summary>Microfone da voz (id do Windows). Null usa o microfone padrão.</summary>
     public string? MicrophoneId { get; set; }
-    public double VoiceVolume { get; set; } = 1.0;
     public bool VoiceMuted { get; set; }
     public bool VoiceSounds { get; set; } = true;
     /// <summary>(1.4.0) Saída de som da voz da sala (fone, caixa). Null = a padrão do Windows.</summary>
@@ -144,6 +145,20 @@ public sealed class AppSettings
     public string PushToTalkKey { get; set; } = "F8";
     /// <summary>Sensibilidade do microfone: 0 capta só voz alta, 1 capta tudo.</summary>
     public double VoiceSensitivity { get; set; } = 0.6;
+    /// <summary>(1.5.0) Volume do microfone em dB (−12 a +24), aplicado antes do portão de voz e do ajuste automático.</summary>
+    public double MicGainDb { get; set; }
+    /// <summary>(1.5.0) Ajuste automático do volume do microfone: leva a fala ao nível de uma chamada, sem estourar.</summary>
+    public bool VoiceAutoGain { get; set; } = true;
+    /// <summary>(1.5.0) Iguala o volume de quem fala baixo (ou ainda está numa versão antiga) com o de quem fala no nível certo.</summary>
+    public bool VoiceLeveler { get; set; } = true;
+    /// <summary>(1.5.0) Som curto quando chega mensagem no chat ou numa conversa privada (nos Sons do aplicativo).</summary>
+    public bool MessageSounds { get; set; } = true;
+
+    /// <summary>
+    /// (1.5.0) O mixer: o volume da voz (VOIP), o das transmissões e o dos sons do app, cada um de 0 a 100% e com o seu
+    /// mudo. Só mexe no som do ScreenFlow (nunca no volume do Windows) e um não muda os outros.
+    /// </summary>
+    public AudioMixerSettings Mixer { get; set; } = new();
     /// <summary>IPs adicionados à mão na sala (para redes em que o aviso automático não chega).</summary>
     public List<string> RoomPeers { get; set; } = [];
     /// <summary>Canais que você criou (1.3.0): aparecem para todo mundo da sala enquanto você estiver nela.</summary>
@@ -155,8 +170,8 @@ public sealed class AppSettings
     public Dictionary<string, double> PeerVolumes { get; set; } = [];
 
     // Sala privada e moderação (1.4.0). Independentes do PIN e da aprovação para assistir à transmissão.
-    /// <summary>O convite da sala privada em uso (o código "SF1-…"). Null: sala aberta, como nas versões antigas.</summary>
-    public string? PrivateRoomCode { get; set; }
+    /// <summary>O convite da sala privada em uso (o código "SF1-…"). Null: sala aberta. Gravado cifrado (1.5.0).</summary>
+    [JsonIgnore] public string? PrivateRoomCode { get; set; }
     /// <summary>Só para o dono: a sala é só para quem ele aprovou (quem tem o convite e não foi aprovado espera).</summary>
     public bool PrivateRoomApprovedOnly { get; set; }
     /// <summary>Só para o dono: quem ele aprovou (ids da sala).</summary>
@@ -175,14 +190,38 @@ public sealed class AppSettings
     /// Tailscale. Com ":porta" no fim quando o servidor usa outras portas (a do servidor e as duas seguintes).
     /// </summary>
     public string? ServerAddress { get; set; }
-    /// <summary>A senha do servidor em que você entra (se ele tiver uma). No lugar do PIN de quem transmite.</summary>
-    public string? ServerPassword { get; set; }
+    /// <summary>A senha do servidor em que você entra (se ele tiver uma). No lugar do PIN de quem transmite. Gravada cifrada (1.5.0).</summary>
+    [JsonIgnore] public string? ServerPassword { get; set; }
     /// <summary>No servidor, a sua transmissão vai para ele e quem está nele assiste por ele (desligado: direto, como antes).</summary>
     public bool TransmitViaServer { get; set; } = true;
     /// <summary>O nome do servidor quando este PC é o servidor (vazio: o nome do PC).</summary>
     public string? HostedServerName { get; set; }
-    /// <summary>A senha do servidor quando este PC é o servidor (vazio: sem senha, entra quem alcançar o PC).</summary>
-    public string? HostedServerPassword { get; set; }
+    /// <summary>A senha do servidor quando este PC é o servidor (vazio: sem senha, entra quem alcançar o PC). Gravada cifrada (1.5.0).</summary>
+    [JsonIgnore] public string? HostedServerPassword { get; set; }
+
+    // (1.5.0) Os segredos vão cifrados para o arquivo (SecretProtection: no Windows, o DPAPI da sua conta). Até a 1.4.1
+    // iam em texto puro com o próprio nome ("Pin", "ServerPassword"...): esses nomes ainda são lidos, uma vez, na
+    // atualização, e nunca mais gravados.
+    [JsonInclude, JsonPropertyName("PinProtected")]
+    private string? PinProtected { get => SecretProtection.Protect(Pin); set => Pin = SecretProtection.Unprotect(value) ?? Pin; }
+    [JsonInclude, JsonPropertyName("PrivateRoomCodeProtected")]
+    private string? PrivateRoomCodeProtected { get => SecretProtection.Protect(PrivateRoomCode); set => PrivateRoomCode = SecretProtection.Unprotect(value) ?? PrivateRoomCode; }
+    [JsonInclude, JsonPropertyName("ServerPasswordProtected")]
+    private string? ServerPasswordProtected { get => SecretProtection.Protect(ServerPassword); set => ServerPassword = SecretProtection.Unprotect(value) ?? ServerPassword; }
+    [JsonInclude, JsonPropertyName("HostedServerPasswordProtected")]
+    private string? HostedServerPasswordProtected { get => SecretProtection.Protect(HostedServerPassword); set => HostedServerPassword = SecretProtection.Unprotect(value) ?? HostedServerPassword; }
+    [JsonInclude, JsonPropertyName("Pin"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private string? LegacyPin { get => null; set => Pin ??= value; }
+    [JsonInclude, JsonPropertyName("PrivateRoomCode"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private string? LegacyPrivateRoomCode { get => null; set => PrivateRoomCode ??= value; }
+    [JsonInclude, JsonPropertyName("ServerPassword"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private string? LegacyServerPassword { get => null; set => ServerPassword ??= value; }
+    [JsonInclude, JsonPropertyName("HostedServerPassword"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private string? LegacyHostedServerPassword { get => null; set => HostedServerPassword ??= value; }
+    /// <summary>O "volume de quem fala" da 1.4.1 (0 a 1,5): vira o volume da voz no mixer, uma vez (<see cref="Migrate"/>).</summary>
+    [JsonInclude, JsonPropertyName("VoiceVolume"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    private double? LegacyVoiceVolume { get => null; set => _legacyVoiceVolume = value; }
+    private double? _legacyVoiceVolume;
 
     /// <summary>O endereço do servidor configurado, separado em nome e porta (null sem endereço válido).</summary>
     public (string Host, int Port)? ServerEndpoint()
@@ -200,8 +239,8 @@ public sealed class AppSettings
     /// <summary>De que versão são estas configurações (para ajustar padrões antigos uma vez só).</summary>
     public int SettingsVersion { get; set; }
 
-    /// <summary>A versão atual das configurações: 2 é a 1.3.0.</summary>
-    public const int CurrentSettingsVersion = 2;
+    /// <summary>A versão atual das configurações: 2 é a 1.3.0, 3 é a 1.5.0 (o mixer).</summary>
+    public const int CurrentSettingsVersion = 3;
 
     // Configuração automática e atualização
     public bool AutoConfigured { get; set; }
@@ -250,8 +289,10 @@ public sealed class AppSettings
         if (string.IsNullOrWhiteSpace(PushToTalkKey) || PushToTalkKey.Length > 32) PushToTalkKey = "F8";
         CaptureRegion = CaptureRegion?.Clean();
         CaptureMasks = (CaptureMasks ?? []).Where(m => m is not null).Select(m => m.Clean()).OfType<RelativeRect>().Take(CaptureArea.MaxMasks - 1).ToList();
-        VoiceVolume = Math.Clamp(VoiceVolume, 0, 1.5);
         VoiceSensitivity = Math.Clamp(VoiceSensitivity, 0, 1);
+        MicGainDb = Math.Clamp(double.IsFinite(MicGainDb) ? Math.Round(MicGainDb, 1) : 0, VoiceProcessor.MinManualGainDb, VoiceProcessor.MaxManualGainDb);
+        Mixer ??= new AudioMixerSettings();
+        Mixer.Normalize();
         if (!Room.RoomInvite.TryParse(PrivateRoomCode, out _)) PrivateRoomCode = null;
         PrivateRoomApproved = ValidIds(PrivateRoomApproved, Room.RoomPacket.MaxRoster);
         BlockedPeers = ValidIds(BlockedPeers, 200);
@@ -282,12 +323,19 @@ public sealed class AppSettings
 
     /// <summary>
     /// Ajusta, uma vez, configurações salvas por versões antigas: na 1.3.0 entrar na transmissão deixou de pedir a
-    /// aprovação de quem transmite (o padrão antigo era pedir, então quase todo mundo estava com ele ligado sem escolher).
+    /// aprovação de quem transmite (o padrão antigo era pedir, então quase todo mundo estava com ele ligado sem escolher);
+    /// na 1.5.0 o "volume de quem fala" virou o volume da voz no mixer (na curva nova, soa igual).
     /// </summary>
     public bool Migrate()
     {
         if (SettingsVersion >= CurrentSettingsVersion) return false;
         if (SettingsVersion < 2) ApproveEachViewer = false;
+        if (SettingsVersion < 3 && _legacyVoiceVolume is { } voiceVolume && double.IsFinite(voiceVolume))
+        {
+            Mixer ??= new AudioMixerSettings();
+            Mixer.VoipPercent = MixerCurve.PercentFor(voiceVolume);
+        }
+        _legacyVoiceVolume = null;
         SettingsVersion = CurrentSettingsVersion;
         return true;
     }
@@ -300,6 +348,29 @@ public sealed class AppSettings
         => (ids ?? []).Where(id => Guid.TryParseExact(id, "N", out var guid) && guid != Guid.Empty).Distinct(StringComparer.OrdinalIgnoreCase).Take(max).ToList();
 
     private static int ValidPort(int port, int fallback) => port is >= 1024 and <= 65535 ? port : fallback;
+}
+
+/// <summary>
+/// (1.5.0) Os três volumes do mixer. Cada um é um ganho próprio no som do ScreenFlow, misturado só na saída: a voz da
+/// sala (VOIP), o som das transmissões que você assiste e os sons do app (avisos, mensagens de voz, figurinhas).
+/// </summary>
+public sealed class AudioMixerSettings
+{
+    public int VoipPercent { get; set; } = 100;
+    public bool VoipMuted { get; set; }
+    public int StreamsPercent { get; set; } = 100;
+    public bool StreamsMuted { get; set; }
+    public int AppSoundsPercent { get; set; } = 80;
+    public bool AppSoundsMuted { get; set; }
+
+    public void Normalize()
+    {
+        VoipPercent = Math.Clamp(VoipPercent, 0, 100);
+        StreamsPercent = Math.Clamp(StreamsPercent, 0, 100);
+        AppSoundsPercent = Math.Clamp(AppSoundsPercent, 0, 100);
+    }
+
+    public AudioMixerSettings Copy() => (AudioMixerSettings)MemberwiseClone();
 }
 
 public sealed class SettingsStore

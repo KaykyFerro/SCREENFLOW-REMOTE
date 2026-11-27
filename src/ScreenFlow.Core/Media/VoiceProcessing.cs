@@ -288,13 +288,13 @@ public sealed class PeakLimiter(int sampleRate, float ceiling = VoiceProcessor.C
 public sealed class UnderrunClassifier(TimeSpan? window = null)
 {
     private readonly TimeSpan _window = window ?? TimeSpan.FromMilliseconds(120);
-    private DateTimeOffset? _dryAt;
+    private TimeSpan? _dryAt;
 
-    /// <summary>O buffer esvaziou agora.</summary>
-    public void Dry(DateTimeOffset now) => _dryAt ??= now;
+    /// <summary>O buffer esvaziou agora (no relógio de mídia).</summary>
+    public void Dry(TimeSpan now) => _dryAt ??= now;
 
     /// <summary>Chegou som de novo. Devolve o momento da falha quando o buffer vazio era um buraco da rede.</summary>
-    public DateTimeOffset? Wrote(DateTimeOffset now)
+    public TimeSpan? Wrote(TimeSpan now)
     {
         if (_dryAt is not { } dry) return null;
         _dryAt = null;
@@ -310,12 +310,48 @@ public sealed class UnderrunClassifier(TimeSpan? window = null)
 /// </summary>
 public static class MixerCurve
 {
-    private const double Exponent = 1.66;
+    public const double Exponent = 1.66;
 
     public static float Gain(int percent, bool muted = false)
     {
         if (muted || percent <= 0) return 0f;
         if (percent >= 100) return 1f;
         return (float)Math.Pow(percent / 100.0, Exponent);
+    }
+
+    /// <summary>A porcentagem que dá o mesmo volume que um ganho linear antigo (acima de 1 fica em 100%).</summary>
+    public static int PercentFor(double gain)
+    {
+        if (!double.IsFinite(gain) || gain <= 0) return 0;
+        if (gain >= 1) return 100;
+        return (int)Math.Round(100 * Math.Pow(gain, 1 / Exponent));
+    }
+}
+
+/// <summary>
+/// (1.5.0) Muda um ganho em rampa ao longo de um trecho de áudio (intercalado com <c>channels</c> canais): mexer num
+/// volume, ensurdecer ou mudar o mixer nunca dá um degrau (estalo) no som.
+/// </summary>
+public static class GainRamp
+{
+    /// <summary>Multiplica o trecho por um ganho que vai de <paramref name="applied"/> até <paramref name="target"/>.</summary>
+    public static void Apply(Span<float> samples, ref float applied, float target, int channels = 1)
+    {
+        channels = Math.Max(1, channels);
+        var frames = samples.Length / channels;
+        if (frames == 0) return;
+        var start = applied;
+        applied = target;
+        if (Math.Abs(target - start) < 1e-6f)
+        {
+            if (Math.Abs(target - 1f) < 1e-6f) return;
+            for (var i = 0; i < frames * channels; i++) samples[i] *= target;
+            return;
+        }
+        for (var f = 0; f < frames; f++)
+        {
+            var gain = start + (target - start) * (f + 1) / frames;
+            for (var c = 0; c < channels; c++) samples[f * channels + c] *= gain;
+        }
     }
 }

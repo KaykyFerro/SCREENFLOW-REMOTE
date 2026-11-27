@@ -51,7 +51,19 @@ public static class AppServices
         ? System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ScreenFlow-exemplo", "imagens")
         : System.IO.Path.Combine(AppInfo.DataDirectory, "imagens"));
 
-    public static void Initialize(string? settingsPath = null) => Settings = settingsPath is null ? new SettingsStore() : new SettingsStore(settingsPath);
+    public static void Initialize(string? settingsPath = null)
+    {
+        // (1.5.0) Senhas, PIN e convites vão cifrados para o arquivo (DPAPI desta conta do Windows), nunca em texto puro.
+        Core.Security.SecretProtection.Register(new Infrastructure.Security.WindowsSecretProtector());
+        Settings = settingsPath is null ? new SettingsStore() : new SettingsStore(settingsPath);
+        AudioMixer.Apply(Settings.Current.Mixer);
+        AppSoundPlayer.Shared.SpeakerId = Settings.Current.SpeakerId;
+        Settings.Saved += settings =>
+        {
+            AudioMixer.Apply(settings.Mixer);
+            AppSoundPlayer.Shared.SpeakerId = settings.SpeakerId;
+        };
+    }
 
     /// <summary>Detecção de hardware em segundo plano (abre encoders de verdade, leva ~1–2 s).</summary>
     public static Task<HardwareProfile> Hardware => _hardware ??= DemoMode ? Task.FromResult(DemoData.Hardware) : Task.Run(() => HardwareDetector.Detect());

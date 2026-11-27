@@ -181,8 +181,11 @@ public sealed class RoomService
             MicrophoneId = settings.MicrophoneId,
             SpeakerId = settings.SpeakerId,
             PushToTalk = settings.PushToTalk,
-            Volume = (float)settings.VoiceVolume,
+            // (1.5.0) O volume da voz é o "VOIP" do mixer (AudioMixer); a sala fica em 100%.
             Sensitivity = settings.VoiceSensitivity,
+            MicGainDb = settings.MicGainDb,
+            AutoGain = settings.VoiceAutoGain,
+            Leveler = settings.VoiceLeveler,
             SoundsEnabled = settings.VoiceSounds,
             // Quem pede um arquivo que este PC tem (a sua foto, uma imagem do chat) recebe daqui.
             BlobSource = blobs.Get,
@@ -260,8 +263,10 @@ public sealed class RoomService
         ProfileChanged?.Invoke();
         if (_archiveApplied != (settings.ChatArchiveEnabled, settings.ChatArchiveFolder)) _ = UpdateArchiveAsync();
         if (_room is not { } room) return;
-        room.Volume = (float)settings.VoiceVolume;
         room.Sensitivity = settings.VoiceSensitivity;
+        room.MicGainDb = settings.MicGainDb;
+        room.AutoGain = settings.VoiceAutoGain;
+        room.Leveler = settings.VoiceLeveler;
         room.SoundsEnabled = settings.VoiceSounds;
         room.CreatedChannels = settings.MyChannels;
         var avatar = SelfAvatarRef();

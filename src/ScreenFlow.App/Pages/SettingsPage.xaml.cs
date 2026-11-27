@@ -43,6 +43,10 @@ public partial class SettingsPage : UserControl, IShellPage
     private readonly MainWindow _shell;
     private readonly DispatcherTimer _micTimer = new() { Interval = TimeSpan.FromMilliseconds(60) };
     private readonly VoiceGate _micGate = new();
+    /// <summary>(1.5.0) O tratamento da voz no teste do microfone (só o volume do microfone, antes do portão).</summary>
+    private readonly VoiceProcessor _micProcessor = new();
+    /// <summary>(1.5.0) O tratamento completo no "Ouvir meu microfone": você ouve a sua voz como ela sai para os outros.</summary>
+    private VoiceProcessor? _monitorProcessor;
     private IVoiceInput? _micTest;
     private MicrophoneInput? _monitorInput;
     private MicrophoneMonitor? _monitor;
@@ -185,8 +189,13 @@ public partial class SettingsPage : UserControl, IShellPage
         _pushToTalkKey = s.PushToTalkKey;
         ShowPushToTalkKey();
         SensitivitySlider.Value = s.VoiceSensitivity;
-        VoiceVolumeSlider.Value = s.VoiceVolume;
+        MicGainSlider.Value = s.MicGainDb;
+        AutoGainToggle.IsChecked = s.VoiceAutoGain;
+        LevelerToggle.IsChecked = s.VoiceLeveler;
+        lock (_micProcessor) _micProcessor.ManualGainDb = s.MicGainDb;
         VoiceSoundsToggle.IsChecked = s.VoiceSounds;
+        MessageSoundsToggle.IsChecked = s.MessageSounds;
+        MixerControls.Refresh();
         UpdateVoiceLabels();
         UpdateArchiveCard();
         UpdatePrivateRoomCard();
@@ -273,8 +282,11 @@ public partial class SettingsPage : UserControl, IShellPage
         s.PushToTalk = PushToTalkToggle.IsChecked == true;
         s.PushToTalkKey = _pushToTalkKey;
         s.VoiceSensitivity = SensitivitySlider.Value;
-        s.VoiceVolume = VoiceVolumeSlider.Value;
+        s.MicGainDb = MicGainSlider.Value;
+        s.VoiceAutoGain = AutoGainToggle.IsChecked == true;
+        s.VoiceLeveler = LevelerToggle.IsChecked == true;
         s.VoiceSounds = VoiceSoundsToggle.IsChecked == true;
+        s.MessageSounds = MessageSoundsToggle.IsChecked == true;
         var theme = ThemeCombo.Value<AppTheme>();
         s.Theme = theme;
         s.ServerRole = role;
@@ -673,7 +685,24 @@ public partial class SettingsPage : UserControl, IShellPage
         UpdateVoiceLabels();
     }
 
-    private void VoiceVolume_Changed(object sender, RoutedPropertyChangedEventArgs<double> e) => UpdateVoiceLabels();
+    /// <summary>(1.5.0) O volume do microfone vale na hora no teste e no "Ouvir meu microfone"; na voz, depois de Salvar.</summary>
+    private void MicGain_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        lock (_micProcessor) _micProcessor.ManualGainDb = e.NewValue;
+        if (_monitorProcessor is { } monitor) lock (monitor) monitor.ManualGainDb = e.NewValue;
+        UpdateVoiceLabels();
+    }
+
+    private void AutoGain_Click(object sender, RoutedEventArgs e)
+    {
+        var on = AutoGainToggle.IsChecked == true;
+        if (_monitorProcessor is { } monitor)
+            lock (monitor)
+            {
+                monitor.AutoGain = on;
+                if (!on) monitor.Reset();
+            }
+    }
 
     private void MicMeter_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateVoiceLabels();
 
@@ -685,7 +714,8 @@ public partial class SettingsPage : UserControl, IShellPage
         if (!IsInitialized) return;
         var sensitivity = SensitivitySlider.Value;
         SensitivityValue.Text = sensitivity switch { < 0.25 => "Só voz alta", < 0.5 => "Baixa", < 0.75 => "Média", < 0.9 => "Alta", _ => "Capta tudo" };
-        VoiceVolumeValue.Text = $"{VoiceVolumeSlider.Value * 100:0}%";
+        var gain = MicGainSlider.Value;
+        MicGainValue.Text = Math.Abs(gain) < 0.5 ? "Normal (0 dB)" : gain > 0 ? $"+{gain:0} dB" : $"{gain:0} dB";
         var threshold = -30 - Math.Clamp(sensitivity, 0, 1) * 30;
         MicThreshold.Margin = new Thickness(Math.Max(0, MeterFraction(threshold) * MicMeter.ActualWidth - 1.5), -4, 0, -4);
     }
@@ -707,9 +737,14 @@ public partial class SettingsPage : UserControl, IShellPage
             {
                 var id = MicrophoneCombo.Value<string?>();
                 var input = await Task.Run(() => new MicrophoneInput(id));
+                var work = new float[VoiceFormat.FrameSamples];
                 input.FrameReady += frame =>
                 {
-                    _micGate.Process(frame);
+                    // Como na voz: o volume do microfone entra antes do portão (a barra mostra o que o portão vê).
+                    var count = Math.Min(frame.Length, work.Length);
+                    frame.AsSpan(0, count).CopyTo(work);
+                    lock (_micProcessor) _micProcessor.ApplyManualGain(work.AsSpan(0, count));
+                    _micGate.Process(work.AsSpan(0, count));
                     _micLevelDb = _micGate.LevelDb;
                 };
                 input.Start();
@@ -761,13 +796,29 @@ public partial class SettingsPage : UserControl, IShellPage
         var id = MicrophoneCombo.Value<string?>();
         try
         {
+            var processor = new VoiceProcessor { ManualGainDb = MicGainSlider.Value, AutoGain = AutoGainToggle.IsChecked == true };
+            var gate = new VoiceGate { Sensitivity = SensitivitySlider.Value };
+            _monitorProcessor = processor;
             var (input, monitor) = await Task.Run(() =>
             {
                 var monitor = new MicrophoneMonitor();
                 try
                 {
                     var input = new MicrophoneInput(id);
-                    input.FrameReady += monitor.Write;
+                    var work = new float[VoiceFormat.FrameSamples];
+                    input.FrameReady += frame =>
+                    {
+                        // O mesmo caminho da voz: volume do microfone, portão e ajuste automático, compressor e limitador.
+                        var count = Math.Min(frame.Length, work.Length);
+                        frame.AsSpan(0, count).CopyTo(work);
+                        lock (processor)
+                        {
+                            processor.ApplyManualGain(work.AsSpan(0, count));
+                            gate.Process(work.AsSpan(0, count));
+                            processor.Process(work.AsSpan(0, count), speech: gate.LevelDb >= gate.ThresholdDb);
+                        }
+                        monitor.Write(work);
+                    };
                     input.Start();
                     return (input, monitor);
                 }
@@ -807,6 +858,7 @@ public partial class SettingsPage : UserControl, IShellPage
         var monitor = _monitor;
         _monitorInput = null;
         _monitor = null;
+        _monitorProcessor = null;
         if (input is not null || monitor is not null)
             _ = Task.Run(() =>
             {

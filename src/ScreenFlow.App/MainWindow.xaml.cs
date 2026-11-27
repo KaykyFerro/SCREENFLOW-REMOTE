@@ -9,6 +9,7 @@ using System.Windows.Media.Effects;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using ScreenFlow.App.Pages;
+using ScreenFlow.App.Controls;
 using ScreenFlow.App.Services;
 using ScreenFlow.App.Windows;
 using ScreenFlow.Core;
@@ -17,6 +18,7 @@ using ScreenFlow.Core.Media;
 using ScreenFlow.Core.Room;
 using ScreenFlow.Core.Settings;
 using ScreenFlow.Core.Updates;
+using ScreenFlow.Infrastructure.Media;
 using ScreenFlow.Infrastructure.Network;
 using ScreenFlow.Infrastructure.Room;
 
@@ -48,6 +50,7 @@ public partial class MainWindow : Window
     private WindowState _restoreState = WindowState.Normal;
     private Action? _balloonAction;
     private DateTimeOffset _lastChatToast;
+    private DateTimeOffset _lastMessageSound;
     private DateTimeOffset _lastChatBalloon;
     private string? _lastArchiveError;
 
@@ -903,10 +906,31 @@ public partial class MainWindow : Window
     /// Mensagem nova com a sala fechada: aviso rápido na janela, ou notificação do Windows com o app escondido. Com a sala
     /// aberta, a bolinha do canal já avisa.
     /// </summary>
+    // ───────────────────────── Mixer rápido (1.5.0) ─────────────────────────
+
+    private void MixerButton_Click(object sender, RoutedEventArgs e)
+    {
+        MixerHost.Content ??= new MixerPanel(compact: true);
+        ((MixerPanel)MixerHost.Content).Refresh();
+        MixerPopup.IsOpen = !MixerPopup.IsOpen;
+    }
+
+    private void MixerMore_Click(object sender, RoutedEventArgs e)
+    {
+        MixerPopup.IsOpen = false;
+        OpenSettings(SettingsTab.Voice);
+    }
+
     private void OnRoomMessage(ChatRow row)
     {
         if (AppServices.Room.IsChatInFront?.Invoke() == true) return;
         var now = DateTimeOffset.UtcNow;
+        // (1.5.0) Som de mensagem nova (no volume "Sons do aplicativo"), no máximo um a cada 2 segundos.
+        if (AppServices.Settings.Current.MessageSounds && now - _lastMessageSound > TimeSpan.FromSeconds(2))
+        {
+            _lastMessageSound = now;
+            AppSoundPlayer.Shared.Play(AppSound.Message);
+        }
         var preview = row.HasImage
             ? (row.HasText ? $"📷 {Preview(row.Text, 100)}" : "📷 mandou uma imagem")
             : Preview(row.Text, 110);

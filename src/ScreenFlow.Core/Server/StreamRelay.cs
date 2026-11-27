@@ -270,7 +270,8 @@ public sealed class StreamRelay : IAsyncDisposable
                 {
                     // (1.5.0) Uma despedida com volta prevista (troca de modo, ou o host pode começar outra) deixa a
                     // transmissão esperando o host voltar, como numa queda: quem assiste entra sozinho na nova.
-                    if (ended && upstream.Farewell is not { CanResume: true }) End(relayed, upstream.Farewell?.Reason ?? "O host encerrou a transmissão.");
+                    // Uma despedida final leva o texto do servidor (o mesmo de antes), não o que o host mandou.
+                    if (ended && upstream.Farewell is not { CanResume: true }) End(relayed, "O host encerrou a transmissão.");
                     else relayed.GoOffline(DateTimeOffset.UtcNow, upstream.Farewell);
                 }
             }
@@ -401,6 +402,8 @@ public sealed class StreamRelay : IAsyncDisposable
             await subscriber.SendAsync(new WelcomeMessage(relayed.HostName, Convert.ToBase64String(salt), MediaPort, relayed.Config,
                 [.. StreamModes.HostFeatures]), token).ConfigureAwait(false);
             subscriber.Streaming = true;
+            // Quem transmite pode ter saído entre a resposta e agora: a pessoa recebe o mesmo aviso dos outros.
+            if (relayed.Upstream is null) relayed.LeftBehind(subscriber);
             relayed.AudienceChanged();
             relayed.SendSnapshot(subscriber);
             relayed.RequestKeyframe(VideoTrack.Main, force: true);
@@ -792,6 +795,10 @@ public sealed class StreamRelay : IAsyncDisposable
         public bool MediaSeek { get; }
         public ulong PacketCounter;
         public volatile bool Streaming;
+        private int _leftBehind;
+
+        /// <summary>Marca que esta pessoa já foi avisada da saída de quem transmite (uma vez só).</summary>
+        public bool TryMarkLeftBehind() => Interlocked.Exchange(ref _leftBehind, 1) == 0;
         public StatsMessage? LastStats { get; set; }
         public RequestLimiter Limiter { get; } = new();
         public RequestDeduper Requests { get; } = new();
@@ -899,17 +906,28 @@ public sealed class StreamRelay : IAsyncDisposable
             lock (_gate)
             {
                 _upstream = null;
+                _farewell = farewell;
                 OfflineSince = now;
             }
-            foreach (var subscriber in Subscribers.Values.Where(s => s.Streaming))
-            {
-                // (1.5.0) Quem entende a despedida com volta mostra "trocando para a festa…" e espera; os outros só
-                // reconectam (como sempre fizeram numa queda).
-                if (farewell is { CanResume: true } && subscriber.Hello.Supports(StreamModes.FeatureFollowHost))
-                    _ = subscriber.SendAsync(farewell, CancellationToken.None).ContinueWith(_ => subscriber.Close(), TaskScheduler.Default);
-                else subscriber.Close();
-            }
+            foreach (var subscriber in Subscribers.Values.Where(s => s.Streaming)) LeftBehind(subscriber);
             Signal();
+        }
+
+        private ByeMessage? _farewell;
+
+        /// <summary>
+        /// Quem transmite saiu e esta pessoa estava assistindo: (1.5.0) quem entende a despedida com volta mostra
+        /// "trocando para a festa…" e espera; os outros só reconectam (como sempre fizeram numa queda). Também é chamado
+        /// para quem acabou de receber a resposta de boas-vindas no mesmo instante em que quem transmite saiu.
+        /// </summary>
+        public void LeftBehind(Subscriber subscriber)
+        {
+            if (!subscriber.TryMarkLeftBehind()) return;
+            ByeMessage? farewell;
+            lock (_gate) farewell = _farewell;
+            if (farewell is { CanResume: true } && subscriber.Hello.Supports(StreamModes.FeatureFollowHost))
+                _ = subscriber.SendAsync(farewell, CancellationToken.None).ContinueWith(_ => subscriber.Close(), TaskScheduler.Default);
+            else subscriber.Close();
         }
 
         public void Ended(string reason)

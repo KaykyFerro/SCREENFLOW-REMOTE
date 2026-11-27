@@ -457,6 +457,43 @@ public sealed partial class NetworkRoom : IAsyncDisposable
         }
     }
 
+    private double _micGainDb;
+    private volatile bool _autoGain = true;
+    private volatile bool _leveler = true;
+
+    /// <summary>(1.5.0) Volume do microfone em dB (−12 a +24). Vale na hora, inclusive com a voz ligada.</summary>
+    public double MicGainDb
+    {
+        get => _micGainDb;
+        set
+        {
+            _micGainDb = value;
+            if (_voice is { } voice) voice.MicGainDb = value;
+        }
+    }
+
+    /// <summary>(1.5.0) Ajuste automático do volume do microfone (leva a fala ao nível de uma chamada).</summary>
+    public bool AutoGain
+    {
+        get => _autoGain;
+        set
+        {
+            _autoGain = value;
+            if (_voice is { } voice) voice.AutoGain = value;
+        }
+    }
+
+    /// <summary>(1.5.0) Iguala o volume de quem chega baixo com o dos outros.</summary>
+    public bool Leveler
+    {
+        get => _leveler;
+        set
+        {
+            _leveler = value;
+            if (_voice is { } voice) voice.Leveler = value;
+        }
+    }
+
     /// <summary>
     /// Entra na voz da rede, no canal <paramref name="channel"/> (null é a "Geral"), com o microfone (ou outra fonte, no
     /// autoteste). Já na voz, só troca de canal. Lança se o microfone não abrir.
@@ -487,7 +524,14 @@ public sealed partial class NetworkRoom : IAsyncDisposable
             input ??= new MicrophoneInput(MicrophoneId);
             try
             {
-                engine = new VoiceEngine(input, _volume, _sensitivity, OutputEnabled, SpeakerId) { Muted = _muted, Deafened = _deafened };
+                engine = new VoiceEngine(input, _volume, _sensitivity, OutputEnabled, SpeakerId)
+                {
+                    Muted = _muted,
+                    Deafened = _deafened,
+                    MicGainDb = _micGainDb,
+                    AutoGain = _autoGain,
+                    Leveler = _leveler,
+                };
                 engine.PushToTalk.Enabled = _pushToTalk;
             }
             catch

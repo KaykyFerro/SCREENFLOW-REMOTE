@@ -5,7 +5,8 @@ using ScreenFlow.Infrastructure.Media;
 namespace ScreenFlow.Infrastructure.Room;
 
 /// <summary>
-/// Voz de um PC na sala: microfone → portão de voz → Opus; e, na volta, um decoder e um buffer por pessoa, todos
+/// Voz de um PC na sala: microfone → ganho do microfone → portão de voz → ganho automático, compressor e limitador
+/// (1.5.0, <see cref="VoiceProcessor"/>) → Opus; e, na volta, um decoder, um nivelador e um buffer por pessoa, todos
 /// mixados numa saída só. Só manda áudio quando tem voz (e não está mudo); cada quadro leva o anterior junto.
 /// </summary>
 public sealed class VoiceEngine : IDisposable
@@ -14,6 +15,9 @@ public sealed class VoiceEngine : IDisposable
     private readonly VoiceEncoder _encoder;
     private readonly VoiceOutput? _output;
     private readonly VoiceGate _gate = new();
+    private readonly VoiceProcessor _processor = new(VoiceFormat.SampleRate);
+    private readonly float[] _work = new float[VoiceFormat.FrameSamples];
+    private volatile bool _leveler = true;
     private readonly Dictionary<Guid, RemoteVoice> _remotes = [];
     private readonly Dictionary<Guid, float> _peerVolumes = [];
     private readonly object _remotesGate = new();
@@ -72,6 +76,37 @@ public sealed class VoiceEngine : IDisposable
         set => _gate.Sensitivity = value;
     }
 
+    /// <summary>(1.5.0) Volume do microfone em dB (−12 a +24), antes do portão de voz.</summary>
+    public double MicGainDb
+    {
+        get => _processor.ManualGainDb;
+        set { lock (_encodeGate) _processor.ManualGainDb = value; }
+    }
+
+    /// <summary>(1.5.0) Ajuste automático do volume do microfone.</summary>
+    public bool AutoGain
+    {
+        get => _processor.AutoGain;
+        set { lock (_encodeGate) _processor.AutoGain = value; }
+    }
+
+    /// <summary>(1.5.0) O ganho que o ajuste automático está usando agora (dB), para as configurações e o diagnóstico.</summary>
+    public double AutoGainDb => _processor.AutoGainDb;
+
+    /// <summary>(1.5.0) Iguala o volume de quem chega baixo (ou numa versão antiga) com o dos outros.</summary>
+    public bool Leveler
+    {
+        get => _leveler;
+        set
+        {
+            _leveler = value;
+            lock (_remotesGate) foreach (var remote in _remotes.Values) remote.Leveler = value;
+        }
+    }
+
+    /// <summary>Quantas vezes o limitador da saída precisou agir (muitas vozes altas juntas).</summary>
+    public long OutputLimited => _output?.LimiterEngaged ?? 0;
+
     /// <summary>Você está falando agora (portão aberto e microfone ligado).</summary>
     public bool IsSpeaking => !_muted && PushToTalk.ShouldSend(_gate.IsOpen, Environment.TickCount64);
 
@@ -88,23 +123,36 @@ public sealed class VoiceEngine : IDisposable
         get { lock (_remotesGate) return _remotes.Values.Sum(r => r.FramesRecovered); }
     }
 
+    /// <summary>(1.5.0) O nível da fala mais alta que está chegando (dBFS), já com o nivelador. Null sem ninguém falando.</summary>
+    public double? HeardLevelDb
+    {
+        get { lock (_remotesGate) return _remotes.Values.Max(r => r.LevelDb); }
+    }
+
     public void Start()
     {
         _input.FrameReady += OnFrame;
         _input.Start();
     }
 
-    private void OnFrame(float[] frame)
+    private void OnFrame(float[] input)
     {
         lock (_encodeGate)
         {
             if (_disposed) return;
+            // O quadro do microfone é do microfone (ele reaproveita o array): o tratamento mexe numa cópia.
+            var count = Math.Min(input.Length, _work.Length);
+            input.AsSpan(0, count).CopyTo(_work);
+            var frame = _work.AsSpan(0, count);
+            _processor.ApplyManualGain(frame);
             var open = PushToTalk.ShouldSend(_gate.Process(frame), Environment.TickCount64);
             if (_muted || !open)
             {
                 _previous = [];
                 return;
             }
+            // Só quadros com voz de verdade (acima do limiar, não o "fim" do portão) ensinam o ganho automático.
+            _processor.Process(frame, speech: _gate.LevelDb >= _gate.ThresholdDb);
             byte[]? data;
             try { data = _encoder.Encode(frame); }
             catch (Exception exception)
@@ -129,7 +177,7 @@ public sealed class VoiceEngine : IDisposable
             if (_disposed) return;
             if (!_remotes.TryGetValue(peer, out remote!))
             {
-                try { remote = new RemoteVoice(_output) { Volume = _peerVolumes.GetValueOrDefault(peer, 1f) }; }
+                try { remote = new RemoteVoice(_output) { Volume = _peerVolumes.GetValueOrDefault(peer, 1f), Leveler = _leveler }; }
                 catch (Exception exception)
                 {
                     Log.Warn($"Não deu para tocar a voz de outra pessoa: {exception.Message}");
@@ -184,6 +232,7 @@ public sealed class VoiceEngine : IDisposable
         private readonly object _gate = new();
         private readonly VoiceOutput? _output;
         private readonly VoiceDecoder _decoder = new();
+        private readonly VoiceLeveler _leveler = new();
         private readonly JitterBuffer? _buffer;
         private uint? _last;
         private bool _disposed;
@@ -197,9 +246,17 @@ public sealed class VoiceEngine : IDisposable
         public long FramesDecoded { get; private set; }
         public long FramesRecovered { get; private set; }
 
+        /// <summary>O nível médio da fala dessa pessoa como ela toca aqui (dBFS), depois do nivelador.</summary>
+        public double? LevelDb { get; private set; }
+
         public float Volume
         {
             set { if (_buffer is not null) _buffer.Volume = value; }
+        }
+
+        public bool Leveler
+        {
+            set { lock (_gate) _leveler.Enabled = value; }
         }
 
         public void Receive(uint sequence, ReadOnlySpan<byte> current, ReadOnlySpan<byte> previous)
@@ -227,6 +284,10 @@ public sealed class VoiceEngine : IDisposable
             var samples = _decoder.Decode(data);
             if (samples.IsEmpty) return;
             FramesDecoded++;
+            _leveler.Process(samples);
+            // O nível da fala que chega (para o autoteste e o diagnóstico): só quadros com som contam.
+            var level = VoiceGate.RmsDb(samples);
+            if (level > -50) LevelDb = LevelDb is { } current ? current * 0.9 + level * 0.1 : level;
             _buffer?.Write(samples);
         }
 

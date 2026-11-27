@@ -1234,7 +1234,8 @@ public partial class TransmitPage : UserControl, IShellPage
             _approvals.Add(pending);
             ApprovalCard.Visibility = Visibility.Visible;
             _shell.Toast($"{request.Name} ({request.Address}) quer entrar.", ToastKind.Info, "Ver pedido", () => _shell.Navigate(this));
-            System.Media.SystemSounds.Asterisk.Play();
+            // (1.5.0) O aviso do ScreenFlow, no volume "Sons do aplicativo" do mixer (antes era o som do Windows).
+            AppSoundPlayer.Shared.Play(AppSound.Alert);
         });
         return pending.Completion.Task.ContinueWith(t =>
         {

@@ -298,7 +298,7 @@ public sealed class MicrophoneMonitor : IDisposable
 {
     private readonly object _gate = new();
     private readonly JitterBuffer _buffer = new(20, 100);
-    private readonly VolumeSampleProvider _volume;
+    private readonly ISampleProvider _volume;
     private readonly float[] _stereo = new float[VoiceFormat.FrameSamples * AudioProfile.Channels];
     private readonly DeviceWatcher _watcher;
     private WasapiOut? _output;
@@ -306,7 +306,9 @@ public sealed class MicrophoneMonitor : IDisposable
 
     public MicrophoneMonitor(float volume = 1f)
     {
-        _volume = new VolumeSampleProvider(_buffer) { Volume = Math.Clamp(volume, 0f, 1.5f) };
+        // (1.5.0) Pelo volume "VOIP" do mixer, como a voz dos outros.
+        _buffer.Volume = Math.Clamp(volume, 0f, 1.5f);
+        _volume = new GainSampleProvider(_buffer, AudioMixer.Voip);
         Open();
         _watcher = new DeviceWatcher(DataFlow.Render, () => Task.Run(() =>
         {
@@ -361,13 +363,14 @@ public sealed class MicrophoneMonitor : IDisposable
 }
 
 /// <summary>Voz de teste: "fala" (um tom com vibrato) por um tempo e fica em silêncio, em ciclo. Usada no autoteste.</summary>
-public sealed class ToneVoiceInput : IVoiceInput
+/// <param name="amplitude">O pico do tom: 0,25 é uma voz normal; 0,02 imita um microfone bem baixo (−37 dBFS).</param>
+public sealed class ToneVoiceInput(double amplitude = 0.25) : IVoiceInput
 {
     private readonly CancellationTokenSource _stop = new();
     private readonly float[] _frame = new float[VoiceFormat.FrameSamples];
     private Thread? _thread;
 
-    public string Description => "voz de teste (tom)";
+    public string Description => amplitude < 0.1 ? "voz de teste (tom baixo)" : "voz de teste (tom)";
     public long FramesProduced { get; private set; }
 
     public event Action<float[]>? FrameReady;
@@ -389,7 +392,7 @@ public sealed class ToneVoiceInput : IVoiceInput
             for (var i = 0; i < _frame.Length; i++)
             {
                 var t = (position + i) / (double)VoiceFormat.SampleRate;
-                _frame[i] = talking ? (float)(0.25 * Math.Sin(2 * Math.PI * (220 + 30 * Math.Sin(2 * Math.PI * 5 * t)) * t)) : 0f;
+                _frame[i] = talking ? (float)(amplitude * Math.Sin(2 * Math.PI * (220 + 30 * Math.Sin(2 * Math.PI * 5 * t)) * t)) : 0f;
             }
             position += _frame.Length;
             FrameReady?.Invoke(_frame);
@@ -492,8 +495,8 @@ internal sealed unsafe class VoiceDecoder : IDisposable
         _frame = ffmpeg.av_frame_alloc();
     }
 
-    /// <summary>Decodifica um quadro e devolve as amostras estéreo (válidas até a próxima chamada).</summary>
-    public ReadOnlySpan<float> Decode(ReadOnlySpan<byte> data)
+    /// <summary>Decodifica um quadro e devolve as amostras estéreo (válidas até a próxima chamada; podem ser ajustadas no lugar).</summary>
+    public Span<float> Decode(ReadOnlySpan<byte> data)
     {
         if (_context is null || data.IsEmpty) return default;
         fixed (byte* pointer = data)
@@ -537,22 +540,23 @@ internal sealed unsafe class VoiceDecoder : IDisposable
 public enum VoiceCue { Join, Leave, Mute, Unmute }
 
 /// <summary>
-/// Saída da voz: cada pessoa tem um buffer de jitter, todos são mixados e tocam por um WASAPI só. Os sons de aviso entram
-/// no mesmo mix. Se a saída padrão do Windows mudar (fone Bluetooth), passa a tocar nela.
+/// Saída da voz: cada pessoa tem um buffer de jitter, todos são mixados e tocam por um WASAPI só. Se a saída padrão do
+/// Windows mudar (fone Bluetooth), passa a tocar nela. (1.5.0) As vozes passam pelo volume "VOIP" do mixer e os sons de
+/// aviso pelo "Sons do aplicativo"; eles só se juntam no fim, num limitador que impede o estouro (clipping) quando
+/// várias pessoas falam alto ao mesmo tempo.
 /// </summary>
 internal sealed class VoiceOutput : IDisposable
 {
     private readonly object _gate = new();
-    // As vozes passam por um ganho próprio (zerado ao ensurdecer); os avisos entram direto no mix final, então o som de
-    // ensurdecer ainda toca.
+    // As vozes passam por um ganho próprio (zerado ao ensurdecer); os avisos não, então o som de ensurdecer ainda toca.
     private readonly MixingSampleProvider _voices = new(WaveFormat.CreateIeeeFloatWaveFormat(VoiceFormat.SampleRate, AudioProfile.Channels)) { ReadFully = true };
+    private readonly MixingSampleProvider _cues = new(WaveFormat.CreateIeeeFloatWaveFormat(VoiceFormat.SampleRate, AudioProfile.Channels)) { ReadFully = true };
     private readonly MixingSampleProvider _mixer = new(WaveFormat.CreateIeeeFloatWaveFormat(VoiceFormat.SampleRate, AudioProfile.Channels)) { ReadFully = true };
-    private readonly VolumeSampleProvider _voiceGain;
-    private readonly VolumeSampleProvider _volume;
+    private readonly LimiterSampleProvider _final;
     private readonly DeviceWatcher _watcher;
     private WasapiOut? _output;
-    private float _level = 1f;
-    private bool _deafened;
+    private volatile float _level = 1f;
+    private volatile bool _deafened;
     private bool _disposed;
 
     private readonly string? _speakerId;
@@ -561,9 +565,10 @@ internal sealed class VoiceOutput : IDisposable
     public VoiceOutput(float volume, string? speakerId = null)
     {
         _speakerId = speakerId;
-        _voiceGain = new VolumeSampleProvider(_voices);
-        _mixer.AddMixerInput(_voiceGain);
-        _volume = new VolumeSampleProvider(_mixer);
+        var voices = new GainSampleProvider(new GainSampleProvider(_voices, () => _deafened ? 0f : 1f), AudioMixer.Voip);
+        _mixer.AddMixerInput(voices);
+        _mixer.AddMixerInput(new GainSampleProvider(_cues, AudioMixer.AppSounds));
+        _final = new LimiterSampleProvider(new GainSampleProvider(_mixer, () => _level));
         Volume = volume;
         Open();
         _watcher = new DeviceWatcher(DataFlow.Render, () => Task.Run(() =>
@@ -578,37 +583,27 @@ internal sealed class VoiceOutput : IDisposable
         }));
     }
 
+    /// <summary>Volume geral desta saída (a sala usa 1; o volume de verdade é o "VOIP" do mixer).</summary>
     public float Volume
     {
         get => _level;
-        set
-        {
-            _level = Math.Clamp(value, 0f, 1.5f);
-            Apply();
-        }
+        set => _level = Math.Clamp(value, 0f, 1.5f);
     }
 
-    /// <summary>Fones desligados (ensurdecer): as vozes param de tocar; só os avisos continuam.</summary>
+    /// <summary>Fones desligados (ensurdecer): as vozes param de tocar (em rampa); só os avisos continuam.</summary>
     public bool Deafened
     {
         get => _deafened;
-        set
-        {
-            _deafened = value;
-            Apply();
-        }
+        set => _deafened = value;
     }
 
-    private void Apply()
-    {
-        _voiceGain.Volume = _deafened ? 0f : 1f;
-        _volume.Volume = _level;
-    }
+    /// <summary>Quantas vezes o limitador do fim precisou agir.</summary>
+    public long LimiterEngaged => _final.Engaged;
 
     private void Open()
     {
         var output = OpenDevice();
-        output.Init(_volume);
+        output.Init(_final);
         output.Play();
         _output = output;
     }
@@ -639,15 +634,15 @@ internal sealed class VoiceOutput : IDisposable
 
     public JitterBuffer AddStream()
     {
-        // Voz em quadros de 20 ms: começa em 40 ms e só cresce se a voz de alguém falhar.
-        var buffer = new JitterBuffer(40, 240);
+        // Voz em quadros de 20 ms: começa em 40 ms e só cresce se a voz de alguém falhar no meio da fala.
+        var buffer = new JitterBuffer(40, 240, talkspurts: true);
         _voices.AddMixerInput(buffer);
         return buffer;
     }
 
     public void RemoveStream(JitterBuffer buffer) => _voices.RemoveMixerInput(buffer);
 
-    public void Play(VoiceCue cue) => _mixer.AddMixerInput(new CueSampleProvider(cue));
+    public void Play(VoiceCue cue) => _cues.AddMixerInput(new CueSampleProvider(cue));
 
     public void Dispose()
     {
@@ -659,6 +654,7 @@ internal sealed class VoiceOutput : IDisposable
             Close();
         }
         _voices.RemoveAllMixerInputs();
+        _cues.RemoveAllMixerInputs();
         _mixer.RemoveAllMixerInputs();
     }
 }

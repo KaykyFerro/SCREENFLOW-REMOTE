@@ -714,27 +714,41 @@ internal sealed class LowLatencyLoopbackCapture() : WasapiCapture(WasapiLoopback
 /// Buffer de reprodução com o menor atraso que a rede deixa (<see cref="PlayoutController"/>): espera juntar o alvo
 /// antes de tocar, volta a juntar depois de um buraco (em vez de estalar), lê 0,5% mais rápido ou mais devagar para
 /// voltar ao alvo sem cortes (inclusive a diferença de relógio entre as placas de som) e só pula de uma vez quando o
-/// atraso passa muito do alvo.
+/// atraso passa muito do alvo. (1.5.0) O som entra e sai com uma rampa de 5 ms (sem estalo quando o buffer esvazia ou
+/// volta), o volume muda em rampa e, na voz (<c>talkspurts</c>), o fim de uma frase não conta como falha da rede.
 /// </summary>
 internal sealed class JitterBuffer : ISampleProvider
 {
     private const int Channels = AudioProfile.Channels;
 
+    /// <summary>Rampa de entrada e de saída do som: 5 ms.</summary>
+    private const int FadeFrames = AudioProfile.SampleRate / 200;
+
     private readonly object _gate = new();
     private readonly float[] _ring;
     private readonly PlayoutController _playout;
+    private readonly UnderrunClassifier? _talkspurts;
     private int _read;
     private int _count;
     private bool _playing;
     private double _fraction;
+    private float _appliedVolume = 1f;
+    private int _fadeIn;
 
-    public JitterBuffer(int minMs, int maxTargetMs)
+    /// <param name="talkspurts">
+    /// Voz: o som só vem enquanto a pessoa fala, então o buffer vazio só conta como falha (e só aumenta o atraso) quando
+    /// o som volta logo em seguida. Sem isso, cada fim de frase somava 10 ms de atraso, até 240 ms numa conversa longa.
+    /// </param>
+    public JitterBuffer(int minMs, int maxTargetMs, bool talkspurts = false)
     {
         _playout = new PlayoutController(minMs, maxTargetMs);
         _ring = new float[Floats(_playout.MaxTargetMs * 3 + 40) + Floats(200)];
+        if (talkspurts) _talkspurts = new UnderrunClassifier();
     }
 
     public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(AudioProfile.SampleRate, AudioProfile.Channels);
+
+    /// <summary>Volume deste som (o de uma pessoa, o do player). Muda em rampa na próxima leitura.</summary>
     public float Volume { get; set; } = 1f;
     public long Underruns { get; private set; }
     public long Skips { get; private set; }
@@ -758,6 +772,12 @@ internal sealed class JitterBuffer : ISampleProvider
     {
         lock (_gate)
         {
+            if (_talkspurts?.Wrote(MediaClock.Now) is { } dryAt)
+            {
+                // O buffer tinha esvaziado no meio da fala (a voz voltou logo): foi a rede, então guarda um pouco mais.
+                Underruns++;
+                _playout.Underrun(dryAt);
+            }
             if (samples.Length > _ring.Length) samples = samples[^_ring.Length..];
             var overflow = _count + samples.Length - _ring.Length;
             if (overflow > 0) Drop(overflow);
@@ -790,6 +810,7 @@ internal sealed class JitterBuffer : ISampleProvider
             _playing = false;
             _fraction = 0;
             _playout.Reset();
+            _talkspurts?.Reset();
         }
     }
 
@@ -809,11 +830,13 @@ internal sealed class JitterBuffer : ISampleProvider
                 }
                 _playing = true;
                 _fraction = 0;
+                _fadeIn = FadeFrames;
             }
 
-            // Lê com interpolação linear na velocidade que o controle pede (1 ± 0,5%).
+            // Lê com interpolação linear na velocidade que o controle pede (1 ± 0,5%), com o volume em rampa.
             var rate = _playout.Update(BufferedMs, now);
-            var volume = Volume;
+            var start = _appliedVolume;
+            var volume = Math.Clamp(Volume, 0f, 4f);
             var frames = count / Channels;
             var written = 0;
             for (; written < frames; written++)
@@ -821,23 +844,42 @@ internal sealed class JitterBuffer : ISampleProvider
                 var available = _count / Channels;
                 if (available < 2) break;
                 var t = (float)_fraction;
+                var gain = start + (volume - start) * (written + 1) / frames;
+                if (_fadeIn > 0)
+                {
+                    gain *= (FadeFrames - _fadeIn + 1) / (float)FadeFrames;
+                    _fadeIn--;
+                }
                 for (var c = 0; c < Channels; c++)
                 {
                     var a = At(0, c);
                     var b = At(1, c);
-                    buffer[offset + written * Channels + c] = (a + (b - a) * t) * volume;
+                    buffer[offset + written * Channels + c] = (a + (b - a) * t) * gain;
                 }
                 _fraction += rate;
                 var advance = (int)_fraction;
                 _fraction -= advance;
                 if (advance > 0) Drop(Math.Min(_count, advance * Channels));
             }
+            _appliedVolume = volume;
             if (written < frames)
             {
+                // Acabou o som: o fim do que tocou desce em rampa (sem estalo) e o resto é silêncio.
+                var fade = Math.Min(written, FadeFrames);
+                for (var i = 0; i < fade; i++)
+                {
+                    var g = (fade - 1 - i) / (float)fade;
+                    var frame = written - fade + i;
+                    for (var c = 0; c < Channels; c++) buffer[offset + frame * Channels + c] *= g;
+                }
                 Array.Clear(buffer, offset + written * Channels, count - written * Channels);
                 _playing = false;
-                Underruns++;
-                _playout.Underrun(now);
+                if (_talkspurts is not null) _talkspurts.Dry(now);
+                else
+                {
+                    Underruns++;
+                    _playout.Underrun(now);
+                }
             }
             return count;
         }
@@ -913,7 +955,8 @@ public sealed unsafe class AudioPlayer : IDisposable
     private void OpenOutput()
     {
         _output = new WasapiOut(AudioClientShareMode.Shared, true, 20);
-        _output.Init(_buffer);
+        // (1.5.0) O volume "Transmissões" do mixer, por cima do volume deste player.
+        _output.Init(new GainSampleProvider(_buffer, AudioMixer.Streams));
         _output.Play();
     }
 
